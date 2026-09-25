@@ -1,0 +1,188 @@
+"""FastAPI entry point. Run: uvicorn app.main:app --reload"""
+from __future__ import annotations
+
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+
+from . import export
+from .db import Database
+from .llm.registry import Registry
+from .materials import MaterialError, MaterialStore
+from .models import AnswerRequest, AskRequest, CategoryRequest, CompanionSettings, MaterialUpdate, ModelConfig, StartSessionRequest
+from .tutor.session import SessionError, TutorService
+
+
+def create_app(db: Database | None = None, registry: Registry | None = None) -> FastAPI:
+    db = db or Database()
+    registry = registry or Registry()
+    saved = db.get_setting("model_config")
+    if saved:
+        registry.update(ModelConfig.model_validate(saved))
+    materials = MaterialStore(db)
+    svc = TutorService(db, registry, materials)
+
+    app = FastAPI(title="Mentor prototype", version="0.1.0")
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    app.state.db, app.state.registry, app.state.svc = db, registry, svc
+
+    @app.exception_handler(SessionError)
+    async def _session_error(_, e: SessionError):
+        status = {"not_found": 404, "completed": 409, "backend_changed": 409, "reading": 409, "not_reading": 409,
+                  "model_unavailable": 502, "invalid_model_output": 502}.get(e.code, 400)
+        return JSONResponse(status_code=status, content={"code": e.code, "detail": e.detail, "turn": e.turn,
+                                                         "retryable": e.code in ("model_unavailable", "invalid_model_output")})
+
+    @app.exception_handler(MaterialError)
+    async def _material_error(_, e: MaterialError):
+        return JSONResponse(status_code=404 if e.code == "not_found" else 400,
+                            content={"code": e.code, "detail": e.detail, "retryable": False})
+
+    @app.get("/api/health")
+    async def health():
+        return {"ok": True, "backend": registry.backend.describe()}
+
+    # -- library ------------------------------------------------------------
+    @app.get("/api/content")
+    async def contents():
+        return [{"id": c["id"], "version": c["version"], "title": c["title"], "description": c.get("description", ""),
+                 "concepts": len(c["concepts"]), "questions": len(c["questions"])} for c in svc.contents.values()]
+
+    @app.get("/api/content/{cid}")
+    async def content(cid: str):
+        if cid not in svc.contents:
+            raise HTTPException(404)
+        return svc.contents[cid]
+
+    @app.get("/api/strategies")
+    async def strategies():
+        return list(svc.strategies.values())
+
+    # -- imported materials ---------------------------------------------------
+    @app.get("/api/library")
+    async def get_library():
+        return {"categories": materials.list_categories(), "materials": materials.list()}
+
+    @app.post("/api/categories")
+    async def create_category(req: CategoryRequest):
+        return materials.create_category(req.name)
+
+    @app.patch("/api/categories/{cid}")
+    async def rename_category(cid: str, req: CategoryRequest):
+        return materials.rename_category(cid, req.name)
+
+    @app.delete("/api/categories/{cid}")
+    async def delete_category(cid: str):
+        materials.delete_category(cid)
+        return {"ok": True}
+
+    @app.post("/api/materials")
+    async def import_material(file: UploadFile = File(...), category_id: str | None = Form(None)):
+        return materials.add(file.filename or "untitled.txt", await file.read(), category_id)
+
+    @app.get("/api/materials/{mid}")
+    async def get_material(mid: str):
+        return materials.get(mid)
+
+    @app.patch("/api/materials/{mid}")
+    async def update_material(mid: str, req: MaterialUpdate):
+        return materials.update(mid, title=req.title, category_id=req.category_id,
+                                set_category="category_id" in req.model_fields_set)
+
+    @app.delete("/api/materials/{mid}")
+    async def delete_material(mid: str):
+        materials.delete(mid)
+        return {"ok": True}
+
+    @app.get("/api/materials/{mid}/file")
+    async def material_file(mid: str):
+        path, m = materials.file_path(mid)
+        if not path.exists():
+            raise HTTPException(404)
+        media = "application/pdf" if m["kind"] == "pdf" else "text/plain; charset=utf-8"
+        return FileResponse(path, media_type=media, content_disposition_type="inline", filename=m["filename"])
+
+    # -- model settings -----------------------------------------------------
+    @app.get("/api/settings")
+    async def get_settings():
+        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe()}
+
+    @app.put("/api/settings")
+    async def put_settings(cfg: ModelConfig):
+        registry.update(cfg)
+        db.set_setting("model_config", cfg.model_dump())
+        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe()}
+
+    @app.get("/api/companions")
+    async def get_companions():
+        return db.get_setting("companions")  # null until first saved; the frontend seeds defaults
+
+    @app.put("/api/companions")
+    async def put_companions(req: CompanionSettings):
+        if req.active not in req.companions:
+            raise HTTPException(400, "active companion has no model config")
+        cfg = req.companions[req.active]
+        registry.update(cfg)
+        db.set_setting("model_config", cfg.model_dump())
+        db.set_setting("companions", req.model_dump())
+        return {"companions": req.model_dump(), "config": cfg.model_dump(), "active": registry.backend.describe()}
+
+    @app.post("/api/settings/check")
+    async def check_settings():
+        return {"active": registry.backend.describe(), "health": await registry.backend.health()}
+
+    # -- sessions -----------------------------------------------------------
+    @app.post("/api/sessions")
+    async def start(req: StartSessionRequest):
+        if req.material_id:
+            if req.start is None or req.end is None:
+                raise MaterialError("bad_range", "請指定學習範圍的起點與終點。")
+            return await svc.start_from_material(req.material_id, req.start, req.end, req.strategy_id)
+        return svc.start(req.content_id, req.strategy_id)
+
+    @app.get("/api/sessions")
+    async def list_sessions():
+        return svc.list()
+
+    @app.get("/api/sessions/{sid}")
+    async def get_session(sid: str):
+        return svc.view(sid)
+
+    @app.post("/api/sessions/{sid}/answer")
+    async def answer(sid: str, req: AnswerRequest, debug_invalid: bool = Query(False, include_in_schema=False)):
+        return await svc.answer(sid, req.answer, debug_force_invalid=debug_invalid)
+
+    # -- 導讀 (guided reading before the questions) --------------------------
+    @app.post("/api/sessions/{sid}/reading/guide")
+    async def reading_guide(sid: str):
+        return await svc.reading_guide(sid)
+
+    @app.post("/api/sessions/{sid}/reading/ask")
+    async def reading_ask(sid: str, req: AskRequest):
+        return await svc.reading_ask(sid, req.question)
+
+    @app.post("/api/sessions/{sid}/reading/next")
+    async def reading_next(sid: str):
+        return await svc.reading_next(sid)
+
+    @app.post("/api/sessions/{sid}/reading/finish")
+    async def reading_finish(sid: str):
+        return await svc.reading_finish(sid)
+
+    @app.post("/api/sessions/{sid}/replay")
+    async def replay(sid: str):
+        return await svc.replay(sid)
+
+    @app.get("/api/sessions/{sid}/export")
+    async def export_session(sid: str, format: str = "json"):
+        view = svc.view(sid).model_dump()
+        if format == "md":
+            return PlainTextResponse(export.to_markdown(view), media_type="text/markdown; charset=utf-8",
+                                     headers={"Content-Disposition": f'attachment; filename="session-{sid}.md"'})
+        return PlainTextResponse(export.to_json(view), media_type="application/json; charset=utf-8",
+                                 headers={"Content-Disposition": f'attachment; filename="session-{sid}.json"'})
+
+    return app
+
+
+app = create_app()

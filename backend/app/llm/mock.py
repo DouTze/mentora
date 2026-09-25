@@ -1,0 +1,147 @@
+"""Simulated backend: keyword rules only. Used to test screens and flow without a model.
+Every result is explicitly marked simulated; it is never used as a fallback for a real backend."""
+from __future__ import annotations
+
+import json
+import re
+import time
+from collections import Counter
+from typing import Any
+
+from .base import LLMBackend, LLMResult
+
+GIVE_UP = ("不知道", "不懂", "不會", "不清楚", "沒想法")
+DENY_CORRELATION = ("沒關係", "無關", "沒有關係", "不相關")
+
+
+class MockBackend(LLMBackend):
+    name = "mock"
+    model = "keyword-rules"
+    simulated = True
+
+    async def generate(self, messages, *, temperature, max_tokens, context_tokens, meta=None) -> LLMResult:
+        t0 = time.perf_counter()
+        meta = meta or {}
+        answer: str = meta.get("student_answer", "")
+        key_terms: list[str] = meta.get("key_terms", [])
+        concept_id = meta.get("concept_id", "")
+        hints: list[str] = meta.get("hints", [])
+        hint_idx = min(meta.get("hint_count", 0), max(len(hints) - 1, 0))
+        next_hint = hints[hint_idx] if hints else "想想有沒有第三個因素同時影響兩者？"
+
+        if meta.get("force_invalid_output"):
+            text = "這不是 JSON"
+        elif meta.get("task") == "generate":
+            text = json.dumps(self._generate(meta.get("range_text", ""), meta.get("reading_questions", [])), ensure_ascii=False)
+        elif meta.get("task") == "guide":
+            text = json.dumps(self._guide(meta.get("quote_text", "")), ensure_ascii=False)
+        elif meta.get("task") == "ask":
+            text = json.dumps({"answer": f"（模擬回答）這段原文提到：{self._first_sentence(meta.get('quote_text', ''))}"
+                                         f"你問的是「{meta.get('question', '')[:40]}」，可以回頭對照這一句。"}, ensure_ascii=False)
+        elif meta.get("task") == "segment":
+            text = json.dumps(self._segment(meta.get("atoms", [])), ensure_ascii=False)
+        elif meta.get("task") == "compact":
+            text = json.dumps(self._compact(meta.get("part_text", "")), ensure_ascii=False)
+        else:
+            j = self._judge(answer, key_terms, next_hint, concept_id)
+            text = json.dumps(j, ensure_ascii=False)
+        latency = int((time.perf_counter() - t0) * 1000)
+        return LLMResult(text=text, latency_ms=latency, usage={"simulated": True}, raw=None)
+
+    @staticmethod
+    def _judge(answer: str, key_terms: list[str], next_hint: str, concept_id: str) -> dict[str, Any]:
+        a = answer.strip()
+        base = {"probe": None, "hint": None, "source_ids": [concept_id]}
+        if len(a) < 4:
+            return {**base, "assessment": "unclear", "reasoning_ok": False,
+                    "evidence": "回答過短，無法判斷", "feedback": "可以多說一點嗎？",
+                    "probe": "你認為這兩件事之間是什麼關係？為什麼？"}
+        if any(k in a for k in GIVE_UP):
+            return {**base, "assessment": "incorrect", "reasoning_ok": False,
+                    "evidence": "學生表示不知道", "feedback": "沒關係，我們一步一步來。", "hint": next_hint}
+        if any(k in a for k in key_terms):
+            return {**base, "assessment": "correct", "reasoning_ok": True,
+                    "evidence": f"學生提到關鍵因素：{[k for k in key_terms if k in a][0]}",
+                    "feedback": f"很好，你提到了關鍵：{[k for k in key_terms if k in a][0]}。"}
+        if any(k in a for k in DENY_CORRELATION):
+            return {**base, "assessment": "correct", "reasoning_ok": False,
+                    "evidence": "學生否認兩者有關聯，但資料顯示確實相關",
+                    "feedback": "結論方向是對的，但理由需要再想想：資料確實顯示兩者一起變動。",
+                    "probe": "如果兩者真的一起變動，那為什麼還不能說是因果？"}
+        if "同意" in a and "不同意" not in a:
+            return {**base, "assessment": "incorrect", "reasoning_ok": False,
+                    "evidence": "學生接受了因果主張", "feedback": "先別急著接受這個結論。", "hint": next_hint}
+        return {**base, "assessment": "partial", "reasoning_ok": False,
+                "evidence": "學生指出兩件事一起發生，但未排除共同原因",
+                "feedback": "你已經找到兩者的關聯，還需要想想其他可能原因。", "hint": next_hint}
+
+    @staticmethod
+    def _first_sentence(text: str) -> str:
+        flat = re.sub(r"\s+", " ", text).strip()
+        return (re.split(r"(?<=[。！？.!?])", flat, maxsplit=1)[0] or flat)[:80]
+
+    @staticmethod
+    def _terms(text: str, n: int = 5) -> list[str]:
+        grams = Counter(m for run in re.findall(r"[\u4e00-\u9fff]{2,}", text) for m in (run[i:i + 2] for i in range(len(run) - 1)))
+        words = Counter(w.lower() for w in re.findall(r"[A-Za-z]{4,}", text))
+        return [t for t, _ in (grams + words).most_common(n)]
+
+    @classmethod
+    def _guide(cls, text: str) -> dict[str, Any]:
+        """Simulated 導讀: restates the paragraph; no understanding involved."""
+        terms = cls._terms(text)
+        first = cls._first_sentence(text)
+        latin = len(re.findall(r"[A-Za-z]", text)) > len(re.findall(r"[\u4e00-\u9fff]", text))
+        return {"chinese_text": f"（模擬中文課文）{first}" if latin else None,
+                "guide": f"（模擬導讀）{first}\n\n請注意這幾個詞：{'、'.join(terms) or '（無）'}。"
+                         f"它們之間的關係，以及成立的條件，是接下來要處理的。",
+                "key_points": [first[:40]] + terms[:2], "check": f"你能用自己的話說出「{first[:20]}」是什麼意思嗎？"}
+
+    @staticmethod
+    def _segment(atoms: list[str]) -> dict[str, Any]:
+        """Simulated 來源單元 planning: one unit per candidate paragraph, a short one joins the previous."""
+        units: list[dict[str, Any]] = []
+        for i, a in enumerate(atoms, 1):
+            if units and len(a) < 60:
+                units[-1]["atoms"].append(i)
+            else:
+                units.append({"atoms": [i], "title": None})
+        return {"units": units}
+
+    @classmethod
+    def _compact(cls, text: str) -> dict[str, Any]:
+        paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip() and not p.startswith("[")]
+        claims = [cls._first_sentence(p) for p in paras][:12]
+        return {"summary": "（模擬精簡筆記）" + " ".join(claims)[:600], "claims": claims, "key_terms": cls._terms(text, 8)}
+
+    @staticmethod
+    def _generate(text: str, reading_questions: list[str] | None = None) -> dict[str, Any]:
+        """Simulated question writer: no understanding, just slices the range and counts frequent terms.
+        Questions the student asked while reading are folded into the first diagnostic prompt."""
+        body = re.sub(r"\[第 \d+ 頁\]", "", text)
+        paras = [re.sub(r"^[#>\-*\s]+", "", p).strip() for p in re.split(r"\n\s*\n|\n(?=#)", body)]
+        paras = [p for p in paras if len(p) >= 2] or [body.strip()]  # short ones are usually headings → titles
+        half = (len(paras) + 1) // 2
+        chunks = [paras] if len(paras) < 4 else [paras[:half], paras[half:]]
+        concepts = []
+        for chunk in chunks:
+            joined = " ".join(chunk)
+            title = re.split(r"[。．.!?！？：:\n]", chunk[0])[0][:20] or "重點"
+            grams = Counter(m for run in re.findall(r"[\u4e00-\u9fff]{2,}", joined) for m in (run[i:i + 2] for i in range(len(run) - 1)))
+            words = Counter(w.lower() for w in re.findall(r"[A-Za-z]{4,}", joined))
+            terms = [t for t, _ in (grams + words).most_common(6)]
+            concepts.append({
+                "title": title, "explanation": joined[:220], "examples": [], "key_terms": terms,
+                "diagnostic": {"prompt": f"（模擬出題）請用自己的話說明「{title}」這段在講什麼，並說明理由。",
+                               "rubric": f"回答需涵蓋原文重點，提到：{'、'.join(terms)}。",
+                               "hints": ["回頭看這段的第一句，它想說明什麼？", f"試著用到這些詞：{'、'.join(terms[:3])}"]},
+                "transfer": {"prompt": f"（模擬出題）請舉一個教材裡沒有的例子，來說明「{title}」。",
+                             "rubric": f"例子需符合原文的概念，並提到：{'、'.join(terms)}。",
+                             "hints": ["想想生活中有沒有類似的情況？", f"你的例子和這些詞有什麼關係：{'、'.join(terms[:3])}"]},
+            })
+        if reading_questions:
+            concepts[0]["diagnostic"]["prompt"] += f"（你在導讀時問過：{reading_questions[0]}）"
+        return {"title": concepts[0]["title"], "concepts": concepts}
+
+    async def health(self) -> dict[str, Any]:
+        return {"ok": True, "simulated": True, "detail": "示範模式：以關鍵字規則模擬模型輸出"}

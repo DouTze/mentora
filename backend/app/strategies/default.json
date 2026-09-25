@@ -1,0 +1,18 @@
+{
+  "id": "rules-v1",
+  "version": "0.1.0",
+  "title": "明確規則版",
+  "description": "依模型的結構化判斷，由程式決定下一步。模型只負責理解與表達。",
+  "max_hints_before_explain": 2,
+  "max_probes_before_hint": 1,
+  "recent_turns_in_context": 4,
+  "prompt_id": "assess",
+  "rules": [
+    {"when": "correct + reasoning_ok", "then": "advance", "note": "答對且理由合理 → 進入新情境題"},
+    {"when": "correct + reasoning flawed", "then": "probe", "note": "答對但理由有誤 → 追問理由、釐清誤解"},
+    {"when": "partial | incorrect", "then": "hint", "note": "答錯或不懂 → 給一個提示再試"},
+    {"when": "hints exhausted", "then": "explain", "note": "連續卡住 → 顯示教材解釋與例子，標記需要複習"},
+    {"when": "unclear", "then": "probe", "note": "模型無法判斷 → 追問，不直接判定學會"},
+    {"when": "transfer solved without hint", "then": "pass", "note": "新情境題獨立完成 → 通過本次驗證"}
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "mentor-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot server.ts",
+    "build": "bun build src/index.html --outdir dist --minify",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "i18n:translate": "bun scripts/i18n-translate.ts"
+  },
+  "dependencies": {
+    "katex": "^0.18.7",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^17.4.4",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/bun": "^1.2.0",
+    "@types/katex": "^0.16.8",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -1,0 +1,15 @@
+# python
+backend/.venv/
+backend/data/
+__pycache__/
+*.pyc
+.pytest_cache/
+# js
+node_modules/
+frontend/dist/
+# models
+backend/models/
+.DS_Store
+# editors
+.idea/
+.vscode/

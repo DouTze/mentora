@@ -1,0 +1,19 @@
+{
+  "name": "mentor-reading-agent",
+  "private": true,
+  "type": "module",
+  "description": "pi-based reading agent: 導讀 / 追問 / 精簡筆記 over a session workspace, reading files through tools",
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.87.0",
+    "@earendil-works/pi-ai": "^0.87.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.8.0"
+  }
+}

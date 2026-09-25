@@ -1,0 +1,8 @@
+{
+  "name": "mentora",
+  "private": true,
+  "scripts": {
+    "dev": "bun scripts/dev.ts",
+    "stop": "bun scripts/stop.ts"
+  }
+}
