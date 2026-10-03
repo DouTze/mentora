@@ -9,6 +9,17 @@ import httpx
 from .base import LLMBackend, LLMError, LLMResult
 
 
+# Ollama 0.35 (qwen3-vl 2b/4b/8b) ignores think:false: the reasoning lands in `thinking`, content stays empty and the
+# JSON-schema `format` is not applied. Ending the conversation with an assistant turn whose thinking block is
+# already closed (what Qwen3's own template emits for enable_thinking=False, as the OpenVINO adapter does) makes
+# Ollama continue that turn: content is the schema-constrained JSON again. Only for Qwen3-family models.
+THINK_PREFILL = "<think>\n\n</think>\n\n"
+
+
+def needs_think_prefill(model: str) -> bool:
+    return model.lower().startswith("qwen3")
+
+
 class OllamaBackend(LLMBackend):
     name = "ollama"
 
@@ -18,6 +29,8 @@ class OllamaBackend(LLMBackend):
         self.timeout = timeout
 
     async def generate(self, messages, *, temperature, max_tokens, context_tokens, meta=None) -> LLMResult:
+        if needs_think_prefill(self.model) and not (messages and messages[-1].get("role") == "assistant"):
+            messages = [*messages, {"role": "assistant", "content": THINK_PREFILL}]
         payload = {
             "model": self.model,
             "messages": messages,

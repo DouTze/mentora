@@ -123,6 +123,7 @@ GET  /api/sessions/{id}/export?format=json|md
 - **Ollama（已實測，macOS／Ollama 0.34）**：`bun run dev` 會順手啟動 Ollama；到「設定 → 伴讀」挑角色、後端選 Ollama、填模型名稱後儲存，再按「檢查連線」。預設沿用 tool-box 的 `http://127.0.0.1:11434`。
   - `qwen3-vl:8b`：建議。出題 10–25 秒、判讀每次 2–5 秒；會照範圍涵蓋多個主題，提示是引導式問句。
   - `qwen3-vl:4b`：快一倍（出題 5–15 秒），但同一範圍有時只出 1 個概念、提示常直接講出答案。
+  - Ollama 0.35 起 qwen3-vl 不理會 `think: false`（推理文字跑進 `thinking`、JSON schema 也失效）；adapter 對 qwen3 系列在訊息最後補一則已關閉 think 區塊的 assistant 訊息，讓輸出恢復成受 schema 約束的 JSON（macOS／Ollama 0.35.1 實測，qwen3-vl:4b 每段導讀約 7 秒）。
   - 呼叫使用 `/api/chat`、`think: false`，`format` 傳 **JSON schema**（不是 `"json"`）：純 JSON 模式下 qwen3-vl:4b 約一半機率卡在重複 token，Ollama 回 500 `token repeat limit reached`；改用 schema 後連續 20 多次出題沒有再發生。qwen3-vl 會把答案放在 `thinking` 欄位、`content` 留空，adapter 兩個都讀。
   - 出題時 `max_tokens` 至少 4096、context 至少 16384（`session.py` 的 `GEN_*`），不受設定視窗較小的數值限制；2048 會把三個概念的 JSON 截斷。
 - **OpenVINO GenAI（macOS CPU 已實測 openvino-genai 2026.4；B70 GPU 尚未實機驗證）**：
