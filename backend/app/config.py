@@ -25,6 +25,10 @@ PI_AGENT_DIR = Path(os.environ.get("MENTOR_PI_AGENT_DIR", APP_DIR.parent.parent 
 READING_PREFETCH = os.environ.get("MENTOR_READING_PREFETCH", "1") != "0"  # 產生目前段落的導讀後，先偷跑下一段
 # 切段：model（由模型依來源單元規則把候選段落組成 quote）| rules（只用規則切法）
 QUOTE_PLANNER = os.environ.get("MENTOR_QUOTE_PLANNER", "model")
+# 學習流程：legacy（session.py 背景工作）| langgraph（app/workflows：可恢復的命令與導讀子流程）。只決定**新** session；
+# 每個 session 建立時記下自己的 runner，之後不受這個設定影響。
+WORKFLOW = os.environ.get("MENTOR_WORKFLOW", "legacy")
+CHECKPOINT_PATH = os.environ.get("MENTOR_CHECKPOINT_PATH", "")   # 預設與業務 DB 同目錄的 checkpoints.sqlite3
 READING_DIR = Path(os.environ.get("MENTOR_READING_DIR", DATA_DIR / "reading"))
 
 GEN_DEFAULTS = {

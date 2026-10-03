@@ -54,6 +54,23 @@ cd frontend && bun install && bun run dev
 
 模型 context 有限，所以範圍在切段之後再分成**部分**（連續段落合計 ≤ `PART_CHARS` 5,000 字）。學生讀完一個部分，後端就把它壓成一份精簡筆記（`backend/data/reading/<session>/parts/part-NN.md`）；超過 `GEN_TEXT_BUDGET`（12,000 字）的範圍出題時只看這些筆記，不再塞原文。一次學習的上限是 60,000 字（`backend/app/materials.py` 的 `MAX_RANGE_CHARS`），限制的是時間而不是 context。切段與筆記都是獨立檔案，放在 `backend/data/reading/<session>/`（`quotes/`、`guides/`、`parts/`）。掃描型 PDF（沒有文字層）目前會被拒絕。學習紀錄會保留每一輪的題目原文、導讀時的每段導讀與提問。
 
+### 新版學習流程（LangGraph，選用）
+
+設 `MENTOR_WORKFLOW=langgraph` 後，**之後新建立**的教材學習改由 `backend/app/workflows/` 執行；預設仍是 `legacy`。每個 session 建立時就記下自己的流程（`workflow_runner`），之後改設定不會影響它。新版流程的差異：
+
+- **切段**：程式先把範圍抽成可追溯的來源區塊（段落、標題、清單項目、整段程式碼、`$$` 公式、跨頁的句子…），模型只回傳區塊編號與理由，正文一律由程式從區塊拼回，不會被模型改寫或漏掉。公式與其引入／where 說明、同一清單、跨頁句子等由程式標示為不可切開；模型的分組不合法時修正一次，仍不合法就退回規則切法。
+- **導讀**：每段依序「分析要點 →（需要時）用唯讀工具查前後文 → 撰寫 → 程式驗證 → 模型對照原文檢查 →（必要時）修訂一次」。公式沒有原樣保留、外文缺中文課文、條件遺漏或無依據主張等重大問題未解決時，草稿**不公開**，畫面顯示可重試的錯誤。每段最多 8 次模型呼叫，每次呼叫都記在 `llm_calls`（`GET /api/sessions/{id}/trace`）。
+- **可恢復**：學生的每個操作是一個帶 `command_id` 的命令，先寫進 SQLite 才回應；後端重啟會接續已受理的命令，同一個命令重送只會套用一次。流程位置存在 `backend/data/checkpoints.sqlite3`（LangGraph checkpoint），學習紀錄仍以 `mentor.sqlite3` 為準。
+- **固定設定**：新 session 保存模型設定與所有提示詞的全文（prompt bundle），之後改設定或改提示詞只影響新 session。
+
+一次只能有一個後端程序執行新版流程（`runner_lease`）；第二個程序可以檢視紀錄，但送出操作會回 503。
+
+重啟與回退：
+
+- 重啟：直接重啟後端即可，啟動時會接續未完成的命令；等待學生操作的 session 不會自己前進，失敗的工作等使用者按「重試」。
+- 回退：把 `MENTOR_WORKFLOW` 改回 `legacy` 只影響之後的新 session；既有 LangGraph session 仍由新版流程服務。若要退回舊版程式，先停掉後端，成對還原備份的 `mentor.sqlite3` 與 `checkpoints.sqlite3`（備份之後的資料會遺失）。不要把升級過的 `mentor.sqlite3` 直接交給舊版程式：舊版建立 session 時用位置式的 `INSERT`，遇到新增欄位會失敗。
+- 備份：停掉後端後，一起複製 `backend/data/mentor.sqlite3`、`checkpoints.sqlite3` 與 `reading/`。
+
 ### 閱讀 agent
 
 導讀、答疑、壓縮筆記三種任務預設由後端自己組提示詞呼叫模型（`MENTOR_READING_AGENT=inproc`）。設 `MENTOR_READING_AGENT=pi` 則交給 `agent/` 裡以 [pi](https://github.com/earendil-works/pi) 為基礎的閱讀 agent：它拿到的是工作區路徑，用 `read_quote`／`read_guide`／`read_compact` 等工具自己讀需要的檔案，再回 JSON 給後端驗證。需要 `cd agent && bun install`，模型設定需為 ollama。細節見 `agent/README.md`。
@@ -62,9 +79,24 @@ cd frontend && bun install && bun run dev
 
 ```bash
 cd backend && .venv/bin/python -m pytest     # e2e 流程：切段／導讀／答疑／分部分壓縮／答對／答錯／理由矛盾／輸出不合法／連線中斷／重啟續接／重跑／匯出
+                                             # 新版流程：來源完整性、adapter 保真、預算、子流程、命令去重、真子 process 崩潰後恢復
 cd frontend && bun test && bun run typecheck  # 畫面測試：以假 fetch 隔離後端
 cd agent && bun run typecheck                 # 閱讀 agent（實際跑需要 Ollama）
 ```
+
+### 導讀品質評估（選用，需要本機模型）
+
+固定教材集與人工評分規則在 `backend/evals/reading/`（`manifest.json`、`RUBRIC.md`）。評估腳本比較舊版與新版流程，結果寫到 `backend/data/evals/`：
+
+```bash
+cd backend
+.venv/bin/python scripts/eval_reading.py baseline  --backend ollama --model qwen3-vl:4b    # 舊版流程
+.venv/bin/python scripts/eval_reading.py candidate --backend ollama --model qwen3-vl:4b    # 新版流程
+.venv/bin/python scripts/eval_reading.py compare data/evals/<A> data/evals/<B>              # 指標對照 + 盲評包
+.venv/bin/python scripts/runtime_smoke.py --backend ollama --model qwen3-vl:4b             # LangChain bridge 最小真模型檢查
+```
+
+`--stages segment` 只評切段（快）；`--cases` 指定教材。腳本只用本機模型，不會下載模型或把教材送到雲端。自動檢查只是信號，品質以 `RUBRIC.md` 的人工盲評為準。
 
 ## 結構
 
@@ -81,7 +113,12 @@ cd agent && bun run typecheck                 # 閱讀 agent（實際跑需要 O
 | `backend/app/tutor/engine.py` | 狀態機：模型判斷 → 規則 → 下一步，純函式 |
 | `backend/app/tutor/session.py` | 組提示詞、驗證結構化輸出、呼叫模型、寫紀錄、重跑 |
 | `backend/app/llm/` | `mock` / `ollama` / `openvino` 三個後端，同一介面 |
-| `backend/app/db.py` | SQLite：sessions（含教材／策略／模型設定快照）、turns、settings |
+| `backend/app/db.py` | SQLite：sessions（含教材／策略／模型設定快照）、turns、settings；`schema_migrations` 依序升級 |
+| `backend/app/llm/langchain_bridge.py`、`runtime.py`、`tasks.py` | LangChain 接到既有 adapter；不可變模型快照、共用呼叫預算、呼叫紀錄；結構化任務與 schema 約束的工具選擇 |
+| `backend/app/reading/` | 新版流程的來源區塊、切段、導讀契約、唯讀工具、prompt bundle |
+| `backend/app/workflows/` | LangGraph 導讀子流程、學習流程、命令驗證、單一 worker runner |
+| `backend/app/persistence/repository.py` | 來源快照、產物、命令、呼叫紀錄與原子提交 |
+| `backend/evals/`、`backend/scripts/eval_reading.py` | 固定教材集、gold labels、評估與盲評 |
 
 ### 流程
 
@@ -114,6 +151,10 @@ GET|PATCH|DELETE /api/materials/{id}       GET /api/materials/{id}/file
 POST /api/sessions   {"material_id","start","end"} 或 {"content_id"}
 GET  /api/sessions   GET /api/sessions/{id}
 POST /api/sessions/{id}/answer   {"answer": "..."}
+POST /api/sessions/{id}/events   {"command_id","type":"guide|ask|next|finish|answer|retry","expected_revision"?,"unit_id"?,"question_id"?,"payload"}
+                                 # 新版流程 session 專用：202 已受理／200 已完成的重送／409 過期或忙碌（附最新 session）
+GET  /api/sessions/{id}/commands/{command_id}   # {status, stage, result, error, retryable}
+GET  /api/sessions/{id}/trace                    # 開發用：每次模型呼叫與命令紀錄
 POST /api/sessions/{id}/replay
 GET  /api/sessions/{id}/export?format=json|md
 ```

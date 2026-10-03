@@ -8,6 +8,14 @@ def to_json(view: dict) -> str:
     return json.dumps(view, ensure_ascii=False, indent=2)
 
 
+def _workflow_lines(view: dict) -> list[str]:
+    if view.get("workflow_runner") != "langgraph":
+        return []
+    wf = view.get("workflow") or {}
+    return [f"- 流程：langgraph {wf.get('workflow_version')}（prompt bundle `{wf.get('prompt_bundle_hash')}`，"
+            f"模型設定 `{wf.get('model_config_hash')}`，revision {view.get('revision')}）"]
+
+
 def to_markdown(view: dict) -> str:
     mc = view["model_config_snapshot"]
     lines = [
@@ -20,6 +28,7 @@ def to_markdown(view: dict) -> str:
         + ("（**模擬**）" if mc.get("simulated") else ""),
         f"- 生成設定：temperature={mc.get('temperature')}, max_tokens={mc.get('max_tokens')}, ctx={mc.get('context_tokens')}",
         f"- 狀態：{view['status']}　建立：{view['created_at']}　更新：{view['updated_at']}",
+        *_workflow_lines(view),
         "",
     ]
     rd = view.get("reading")
@@ -37,6 +46,10 @@ def to_markdown(view: dict) -> str:
                 if g.get("chinese_text"):
                     lines += ["**中文課文**", "", g["chinese_text"], ""]
                 lines += [g["guide"], ""]
+                if g.get("review_status"):
+                    warn = "、".join(sorted({w["code"] for w in g.get("warnings") or []}))
+                    lines += [f"_檢查：{g['review_status']}" + (f"（提醒：{warn}）" if warn else "")
+                              + ("，經過一次修訂" if g.get("revised") else "") + "_", ""]
             else:
                 lines += ["_（尚未導讀）_", ""]
             for qa in rd["qa"].get(str(q["index"]), []):

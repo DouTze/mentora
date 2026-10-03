@@ -29,8 +29,30 @@ class MockBackend(LLMBackend):
         hint_idx = min(meta.get("hint_count", 0), max(len(hints) - 1, 0))
         next_hint = hints[hint_idx] if hints else "想想有沒有第三個因素同時影響兩者？"
 
+        step = meta.get("step")
         if meta.get("force_invalid_output"):
             text = "這不是 JSON"
+        elif step == "segment_blocks":
+            text = json.dumps(self._segment_blocks(meta.get("blocks", [])), ensure_ascii=False)
+        elif step == "segment_seam":
+            text = json.dumps({"merge": False, "reason": "（模擬）維持切開"}, ensure_ascii=False)
+        elif step == "context":
+            text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
+        elif step == "analyze":
+            first = self._first_sentence(meta.get("quote_text", ""))
+            text = json.dumps({"definitions": [], "claims": [first], "conditions": [], "formulas": [], "reasoning": [],
+                               "prerequisites": [], "needs_context": [], "limits": []}, ensure_ascii=False)
+        elif step in ("draft", "revise"):
+            g = self._guide(meta.get("quote_text", ""))
+            g["guide"] = g["guide"].replace("$", "")   # the restated sentence may be cut inside a formula
+            maths = re.findall(r"\$\$.+?\$\$|\$[^$\n]+\$", meta.get("quote_text", ""), re.S)
+            if maths:   # the simulated text keeps the formulas verbatim, as a real guide must
+                g["guide"] += "\n\n" + "\n\n".join(maths)
+            text = json.dumps({**g, "supplement_notes": [], "limits": []}, ensure_ascii=False)
+        elif step == "verify":
+            text = json.dumps({"checks": []}, ensure_ascii=False)
+        elif step == "review":
+            text = json.dumps({"issues": []}, ensure_ascii=False)
         elif meta.get("task") == "generate":
             text = json.dumps(self._generate(meta.get("range_text", ""), meta.get("reading_questions", [])), ensure_ascii=False)
         elif meta.get("task") == "guide":
@@ -106,6 +128,21 @@ class MockBackend(LLMBackend):
                 units[-1]["atoms"].append(i)
             else:
                 units.append({"atoms": [i], "title": None})
+        return {"units": units}
+
+    @staticmethod
+    def _segment_blocks(blocks: list[dict]) -> dict[str, Any]:
+        """Simulated block planning: follows the program's glue marks, a heading opens a unit, a short paragraph
+        joins the previous one. No understanding involved."""
+        units: list[dict[str, Any]] = []
+        glued = False
+        for b in blocks:
+            join = units and (glued or (b["kind"] != "heading" and b["chars"] < 40 and units[-1]["blocks"]))
+            if join and not (b["kind"] == "heading" and not glued):
+                units[-1]["blocks"].append(b["label"])
+            else:
+                units.append({"blocks": [b["label"]], "title": None, "reason": "（模擬）新段落"})
+            glued = b.get("glue_next", False) or b["kind"] == "heading"
         return {"units": units}
 
     @classmethod

@@ -81,6 +81,7 @@ class TutorService:
         self._guide_errors: dict[tuple[str, int], dict] = {}          # last failure per quote, until retried
         self._jobs: dict[str, dict] = {}                              # one background job per session
         self._atoms: dict[str, tuple] = {}                            # candidate paragraphs awaiting segmentation
+        self.workflow = None   # WorkflowService, set by the app when LangGraph sessions are available
 
     # -- session lifecycle --------------------------------------------------
     def start(self, content_id: str, strategy_id: str) -> SessionView:
@@ -227,10 +228,16 @@ class TutorService:
                 return {"stage": "guide", "error": err}
         return None
 
+    @staticmethod
+    def _legacy_only(row: dict) -> None:
+        if row.get("workflow_runner") == "langgraph":
+            raise SessionError("use_events", "這筆學習使用新版流程，請改用 /api/sessions/{id}/events。")
+
     def _reading_row(self, sid: str) -> dict:
         row = self.db.get_session(sid)
         if not row:
             raise SessionError("not_found", "找不到學習紀錄")
+        self._legacy_only(row)
         if row["state"].get("phase") != "reading":
             raise SessionError("not_reading", "本次學習已完成導讀，進入出題階段。")
         return row
@@ -428,13 +435,16 @@ class TutorService:
         q = engine.get_question(content, state.get("question_id"))
         qv = None
         rv = None
+        graph = row.get("workflow_runner") == "langgraph" and self.workflow is not None
+        wf = self.workflow.workflow_view(row) if graph else None
         if content.get("quotes"):
             rd = state["reading"]
             rv = ReadingView(index=rd["index"], total=len(content["quotes"]), done=rd["done"], quotes=content["quotes"],
                              parts=content["parts"], guides=rd["guides"], qa=rd["qa"],
                              compacts={k: {kk: vv for kk, vv in v.items() if kk != "model_raw"} for k, v in rd["compacts"].items()},
                              quiz_source=rd.get("quiz_source"), segmentation=content.get("segmentation"),
-                             stopped_at=rd.get("stopped_at"), job=self._job_view(sid, state))
+                             stopped_at=rd.get("stopped_at"),
+                             job=self.workflow.job_view(wf) if graph else self._job_view(sid, state))
         if q:
             qv = QuestionView(id=q["id"], concept_id=q["concept_id"],
                               concept_title=engine.get_concept(content, q["concept_id"])["title"],
@@ -450,6 +460,7 @@ class TutorService:
                                                      "examples": c.get("examples", [])} for c in content["concepts"]],
             model_config_snapshot=row["model_config"], state=state, current_question=qv,
             turns=self.db.list_turns(sid), summary=row["summary"],
+            workflow_runner=row.get("workflow_runner") or "legacy", revision=row.get("revision") or 0, workflow=wf,
         )
 
     def list(self) -> list[dict]:
@@ -461,6 +472,7 @@ class TutorService:
                         "source": {k: v for k, v in (r["content_snapshot"].get("source") or {}).items() if k != "text"} or None,
                         "strategy_id": r["strategy_snapshot"]["id"],
                         "backend": r["model_config"].get("backend"), "simulated": r["model_config"].get("simulated"),
+                        "workflow_runner": r.get("workflow_runner") or "legacy",
                         "verdict": (r["summary"] or {}).get("verdict")})
         return out
 
@@ -469,6 +481,7 @@ class TutorService:
         row = self.db.get_session(sid)
         if not row:
             raise SessionError("not_found", "找不到學習紀錄")
+        self._legacy_only(row)
         if row["status"] != "active":
             raise SessionError("completed", "本次學習已完成")
         content, strategy, state = row["content_snapshot"], row["strategy_snapshot"], row["state"]

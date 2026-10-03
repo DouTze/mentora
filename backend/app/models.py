@@ -124,3 +124,17 @@ class SessionView(BaseModel):
     current_question: QuestionView | None
     turns: list[dict[str, Any]]
     summary: dict[str, Any] | None
+    workflow_runner: str = "legacy"            # which runner owns this session; fixed at creation
+    revision: int = 0                          # business revision (events API expected_revision)
+    workflow: dict[str, Any] | None = None     # langgraph sessions: {waiting, stage, active_command, error, …}
+
+
+class EventRequest(BaseModel):
+    """POST /api/sessions/{sid}/events (langgraph sessions)."""
+
+    command_id: str | None = Field(default=None, max_length=80)
+    type: str
+    expected_revision: int | None = None
+    unit_id: str | None = None
+    question_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
