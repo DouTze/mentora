@@ -20,6 +20,7 @@ openvino = ["openvino-genai>=2025.1"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [build-system]
 requires = ["hatchling"]

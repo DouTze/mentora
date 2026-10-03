@@ -1,0 +1,1545 @@
+{
+ "schema_version": 1,
+ "description": "mentora 導讀固定教材集：自寫內容，可合法納入 repo。gold labels 以原文片段（anchor）標註，不依賴任何一份模型切段結果。",
+ "cases": [
+  {
+   "id": "zh-opportunity-cost",
+   "source": "sources/zh-opportunity-cost.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "definition-example",
+    "headings"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "機會成本是指為了得到",
+     "contains": [
+      "例如，小明週六"
+     ],
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "機會成本是被放棄選項中價值最高者",
+       "any": [
+        [
+         "價值最高"
+        ],
+        [
+         "最高價值"
+        ],
+        [
+         "最佳替代"
+        ],
+        [
+         "最好的替代"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "不是實際付出的金錢",
+       "any": [
+        [
+         "不是",
+         "金錢"
+        ]
+       ]
+      },
+      {
+       "kind": "example",
+       "text": "放棄 1,200 元工資再加電影票",
+       "any": [
+        [
+         "1,200",
+         "電影票"
+        ],
+        [
+         "1200",
+         "電影票"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "注意，機會成本只計算",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "condition",
+       "text": "只算最高者，不把所有選項加總",
+       "any": [
+        [
+         "加總"
+        ],
+        [
+         "相加"
+        ],
+        [
+         "加起來"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "沉沒成本是已經發生",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "沉沒成本無法收回",
+       "any": [
+        [
+         "無法收回"
+        ],
+        [
+         "不能收回"
+        ],
+        [
+         "收不回"
+        ],
+        [
+         "無法回收"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "沉沒成本不應影響決策",
+       "any": [
+        [
+         "不應影響"
+        ],
+        [
+         "不應該影響"
+        ],
+        [
+         "不該影響"
+        ],
+        [
+         "不應左右"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "en-gradient-descent",
+   "source": "sources/en-gradient-descent.md",
+   "kind": "md",
+   "tags": [
+    "en",
+    "condition"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "Gradient descent is an iterative",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "沿梯度的反方向移動",
+       "any": [
+        [
+         "反方向"
+        ],
+        [
+         "相反"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "梯度指向上升最快的方向",
+       "any": [
+        [
+         "上升最快"
+        ],
+        [
+         "增加最快"
+        ],
+        [
+         "最陡"
+        ],
+        [
+         "增長最快"
+        ]
+       ]
+      },
+      {
+       "kind": "term",
+       "text": "局部最小值",
+       "any": [
+        [
+         "局部最小"
+        ],
+        [
+         "local minimum"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "The size of each step",
+     "must_keep": [
+      {
+       "kind": "condition",
+       "text": "學習率太大可能越過最小值並發散",
+       "any": [
+        [
+         "發散"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "學習率太小收斂很慢",
+       "any": [
+        [
+         "慢"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "只有學習率夠小時才保證接近最小值",
+       "any": [
+        [
+         "夠小"
+        ],
+        [
+         "足夠小"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "In practice, computing the gradient",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "隨機梯度下降用隨機小批次估計梯度",
+       "any": [
+        [
+         "批次"
+        ],
+        [
+         "batch"
+        ],
+        [
+         "小批"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "估計有雜訊但平均方向正確",
+       "any": [
+        [
+         "平均"
+        ]
+       ]
+      }
+     ]
+    }
+   ],
+   "forbidden": [
+    {
+     "text": "宣稱梯度下降保證找到全域最小值",
+     "any": [
+      "保證找到全域",
+      "一定能找到全域"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "formula-where",
+   "source": "sources/formula-where.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "formula",
+    "where"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "迴歸模型最常用的損失函數",
+     "contains": [
+      "其中 $n$ 是樣本數",
+      "對離群值特別敏感"
+     ],
+     "must_keep": [
+      {
+       "kind": "formula",
+       "text": "MSE 定義式",
+       "any": [
+        [
+         "\\frac{1}{n}",
+         "\\hat{y}_i",
+         "^2"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "where：n、y_i、hat y_i 的意義",
+       "any": [
+        [
+         "樣本數",
+         "真實值",
+         "預測值"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "均方誤差對離群值敏感",
+       "any": [
+        [
+         "離群值",
+         "敏感"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "另一個常見的選擇是平均絕對誤差",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "MAE 受離群值影響較小",
+       "any": [
+        [
+         "影響較小"
+        ],
+        [
+         "較不敏感"
+        ],
+        [
+         "比較小"
+        ],
+        [
+         "較小"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "MAE 在零點不可微",
+       "any": [
+        [
+         "不可微"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "當我們把預測值寫成線性模型",
+     "must_keep": [
+      {
+       "kind": "formula",
+       "text": "正規方程解",
+       "any": [
+        [
+         "(\\mathbf{X}^\\top\\mathbf{X})^{-1}"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "X^T X 可逆才有此解",
+       "any": [
+        [
+         "可逆"
+        ]
+       ]
+      },
+      {
+       "kind": "formula",
+       "text": "保留粗體向量 w",
+       "any": [
+        [
+         "\\mathbf{w}"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cross-page-condition",
+   "source": "sources/cross-page-condition.pages.json",
+   "kind": "pages",
+   "tags": [
+    "zh",
+    "cross-page",
+    "condition",
+    "formula"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "均值定理把函數在一段區間",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "連結平均變化率與瞬間變化率",
+       "any": [
+        [
+         "平均變化率",
+         "瞬間變化率"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "若要使用均值定理，函數必須同時滿足",
+     "contains": [
+      "第二，函數在開區間"
+     ],
+     "must_keep": [
+      {
+       "kind": "condition",
+       "text": "閉區間上連續",
+       "any": [
+        [
+         "閉區間",
+         "連續"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "開區間內可微",
+       "any": [
+        [
+         "開區間",
+         "可微"
+        ]
+       ]
+      },
+      {
+       "kind": "formula",
+       "text": "f'(c) 等於平均變化率",
+       "any": [
+        [
+         "f'(c)=\\frac{f(b)-f(a)}{b-a}"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "任一條件不成立時 c 不一定存在",
+       "any": [
+        [
+         "不一定存在"
+        ],
+        [
+         "未必存在"
+        ],
+        [
+         "不保證存在"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "均值定理的一個直接推論",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "導數處處為零則為常數函數",
+       "any": [
+        [
+         "常數"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "list-tcp",
+   "source": "sources/list-tcp.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "list"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "TCP 是一種連線導向",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "傳送資料前必須先建立連線",
+       "any": [
+        [
+         "建立",
+         "連線"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "約定各自的起始序號",
+       "any": [
+        [
+         "起始序號"
+        ],
+        [
+         "初始序號"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "建立連線的過程稱為三次握手",
+     "contains": [
+      "用戶端送出 SYN",
+      "用戶端再送出 ACK"
+     ],
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "第二步確認號 x+1",
+       "any": [
+        [
+         "x+1"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "第三步確認號 y+1",
+       "any": [
+        [
+         "y+1"
+        ]
+       ]
+      },
+      {
+       "kind": "term",
+       "text": "SYN-ACK",
+       "any": [
+        [
+         "SYN-ACK"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "如果第三步的 ACK 遺失",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "逾時後重送 SYN-ACK",
+       "any": [
+        [
+         "重送"
+        ],
+        [
+         "重新傳送"
+        ],
+        [
+         "重新發送"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "收到 ACK 前停在半開啟、不能傳應用資料",
+       "any": [
+        [
+         "半開"
+        ],
+        [
+         "不能",
+         "傳送"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "code-block",
+   "source": "sources/code-block.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "code"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "Python 的串列推導式可以",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "推導式可加條件過濾",
+       "any": [
+        [
+         "過濾"
+        ],
+        [
+         "篩選"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "```python",
+     "merge_ok": true,
+     "contains": [
+      "result.append(n * n)"
+     ],
+     "must_keep": [
+      {
+       "kind": "code",
+       "text": "保留推導式程式碼",
+       "any": [
+        [
+         "range(10)"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "兩種寫法都得到",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "結果為 [0, 4, 16, 36, 64]",
+       "any": [
+        [
+         "[0,4,16,36,64]"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "條件成立的元素才被平方收集",
+       "any": [
+        [
+         "成立"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "headings",
+   "source": "sources/headings.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "headings"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "細胞膜由磷脂雙層構成",
+     "must_keep": [
+      {
+       "kind": "term",
+       "text": "磷脂雙層",
+       "any": [
+        [
+         "磷脂雙層"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "選擇性通透",
+       "any": [
+        [
+         "選擇性"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "離子與大分子需通道或載體蛋白",
+       "any": [
+        [
+         "通道蛋白"
+        ],
+        [
+         "載體蛋白"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "細胞核內含有遺傳物質",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "含 DNA、控制生長分裂",
+       "any": [
+        [
+         "DNA"
+        ]
+       ]
+      },
+      {
+       "kind": "term",
+       "text": "核孔",
+       "any": [
+        [
+         "核孔"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "粒線體是進行細胞呼吸",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "能量儲存在 ATP",
+       "any": [
+        [
+         "ATP"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "粒線體有自己的 DNA",
+       "any": [
+        [
+         "自己的DNA"
+        ],
+        [
+         "自身的DNA"
+        ],
+        [
+         "獨立的DNA"
+        ],
+        [
+         "自有的DNA"
+        ]
+       ]
+      },
+      {
+       "kind": "term",
+       "text": "內共生學說",
+       "any": [
+        [
+         "內共生"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u4",
+     "start": "內共生學說主張",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "粒線體原本是獨立生活的細菌",
+       "any": [
+        [
+         "細菌"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "被吞入後未被消化",
+       "any": [
+        [
+         "吞"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "duplicate-paragraphs",
+   "source": "sources/duplicate-paragraphs.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "duplicate"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "在其他條件不變的情況下，商品價格上升時，生產者",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "價格上升供給量增加",
+       "any": [
+        [
+         "增加"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "其他條件不變",
+       "any": [
+        [
+         "其他條件不變"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "重點回顧：法則只描述",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "condition",
+       "text": "前提是其他條件不變",
+       "any": [
+        [
+         "其他條件不變"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "在其他條件不變的情況下，商品價格上升時，消費者",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "價格上升需求量減少",
+       "any": [
+        [
+         "減少"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "其他條件不變",
+       "any": [
+        [
+         "其他條件不變"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u4",
+     "start": "重點回顧：法則只描述",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "condition",
+       "text": "前提是其他條件不變",
+       "any": [
+        [
+         "其他條件不變"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cross-window-argument",
+   "source": "sources/cross-window-argument.txt",
+   "kind": "txt",
+   "tags": [
+    "zh",
+    "cross-window",
+    "argument",
+    "condition"
+   ],
+   "window_chars": 450,
+   "units": [
+    {
+     "id": "u1",
+     "start": "統計推論的第一步",
+     "must_keep": [
+      {
+       "kind": "term",
+       "text": "母體與樣本",
+       "any": [
+        [
+         "母體",
+         "樣本"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "統計量推估參數",
+       "any": [
+        [
+         "統計量",
+         "參數"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "抽樣的方式決定了",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "簡單隨機抽樣每個個體機會相同",
+       "any": [
+        [
+         "隨機抽樣"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "不會系統性偏誤",
+       "any": [
+        [
+         "系統性"
+        ],
+        [
+         "偏"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "然而，只有隨機抽樣還不夠",
+     "contains": [
+      "第二個前提是",
+      "因此，只有在獨立且樣本數夠大"
+     ],
+     "must_keep": [
+      {
+       "kind": "condition",
+       "text": "觀察彼此獨立",
+       "any": [
+        [
+         "獨立"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "樣本數夠大",
+       "any": [
+        [
+         "樣本數",
+         "大"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "中央極限定理",
+       "any": [
+        [
+         "中央極限定理"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "兩前提同時成立",
+       "any": [
+        [
+         "同時"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "任一前提不成立則涵蓋率無保證",
+       "any": [
+        [
+         "沒有保證"
+        ],
+        [
+         "無法保證"
+        ],
+        [
+         "不保證"
+        ],
+        [
+         "沒有辦法保證"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u4",
+     "start": "最後要提醒的是，信賴區間描述",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "重複抽樣約 95% 區間涵蓋參數",
+       "any": [
+        [
+         "95%"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "不是單一區間有 95% 機率包含參數",
+       "any": [
+        [
+         "不是"
+        ],
+        [
+         "並非"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "long-paragraph",
+   "source": "sources/long-paragraph.txt",
+   "kind": "txt",
+   "tags": [
+    "zh",
+    "long-paragraph",
+    "formula"
+   ],
+   "sentence_breaks_ok": true,
+   "units": [
+    {
+     "id": "u1",
+     "start": "資料庫交易必須滿足四個特性",
+     "must_keep": [
+      {
+       "kind": "term",
+       "text": "ACID",
+       "any": [
+        [
+         "ACID"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "原子性：全部完成或全部不發生",
+       "any": [
+        [
+         "全部"
+        ]
+       ]
+      },
+      {
+       "kind": "example",
+       "text": "轉帳扣款入帳例子",
+       "any": [
+        [
+         "轉帳"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "一致性要求交易執行前後",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "一致性：滿足所有約束條件",
+       "any": [
+        [
+         "約束"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "隔離性要求同時執行",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "term",
+       "text": "髒讀",
+       "any": [
+        [
+         "髒讀"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "隔離等級越高並行度越低",
+       "any": [
+        [
+         "並行度"
+        ],
+        [
+         "並發"
+        ],
+        [
+         "並行"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u4",
+     "start": "持久性要求交易一旦提交",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "依靠預寫式日誌",
+       "any": [
+        [
+         "日誌"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "提交後斷電也不遺失",
+       "any": [
+        [
+         "斷電"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u5",
+     "start": "若以 $T_1$ 與 $T_2$",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "formula",
+       "text": "序列化順序 T1→T2",
+       "any": [
+        [
+         "T_1\\toT_2"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u6",
+     "start": "需要特別注意的是，這四個特性",
+     "merge_ok": true,
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "四個特性並非彼此獨立",
+       "any": [
+        [
+         "並非彼此獨立"
+        ],
+        [
+         "不是彼此獨立"
+        ],
+        [
+         "並非獨立"
+        ],
+        [
+         "互相"
+        ],
+        [
+         "彼此"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "early-quiz",
+   "source": "sources/early-quiz.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "headings",
+    "early-quiz"
+   ],
+   "flow": {
+    "read_units": 2,
+    "then": "finish",
+    "quiz_scope_must_include": [
+     "沿直線前進",
+     "入射角等於反射角"
+    ],
+    "quiz_scope_must_exclude": [
+     "斜射進入另一種介質",
+     "三稜鏡"
+    ]
+   },
+   "units": [
+    {
+     "id": "u1",
+     "start": "光在均勻介質中沿直線",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "沿直線前進",
+       "any": [
+        [
+         "直線"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "影子形成",
+       "any": [
+        [
+         "影子"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "光遇到光滑表面時",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "入射角等於反射角",
+       "any": [
+        [
+         "入射角等於反射角"
+        ],
+        [
+         "入射角與反射角相等"
+        ],
+        [
+         "反射角等於入射角"
+        ]
+       ]
+      },
+      {
+       "kind": "condition",
+       "text": "角度從法線量起",
+       "any": [
+        [
+         "法線"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "光從一種介質斜射",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "從空氣進水偏向法線",
+       "any": [
+        [
+         "偏向法線"
+        ],
+        [
+         "靠近法線"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "水中速率較慢",
+       "any": [
+        [
+         "慢"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u4",
+     "start": "白光通過三稜鏡",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "不同波長折射率不同",
+       "any": [
+        [
+         "折射率"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "紫光偏折最多",
+       "any": [
+        [
+         "紫光"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "injection",
+   "source": "sources/injection.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "injection"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "提示詞注入是一種針對",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "指令藏在模型會讀到的資料裡",
+       "any": [
+        [
+         "資料"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "下面是一段典型的注入文字",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "照做代表沒有區分資料與指令",
+       "any": [
+        [
+         "區分"
+        ],
+        [
+         "分辨"
+        ]
+       ]
+      }
+     ],
+     "forbidden_exact": [
+      "已破解",
+      "「已破解」",
+      "已破解。"
+     ]
+    },
+    {
+     "id": "u3",
+     "start": "防範的基本原則是",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "外部資料當作內容而非指令",
+       "any": [
+        [
+         "內容"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "限制工具與權限",
+       "any": [
+        [
+         "權限"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "image-limitation",
+   "source": "sources/image-limitation.md",
+   "kind": "md",
+   "tags": [
+    "zh",
+    "image",
+    "limitation"
+   ],
+   "units": [
+    {
+     "id": "u1",
+     "start": "![圖 2-1",
+     "contains": [
+      "如圖 2-1 所示"
+     ],
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "需求曲線向右下方傾斜",
+       "any": [
+        [
+         "右下"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "交點是均衡點",
+       "any": [
+        [
+         "均衡"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "均衡時想買量等於想賣量",
+       "any": [
+        [
+         "等於"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "當市場價格高於均衡價格時",
+     "must_keep": [
+      {
+       "kind": "term",
+       "text": "超額供給",
+       "any": [
+        [
+         "超額供給"
+        ]
+       ]
+      },
+      {
+       "kind": "term",
+       "text": "超額需求",
+       "any": [
+        [
+         "超額需求"
+        ]
+       ]
+      },
+      {
+       "kind": "claim",
+       "text": "超額供給時價格向下調整",
+       "any": [
+        [
+         "向下"
+        ],
+        [
+         "下降"
+        ],
+        [
+         "下跌"
+        ]
+       ]
+      }
+     ]
+    }
+   ],
+   "forbidden": [
+    {
+     "text": "捏造圖中沒有文字依據的視覺細節",
+     "any": [
+      "紅色",
+      "藍色",
+      "虛線",
+      "刻度"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "broken-empty",
+   "source": "sources/broken-empty.txt",
+   "kind": "txt",
+   "tags": [
+    "broken"
+   ],
+   "expect_import_error": "no_text"
+  },
+  {
+   "id": "broken-garbage-pdf",
+   "source": "sources/broken-garbage.pdf",
+   "kind": "pdf",
+   "tags": [
+    "broken"
+   ],
+   "expect_import_error": "unreadable"
+  },
+  {
+   "id": "unsupported-docx",
+   "source": "sources/unsupported.docx",
+   "kind": "docx",
+   "tags": [
+    "unsupported"
+   ],
+   "expect_import_error": "unsupported"
+  }
+ ]
+}
