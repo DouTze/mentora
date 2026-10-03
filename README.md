@@ -32,7 +32,7 @@ bun run stop        # 關掉殘留在 8000 / 5173 的程序（例如終端機被
 分開跑：
 
 ```bash
-cd backend && uv venv && uv pip install -e ".[dev]" && .venv/bin/uvicorn app.main:app --reload
+cd backend && uv venv && uv pip install -e ".[dev]" -c requirements.lock && .venv/bin/uvicorn app.main:app --reload
 cd frontend && bun install && bun run dev
 ```
 

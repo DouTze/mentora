@@ -11,6 +11,12 @@ dependencies = [
     "pypdf>=5",
     "pymupdf>=1.25",
     "python-multipart>=0.0.9",
+    # 導讀 agent 與學習流程（MENTOR_WORKFLOW=langgraph）。精確版本見 requirements.lock。
+    "langchain>=1.4,<2",
+    "langchain-core>=1.6,<2",
+    "langgraph>=1.2,<2",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
+    "aiosqlite>=0.22,<1",
 ]
 
 [project.optional-dependencies]
