@@ -4,6 +4,7 @@ import type { ApiError, SessionView } from "../types";
 import { RichText } from "./RichText";
 import { Working } from "./Working";
 import { useT } from "../i18n";
+import { CommandRefused, isGraph, useCommands } from "../workflow";
 
 interface Props {
   session: SessionView;
@@ -33,10 +34,31 @@ export function ReadingPanel({ session, onSession }: Props) {
   const requested = useRef<string | null>(null); // "<session>:<index>" for which the guide was asked
   const isLast = rd.index + 1 >= rd.total;
   const busy = !!job && !job.error;
+  // LangGraph sessions: every action is a command with its own id (resent safely, resumed after a reload)
+  const graph = isGraph(session);
+  const wf = session.workflow ?? null;
+  const cmds = useCommands(session, onSession, ["ask", "next", "finish", "retry", "guide"]);
+  const [failedAsk, setFailedAsk] = useState<string | null>(null);
+  const sending = !!cmds.running && cmds.running.type !== "ask";
+
+  const command = async (type: string, payload: Record<string, unknown> = {}) => {
+    setError(null);
+    try {
+      const cmd = await cmds.send(type, payload, { unit_id: quote.unit_id, expected_revision: session.revision });
+      if (cmd.status === "failed" && cmd.error && !(wf?.waiting === "retry")) setError({ ...cmd.error, retryable: cmd.retryable });
+      return cmd;
+    } catch (e) {
+      const body = e instanceof CommandRefused ? e.body : (e as RequestError).body;
+      if (body?.session) onSession(body.session);
+      setError(body);
+      return null;
+    }
+  };
 
   // ask for the guide of the current quote (starts the job, or returns it when cached)
   useEffect(() => {
     const key = `${session.id}:${rd.index}`;
+    if (graph) return; // the workflow writes the guide on its own; the page only polls
     if (guide || segmenting) return; // while segmenting, only poll; the guide is asked for once the quotes are final
     if ((job && !job.error) || requested.current === key) return;
     requested.current = key;
@@ -62,6 +84,13 @@ export function ReadingPanel({ session, onSession }: Props) {
   }, [session.id, busy, segmenting]);
 
   const retry = () => {
+    if (graph) {
+      const target = wf?.waiting === "retry" ? wf.failed_command_id : failedAsk;
+      if (!target) return;
+      if (target === failedAsk) return askRetry(target);
+      command("retry", { target_command_id: target });
+      return;
+    }
     requested.current = null;
     setError(null);
     api
@@ -71,6 +100,14 @@ export function ReadingPanel({ session, onSession }: Props) {
   };
 
   const next = async () => {
+    if (graph) {
+      const cmd = await command("next");
+      if (cmd?.status === "completed") {
+        setQuestion("");
+        setShowOriginal(false);
+      }
+      return;
+    }
     setError(null);
     try {
       const r = await api.readingNext(session.id);
@@ -84,6 +121,10 @@ export function ReadingPanel({ session, onSession }: Props) {
 
   const finish = async () => {
     setConfirmFinish(false);
+    if (graph) {
+      await command("finish");
+      return;
+    }
     setError(null);
     try {
       const r = await api.readingFinish(session.id);
@@ -93,8 +134,28 @@ export function ReadingPanel({ session, onSession }: Props) {
     }
   };
 
+  const askRetry = async (target: string) => {
+    setAsking(true);
+    const cmd = await command("retry", { target_command_id: target });
+    setAsking(false);
+    if (cmd?.status === "completed") {
+      setFailedAsk(null);
+      setQuestion("");
+    }
+  };
+
   const ask = async () => {
     if (!question.trim()) return;
+    if (graph) {
+      setAsking(true);
+      const cmd = await command("ask", { question: question.trim() });
+      setAsking(false);
+      if (cmd?.status === "completed") {
+        setQuestion(""); // only cleared on success — on failure the question stays and can be retried
+        setFailedAsk(null);
+      } else if (cmd) setFailedAsk(cmd.command_id);
+      return;
+    }
     setAsking(true);
     setError(null);
     try {
@@ -157,7 +218,7 @@ export function ReadingPanel({ session, onSession }: Props) {
         !shownError && (
           <div className="tutor" data-testid="guide-loading">
             <div className="label">{t("common.tutor")}</div>
-            <Working stage={segmenting ? "segment" : (job?.stage ?? "guide")} />
+            <Working stage={segmenting ? "segment" : (job?.stage ?? "guide")} detail={job?.detail_stage} />
           </div>
         )
       )}
@@ -176,7 +237,7 @@ export function ReadingPanel({ session, onSession }: Props) {
       {guide && busy && (
         <div className="tutor" data-testid="job">
           <div className="label">{t("common.tutor")}</div>
-          <Working stage={job!.stage} />
+          <Working stage={job!.stage} detail={job!.detail_stage} />
         </div>
       )}
 
@@ -184,7 +245,13 @@ export function ReadingPanel({ session, onSession }: Props) {
         <div className="error" data-testid="error">
           {shownError.detail}
           <div style={{ marginTop: 6 }}>
-            {!guide ? <button onClick={retry}>{t("reading.retry")}</button> : <button onClick={rd.stopped_at != null ? finish : next}>{t("reading.retry")}</button>}
+            {graph ? (
+              (wf?.waiting === "retry" || failedAsk) && <button onClick={retry} disabled={sending || asking}>{t("reading.retry")}</button>
+            ) : !guide ? (
+              <button onClick={retry}>{t("reading.retry")}</button>
+            ) : (
+              <button onClick={rd.stopped_at != null ? finish : next}>{t("reading.retry")}</button>
+            )}
           </div>
         </div>
       )}
@@ -210,7 +277,7 @@ export function ReadingPanel({ session, onSession }: Props) {
             </div>
           )}
           <div className="actions">
-            <button className="primary" onClick={next} disabled={asking}>
+            <button className="primary" onClick={next} disabled={asking || sending}>
               {t(isLast ? "reading.next.last" : partEnds ? "reading.next.partEnd" : "reading.next")}
             </button>
             {!isLast &&
@@ -223,7 +290,7 @@ export function ReadingPanel({ session, onSession }: Props) {
                   </button>
                 </span>
               ) : (
-                <button className="ghost" onClick={() => setConfirmFinish(true)} disabled={asking}>
+                <button className="ghost" onClick={() => setConfirmFinish(true)} disabled={asking || sending}>
                   {t("reading.finish")}
                 </button>
               ))}

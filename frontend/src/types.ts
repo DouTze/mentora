@@ -63,6 +63,9 @@ export interface Quote {
   text: string;
   chars: number;
   part: number;
+  /** LangGraph sessions: stable source-unit id and the source blocks it was rebuilt from */
+  unit_id?: string;
+  block_ids?: string[];
 }
 
 export interface Guide {
@@ -105,9 +108,36 @@ export interface ReadingView {
 }
 
 export type JobStage = "segment" | "guide" | "compact" | "generate";
+/** finer stages of LangGraph sessions (analysis, review, …); unknown ones fall back to `stage` */
+export type DetailStage = JobStage | "analyze" | "context" | "draft" | "review" | "revise" | "ask" | "assess";
 export interface ReadingJob {
   stage: JobStage;
+  detail_stage?: DetailStage | string | null;
   error: ApiError | null;
+}
+
+/** One accepted operation of a LangGraph session (POST /events, GET /commands/{id}). */
+export interface CommandView {
+  command_id: string;
+  type: "start" | "guide" | "ask" | "next" | "finish" | "answer" | "retry";
+  status: "queued" | "running" | "completed" | "failed";
+  stage: string | null;
+  result: { answer?: ReadingQA; message?: TutorMessage; [k: string]: unknown } | null;
+  error: ApiError | null;
+  retryable: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowView {
+  waiting: "student" | "retry" | "answer" | "completed" | null;
+  stage: string | null;
+  active_command: CommandView | null;
+  error: ApiError | null;
+  failed_command_id: string | null;
+  last_failed: string | null;
+  failed_node: string | null;
+  runner_active: boolean;
 }
 
 export interface SessionView {
@@ -129,6 +159,10 @@ export interface SessionView {
   current_question: QuestionView | null;
   turns: Turn[];
   summary: Summary | null;
+  /** "langgraph" sessions take every action through POST /events; older ones keep the original endpoints */
+  workflow_runner?: "legacy" | "langgraph";
+  revision?: number;
+  workflow?: WorkflowView | null;
 }
 
 export interface SessionListItem {

@@ -1,8 +1,8 @@
 import type { CompanionSettings } from "./companions";
-import type { ActiveBackend, ApiError, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReadingQA, SessionListItem, SessionView, Strategy, TutorMessage, Turn } from "./types";
+import type { ActiveBackend, ApiError, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReadingQA, SessionListItem, SessionView, Strategy, TutorMessage, Turn } from "./types";
 
 export class RequestError extends Error {
-  constructor(public status: number, public body: ApiError) {
+  constructor(public status: number, public body: ApiError & { session?: SessionView | null }) {
     super(body.detail);
   }
 }
@@ -66,6 +66,10 @@ export const api = {
     call<{ answer: ReadingQA; session: SessionView }>(`/sessions/${id}/reading/ask`, { method: "POST", body: JSON.stringify({ question }) }),
   readingNext: (id: string) => call<{ status: "ready" | "pending"; session: SessionView }>(`/sessions/${id}/reading/next`, { method: "POST" }),
   readingFinish: (id: string) => call<{ status: "pending"; session: SessionView }>(`/sessions/${id}/reading/finish`, { method: "POST" }),
+  /** LangGraph sessions: 202 accepted (queued/running) or 200 already finished (a resend of a known command_id) */
+  event: (id: string, body: { command_id: string; type: string; payload?: Record<string, unknown>; unit_id?: string; question_id?: string; expected_revision?: number }) =>
+    call<CommandView & { session: SessionView }>(`/sessions/${id}/events`, { method: "POST", body: JSON.stringify(body) }),
+  command: (id: string, commandId: string) => call<CommandView>(`/sessions/${id}/commands/${encodeURIComponent(commandId)}`),
   replay: (id: string) =>
     call<{ session: SessionView; replayed_answers: number; total_answers: number; error: ApiError | null }>(`/sessions/${id}/replay`, { method: "POST" }),
   exportUrl: (id: string, format: "json" | "md") => `/api/sessions/${id}/export?format=${format}`,

@@ -253,6 +253,11 @@ export const en: Dict = {
   "working.stage.guide": "Writing guided reading for this section",
   "working.stage.compact": "Summarizing what you've read into notes",
   "working.stage.generate": "Creating questions on what you've read",
+  "working.stage.analyze": "Working out what this section teaches",
+  "working.stage.context": "Checking the surrounding text",
+  "working.stage.draft": "Writing the guided reading for this section",
+  "working.stage.review": "Checking the guided reading against the original",
+  "working.stage.revise": "Revising the guided reading",
   "backend.disconnected": "Backend disconnected",
   "backend.simulated": "Demo mode (simulated, no real model)",
 };

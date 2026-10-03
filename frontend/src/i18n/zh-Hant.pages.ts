@@ -195,6 +195,11 @@ export const pages = {
   "working.stage.guide": "正在寫這一段的導讀",
   "working.stage.compact": "正在整理讀完的部分成筆記",
   "working.stage.generate": "正在依讀過的內容出題",
+  "working.stage.analyze": "正在整理這一段要教的重點",
+  "working.stage.context": "正在查看前後文",
+  "working.stage.draft": "正在撰寫這一段的導讀",
+  "working.stage.review": "正在對照原文檢查導讀",
+  "working.stage.revise": "正在修正導讀",
 
   // components/BackendBadge.tsx
   "backend.disconnected": "後端未連線",

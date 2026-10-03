@@ -9,6 +9,7 @@ import { ReadingPanel } from "../components/ReadingPanel";
 import { RichText } from "../components/RichText";
 import { Working } from "../components/Working";
 import { useT } from "../i18n";
+import { CommandRefused, isGraph, useCommands } from "../workflow";
 
 interface Props {
   sessionId: string | null;
@@ -25,6 +26,10 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial }: Props)
   const [busy, setBusy] = useState(false);
   const [showSource, setShowSource] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  // LangGraph sessions answer through a command; a failed one can be retried with its own id
+  const quiz = !!session && session.state.phase !== "reading";
+  const cmds = useCommands(session, setSession, quiz ? ["answer", "retry"] : ["answer"]);
+  const [failedAnswer, setFailedAnswer] = useState<string | null>(null);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -58,8 +63,33 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial }: Props)
     }
   };
 
+  const submitCommand = async (s: SessionView) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const cmd = failedAnswer
+        ? await cmds.send("retry", { target_command_id: failedAnswer })
+        : await cmds.send("answer", { answer: answer.trim() }, { question_id: s.current_question?.id, expected_revision: s.revision });
+      if (cmd.status === "completed") {
+        setFailedAnswer(null);
+        if (cmd.result?.message) setLast(cmd.result.message);
+        setAnswer("");
+      } else {
+        setFailedAnswer(cmd.command_id);
+        setError({ ...(cmd.error ?? { code: "failed", detail: "" }), retryable: cmd.retryable });
+      }
+    } catch (e) {
+      const body = e instanceof CommandRefused ? e.body : (e as RequestError).body;
+      if (body?.session) setSession(body.session);
+      setError(body);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
     if (!session || !answer.trim()) return;
+    if (isGraph(session)) return submitCommand(session);
     setBusy(true);
     setError(null);
     try {
@@ -179,7 +209,10 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial }: Props)
                 aria-label={t("learn.answer.label")}
                 placeholder={t("learn.answer.placeholder")}
                 value={answer}
-                onChange={(e) => setAnswer(e.target.value)}
+                onChange={(e) => {
+                  setAnswer(e.target.value);
+                  setFailedAnswer(null); // an edited answer is a new answer, not a retry of the failed one
+                }}
                 disabled={busy}
               />
             </div>
