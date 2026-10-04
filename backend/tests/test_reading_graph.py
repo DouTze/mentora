@@ -794,3 +794,35 @@ def test_every_cited_read_claim_and_reader_quote_must_be_valid():
     why = problem("user_authorized", "讀者說「想知道可微和切線的關係」也說「請多舉例子」", "第一句。", refs)
     assert why and "請多舉例子" in why
     assert not problem("user_authorized", "讀者說「想知道可微和切線的關係」", "第一句。", refs)
+
+
+# -- r10 findings: a copied skeleton value, leaked labels and loops ------------------------------------
+
+async def test_the_audit_skeleton_gives_no_support_value_that_passes_when_copied():
+    """r10: the skeleton said "support": "S1" for every bridge; the 4b model copied it for 44 prerequisite bridges.
+    Each basis now gets a placeholder that fails the program check unless the model fills it in."""
+    from app.reading.gates import bridge_support_problem
+    from app.workflows.reading_graph import SUPPORT_SKELETON
+    refs = {"read": {"u-a:C1"}, "reader": "想知道可微和切線的關係"}
+    assert all(bridge_support_problem(b, v, "一。二。", refs) for b, v in SUPPORT_SKELETON.items())
+    plan = {"learning_goal": "x", "bridges": [{"id": "B1", "obstacle": "不熟悉可微", "targets": ["C1"],
+                                              "content": "可微表示函數在該點有切線斜率。", "basis": "prerequisite"}]}
+    b = Scripted({"plan_bridges": [plan]})
+    await run(b, index=0)
+    prompt = b.prompt("body_audit")
+    assert '"support": "…"' in prompt and '"support": "S1"' not in prompt
+
+
+def test_leaked_labels_and_loops_in_the_guide_are_program_findings():
+    """r10 published a guide reading "C1［claim］…C2［claim］…" with one sentence four times."""
+    from app.reading.agent import GuideDraft, validate_draft
+    t = ra.ReadingTaskInput(session_id="s", unit_id="u", index=0, total=1, label="第 1 行", text="機會成本只計算價值最高的替代方案。",
+                            block_ids=["b"], material_title="m", range_label="r", model_config_hash="h", prompt_bundle_hash="p")
+    loop = "機會成本只計算價值最高的那一個替代方案。"
+    codes = lambda g: {f.code for f in validate_draft(t, GuideDraft(guide=g, key_points=[], check=""))}
+    assert "internal_label" in codes("C1［claim］" + loop + "C2［claim］" + loop)
+    assert "internal_label" in codes("依 S3 的說法，" + loop) and "internal_label" in codes("［補充說明］" + loop)
+    assert "repeated_text" in codes(loop * 3) and "repeated_text" not in codes(loop * 2)
+    assert not codes(loop + "也就是說，其他放棄的選項不必加總。") & {"internal_label", "repeated_text"}
+    t2 = t.model_copy(update={"text": "TCP 連線狀態 S1 轉移到 S2。"})
+    assert "internal_label" not in {f.code for f in validate_draft(t2, GuideDraft(guide="連線從 S1 轉移到 S2，這是三向交握的一部分。", key_points=[], check=""))}

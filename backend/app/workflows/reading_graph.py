@@ -132,6 +132,8 @@ def understanding_tokens(t: ra.ReadingTaskInput) -> int:
 def template(lists: dict[str, list[str]], item: dict, rest: dict) -> str:
     """An output skeleton naming every id the model must report on (small models follow a filled-in shape)."""
     return json.dumps({**{k: [{"id": i, **item[k]} for i in ids] for k, ids in lists.items()}, **rest}, ensure_ascii=False)
+SUPPORT_SKELETON = {"source": "S…", "derivation": "前提 S…；推導：…", "prior_reading": "單元:C…", "user_authorized": "讀者說「…」",
+                    "prerequisite": "…"}
 MAX_SOURCE_REVISIONS = 1
 MAX_BODY_REVISIONS = 1
 
@@ -579,9 +581,12 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                        "claims": [c for c in state["verified"]["claims"] if c["id"] in audited]}}
         bridges = BridgePlan.model_validate(state.get("bridges") or {})
         ids = {"claims": [c.id for c in claims], "bridges": [b.id for b in bridges.bridges]}
-        out = template(ids, {"claims": {"verdict": "covered", "guide_quote": "…", "note": ""},
-                             "bridges": {"verdict": "ok", "correct": "yes", "support": "S1", "guide_quote": "…", "note": ""}},
-                       {"additions": [], "uncovered_source": [], "coherence": "pass", "coherence_note": ""})
+        # the skeleton's support is a per-basis placeholder that fails the program check if copied as is (a fixed
+        # "S1" was copied for every bridge, whatever its basis)
+        out = json.dumps({"claims": [{"id": i, "verdict": "covered", "guide_quote": "…", "note": ""} for i in ids["claims"]],
+                          "bridges": [{"id": b.id, "verdict": "ok", "correct": "yes", "support": SUPPORT_SKELETON[b.basis],
+                                       "guide_quote": "…", "note": ""} for b in bridges.bridges],
+                          "additions": [], "uncovered_source": [], "coherence": "pass", "coherence_note": ""}, ensure_ascii=False)
         msg, rec = await prompt_for(ctx, state, "body_audit", "reading_body_audit",
                                     with_optional("reading_body_audit", state,
                                                   ("quote_text", "symbol_evidence", "supplements", "claims", "bridges"),

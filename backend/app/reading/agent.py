@@ -28,7 +28,7 @@ MAJOR = {"wrong_formula", "missing_condition", "unsupported_claim", "missing_key
          "depends_on_chinese_text", "redirect_to_source", "process_leak", "review_failed_check",
          "coverage_unconfirmed", "bridge_missing", "bridge_incorrect", "unapproved_supplement", "incoherent",
          "bridge_unconfirmed", "bridge_correctness_unconfirmed",
-         "context_missing"}
+         "context_missing", "internal_label", "repeated_text"}
 MINOR = {"narration", "unclear", "verbose", "formula_paraphrased", "short_guide", "review_withdrawn", "formula_rewritten",
          "bridge_checked_by_model",
          "bridge_questioned", "review_citation_invalid", "context_outside_range"}
@@ -388,6 +388,19 @@ def _check_formulas(src: str, field_text: str, target: str, origin_code: str) ->
     return out
 
 
+# the workflow's own labels, as the prompts show them ("C3［condition］", "B1［融入正文", "S2"): never reader text
+INTERNAL_LABEL_RE = re.compile(r"\b[CB]\d+\s*［|［(?:definition|claim|condition|exception|example|counterexample|comparison|"
+                               r"reasoning|formula|warning|procedure|question|transition|other|補充說明|融入正文)[^］]*］")
+
+
+def repeated_sentences(text: str, times: int = 3, min_chars: int = 10) -> list[str]:
+    """Sentences written `times` or more times (a small model looping), ignoring code and formulas."""
+    from collections import Counter
+    prose = re.sub(r"```.*?```|\$\$.+?\$\$|\$[^$\n]+\$|`[^`\n]+`", " ", text or "", flags=re.S)
+    sents = [x.strip(" \n*") for x in re.split(r"[。！？!?\n]", prose)]
+    return [x for x, n in Counter(x for x in sents if len(x) >= min_chars).items() if n >= times]
+
+
 def validate_draft(task: ReadingTaskInput, d: GuideDraft) -> list[Finding]:
     """Program checks, field by field. The 主要正文 must stand on its own: its formulas are looked up in the
     guide only, never in the 中文課文. A formula that is not verbatim (after cosmetic KaTeX normalisation) is an
@@ -406,6 +419,20 @@ def validate_draft(task: ReadingTaskInput, d: GuideDraft) -> list[Finding]:
         if m:
             out.append(Finding(code=code, severity="major", detail=f"{what}：「{m.group(0)}」", origin="program",
                                draft_excerpt=m.group(0)))
+    m = INTERNAL_LABEL_RE.search(guide)
+    if m:
+        out.append(Finding(code="internal_label", severity="major", origin="program", draft_excerpt=m.group(0),
+                           detail=f"主要正文寫出了流程內部的編號或標記：「{m.group(0)}」",
+                           suggested_fix="刪除命題／橋梁編號與功能標記，只寫給讀者看的內容"))
+    sids = set(re.findall(r"\bS\d+\b", guide)) - set(re.findall(r"\bS\d+\b", task.text))
+    if sids:
+        out.append(Finding(code="internal_label", severity="major", origin="program", draft_excerpt=sorted(sids)[0],
+                           detail=f"主要正文寫出了原文句子編號：{'、'.join(sorted(sids))}",
+                           suggested_fix="刪除句子編號，直接寫出內容"))
+    rep = repeated_sentences(guide)
+    if rep:
+        out.append(Finding(code="repeated_text", severity="major", origin="program", draft_excerpt=rep[0][:60],
+                           detail=f"主要正文同一句重複了三次以上：「{rep[0][:40]}」", suggested_fix="每個內容只寫一次"))
     if len(guide) < min(80, len(task.text) * 0.3):
         out.append(Finding(code="short_guide", severity="minor", detail="正文明顯短於原文，可能漏掉內容", origin="program"))
     if not is_chinese(task.text):
