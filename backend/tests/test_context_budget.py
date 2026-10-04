@@ -150,5 +150,24 @@ def test_a_self_escaped_newline_becomes_a_line_break_but_latex_commands_stay():
 
     class G(BaseModel):
         g: str
-    g = parse_model_json('{"g": "第一段。\\\\n\\\\n第二段 $\\\\nabla L$"}', G).g
+    g = parse_model_json('{"g": "第一段。\\\\n\\\\n第二段 $\\\\nabla L$"}', G, prose_fields=("g",)).g
     assert g == "第一段。\n\n第二段 $\\nabla L$"
+
+
+def test_valid_json_keeps_code_regex_and_quotes_exactly():
+    """Counterexample from review: print("\\n") in valid JSON must stay a backslash + n, in any field."""
+    import json as _json
+    from app.llm.tasks import parse_model_json
+
+    class G(BaseModel):
+        guide: str
+        quote: str
+
+    guide = '第一段。\n\n程式：\n```python\nprint("\\n")\n```\n正則 `\\d+\\n` 也一樣。'
+    quote = 'print("\\n")'
+    raw = _json.dumps({"guide": guide, "quote": quote}, ensure_ascii=False)
+    g = parse_model_json(raw, G, prose_fields=("guide",))
+    assert g.guide == guide and g.quote == quote
+    one_line = _json.dumps({"guide": '用 `print("\\n")` 換行，或寫 ```\\n```', "quote": quote}, ensure_ascii=False)
+    g = parse_model_json(one_line, G, prose_fields=("guide",))   # no real line break, but the \n is inside code
+    assert g.guide == '用 `print("\\n")` 換行，或寫 ```\\n```'

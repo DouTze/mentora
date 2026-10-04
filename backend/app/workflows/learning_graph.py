@@ -491,6 +491,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             out, _ = await run_structured(c, [HumanMessage(content=render(pr[template], {**fields, **extra}))], NotesOutput,
                                           task="compact", node=step, prompt_version=pv, source_ids=src_ids,
                                           check=notes.notes_check(cmap), json_schema=notes.notes_schema(cmap),
+                                          prose_fields=("text",),
                                           meta={"step": step, "claims_map": claims_meta},
                                           min_max_tokens=3072, min_context_tokens=16384)
             return out

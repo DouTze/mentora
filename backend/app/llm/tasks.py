@@ -95,30 +95,80 @@ def repair_latex_escapes(text: str) -> str:
 
 
 LITERAL_NEWLINE_RE = re.compile(r"\\n(?![A-Za-z])")
+CODE_SPAN_RE = re.compile(r"```.*?(?:```|$)|`[^`\n]*`", re.S)
+MATH_SPAN_RE = re.compile(r"\$\$.+?\$\$|\$[^$]+\$", re.S)
+# what a strict decoder leaves of a single-backslash LaTeX command: \t + "op", \n + "abla", \r + "ho" …
+_EATEN = {ch: re.compile(ch + "(?:" + "|".join(sorted((w[1:] for w in LATEX_ESC if w[0] == c and len(w) > 1), key=len,
+                                                     reverse=True)) + r")(?![A-Za-z])")
+          for c, ch in (("t", "\t"), ("n", "\n"), ("r", "\r"))}
 
 
-def _literal_newlines(obj):
-    """A model that escaped its own newline ("\\\\n") leaves a backslash + n in the text; outside a LaTeX command
-    (\\nabla, \\neq …) that is always meant as a line break."""
+def _strings(obj):
     if isinstance(obj, str):
-        return LITERAL_NEWLINE_RE.sub("\n", obj)
+        yield obj
+    elif isinstance(obj, list):
+        for x in obj:
+            yield from _strings(x)
+    elif isinstance(obj, dict):
+        for x in obj.values():
+            yield from _strings(x)
+
+
+def _latex_eaten(obj) -> bool:
+    """True when a strictly decoded value shows a LaTeX command turned into a control character: a backspace or form
+    feed (\bar, \frac), or a tab / line break followed by the rest of a command inside a formula (\top, \nabla)."""
+    for s in _strings(obj):
+        if "\x08" in s or "\x0c" in s:
+            return True
+        for m in MATH_SPAN_RE.finditer(s):
+            if any(rx.search(m.group(0)) for rx in _EATEN.values()):
+                return True
+    return False
+
+
+def _fix_literal_newlines(s: str) -> str:
+    """A model that escaped its own line breaks leaves backslash + n in prose. Only a value with no real line break
+    is treated so, and code (fences, inline code) is left exactly as written."""
+    if "\n" in s or "\\n" not in s:
+        return s
+    out, pos = [], 0
+    for m in CODE_SPAN_RE.finditer(s):
+        out.append(LITERAL_NEWLINE_RE.sub("\n", s[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(LITERAL_NEWLINE_RE.sub("\n", s[pos:]))
+    return "".join(out)
+
+
+def _prose_newlines(obj, fields: tuple[str, ...]):
     if isinstance(obj, list):
-        return [_literal_newlines(x) for x in obj]
+        return [_prose_newlines(x, fields) for x in obj]
     if isinstance(obj, dict):
-        return {k: _literal_newlines(v) for k, v in obj.items()}
+        return {k: (_fix_literal_newlines(v) if k in fields and isinstance(v, str) else _prose_newlines(v, fields))
+                for k, v in obj.items()}
     return obj
 
 
-def parse_model_json(text: str, schema: type[BaseModel]) -> BaseModel:
+def parse_model_json(text: str, schema: type[BaseModel], prose_fields: tuple[str, ...] = ()) -> BaseModel:
+    """Valid JSON keeps its values. The LaTeX repair is used only when the strict parse fails or visibly ate a LaTeX
+    command; self-escaped line breaks are restored only in the named prose fields (never in code, quotes or ids)."""
     cleaned = THINK_RE.sub("", text or "").strip()
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned)
     start = cleaned.find("{")
     if start == -1:
         raise OutputInvalid("輸出不含 JSON 物件")
+    raw = cleaned[start:]
+    dec = json.JSONDecoder()
     try:
         # the first complete object; text a model appends after it (a repeat, a remark) is ignored
-        obj, _ = json.JSONDecoder().raw_decode(repair_latex_escapes(cleaned[start:]))
-        obj = _literal_newlines(obj)
+        try:
+            obj, _ = dec.raw_decode(raw)
+            if _latex_eaten(obj):
+                obj, _ = dec.raw_decode(repair_latex_escapes(raw))
+        except ValueError:
+            obj, _ = dec.raw_decode(repair_latex_escapes(raw))
+        if prose_fields:
+            obj = _prose_newlines(obj, prose_fields)
         return schema.model_validate(obj)
     except ValidationError as e:
         err = e.errors()[0]
@@ -150,7 +200,7 @@ async def run_structured(ctx: TaskContext, messages: list[BaseMessage], schema: 
                          check: Callable[[Any], None] | None = None, min_max_tokens: int = 0,
                          min_context_tokens: int = 0, purpose: str = "first",
                          allow_fix: bool = True, packet: PacketRecord | None = None,
-                         json_schema: dict | None = None) -> tuple[Any, list[CallRecord]]:
+                         json_schema: dict | None = None, prose_fields: tuple[str, ...] = ()) -> tuple[Any, list[CallRecord]]:
     """Every attempt (first try and format fix) is checked against the context budget before it is sent; a request
     that cannot fit raises TaskError("context_overflow") without calling the model. A format fix that would not fit
     with the invalid output attached is sent with the original prompt and the error note only. `json_schema`
@@ -200,7 +250,7 @@ async def run_structured(ctx: TaskContext, messages: list[BaseMessage], schema: 
         rec.raw, rec.latency_ms = text, ai.response_metadata.get("latency_ms")
         rec.usage = ai.response_metadata.get("usage") or {}
         try:
-            parsed = parse_model_json(text, schema)
+            parsed = parse_model_json(text, schema, prose_fields)
             if check:
                 check(parsed)
         except OutputInvalid as e:

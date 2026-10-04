@@ -145,6 +145,7 @@ def gate1_program(source: str, u: SourceUnderstanding, *, source_kind: str = "md
     segments = source_segments(source)
     segs = dict(segments)
     claims = resolve_claims(source, u.claims, u.translations)
+    raw = {c.id: c for c in u.claims}
     seen_ids: set[str] = set()
     citing: dict[str, list[SourceClaim]] = {sid: [] for sid, _ in segments}
     for c in claims:
@@ -160,6 +161,10 @@ def gate1_program(source: str, u: SourceUnderstanding, *, source_kind: str = "md
         for x in c.sentences:
             citing[x].append(c)
         src = c.quote.strip() or " ".join(segs[x] for x in c.sentences)
+        why = rewritten(source, raw.get(c.id, c), c, u.translations, {ra._norm_math(f) for f in evidence_formulas(symbol_evidence)})
+        if why:   # a sentence being cited proves where the claim comes from, not that it is understood correctly
+            checks.append(GateCheck(id=f"rewrite:{c.id}", kind="rewrite_check", status="fail", evidence=c.statement[:80],
+                                    detail=f"{c.id} {why}，必須經語意核對才能成為已驗證命題"))
         added = [m for m in parity(src, _stated(c)) if "多了否定" in m]
         if added:
             checks.append(GateCheck(id=f"strength:{c.id}", kind="strength_flag", status="fail", evidence=c.statement[:80],
@@ -214,6 +219,12 @@ def gate1_program(source: str, u: SourceUnderstanding, *, source_kind: str = "md
             checks.append(GateCheck(id=f"translation:{sid}", kind="translation_flag" if lost else "translation",
                                     status="fail" if lost else "pass", evidence=zh[:80],
                                     detail=f"{sid} 的中文課文可能沒有保留命題力度：{'；'.join(lost)}" if lost else ""))
+    # formulas read from the PDF regions are required content: the claims (or the 中文課文) must carry each one
+    stated_math = ra._norm_math(" ".join([u.chinese_text or ""] + [" ".join(c.formulas) + " " + c.statement for c in claims]))
+    for k, f in enumerate(evidence_formulas(symbol_evidence), 1):
+        ok = ra._norm_math(f) in stated_math
+        checks.append(GateCheck(id=f"symbol_formula:V{k}", kind="symbol_formula", status="pass" if ok else "fail",
+                                evidence=f, detail="" if ok else f"依 PDF 版面取證的公式 ${f}$ 沒有出現在命題中，請在相關命題的 formulas 寫出"))
     note = notation_check(source, source_kind, symbol_evidence)
     if note.status == "pass" and (symbol_evidence or {}).get("status") == "confirmed":
         mism = notation_mismatches(symbol_evidence, [u.chinese_text or ""] + [" ".join(c.formulas) + " " + c.statement
@@ -222,6 +233,38 @@ def gate1_program(source: str, u: SourceUnderstanding, *, source_kind: str = "md
             note = note.model_copy(update={"status": "fail", "detail": "；".join(mism)})
     checks.append(note)
     return checks
+
+
+def evidence_formulas(evidence: dict | None) -> list[str]:
+    """Formulas read from the rendered PDF regions (confirmed symbol evidence); each one must reach the claims and
+    the 主要正文, since the text layer lost them."""
+    ev = evidence or {}
+    if ev.get("status") != "confirmed":
+        return []
+    return [f.strip() for f in (ev.get("transcription") or {}).get("formulas", []) if f.strip()]
+
+
+def _plain(t: str) -> str:
+    return re.sub(r"[\s，。、；：！？,.;:!?「」『』（）()\"'*`]+", "", t or "")
+
+
+def rewritten(source: str, raw: SourceClaim, resolved: SourceClaim, translations: list | None,
+              evidence_math: set[str] | None = None) -> str:
+    """Why a claim is more than the cited text itself ("" = the fast path: it restates the cited source, or for a
+    non-Chinese source the cited sentences' audited translation, and adds nothing)."""
+    reasons = []
+    if raw.statement.strip():
+        tr = {t.id: t.zh for t in translations or []}
+        default = resolved.source_text if is_chinese(source) else "".join(tr.get(x, "") for x in raw.sentences)
+        if _plain(raw.statement) != _plain(default) and _plain(raw.statement) != _plain(resolved.source_text):
+            reasons.append("的陳述經過改寫")
+    if raw.conditions or raw.exceptions or raw.strength.strip():
+        reasons.append("附加了條件／例外／力度欄位")
+    src_math = ra._norm_math(resolved.source_text)
+    if any(ra._norm_math(f) not in src_math and ra._norm_math(f) not in (evidence_math or set())
+           for f in raw.formulas if f.strip()):
+        reasons.append("列出所引原文沒有逐字出現的公式")
+    return "、".join(reasons)
 
 
 def _stated(c: SourceClaim) -> str:
@@ -288,26 +331,30 @@ def notation_check(source: str, source_kind: str, evidence: dict | None) -> Gate
                      evidence=ev.get("summary", ""))
 
 
+CLAIM_FLAGS = ("strength_flag", "rewrite_check")
+
+
 def needs_source_audit(source: str, checks: list[GateCheck]) -> bool:
-    """A non-Chinese source always needs the translation audit; a Chinese one only to settle strength flags."""
+    """A non-Chinese source always needs the translation audit; a Chinese one when a claim was rewritten or carries
+    added fields, or a strength marker looks lost (the cited text alone is the fast path)."""
     if not is_chinese(source):
         return True
-    return any(c.kind == "strength_flag" and c.status == "fail" for c in checks)
+    return any(c.kind in CLAIM_FLAGS and c.status == "fail" for c in checks)
 
 
 def flagged_claims(checks: list[GateCheck], claims: list[SourceClaim]) -> set[str]:
-    """Claim ids behind the strength flags (a sentence flag points at every claim citing that sentence)."""
+    """Claim ids behind the strength / rewrite flags (a sentence flag points at every claim citing that sentence)."""
     out: set[str] = set()
     for c in checks:
-        if c.kind == "strength_flag" and c.status == "fail":
+        if c.kind in CLAIM_FLAGS and c.status == "fail":
             ref = c.id.split(":", 1)[1]
             out |= {x.id for x in claims if x.id == ref or ref in x.sentences}
     return out
 
 
 def audit_items(source: str, u: SourceUnderstanding, checks: list[GateCheck]) -> tuple[list[tuple[str, str]], list[SourceClaim]]:
-    """(sentences to audit, claims to audit): every sentence of a non-Chinese source (translation) and all claims;
-    for a Chinese source no sentences, only the claims behind strength flags."""
+    """(sentences to audit, claims to audit): every sentence of a non-Chinese source (translation); claims behind a
+    strength or rewrite flag, in any language."""
     flagged = flagged_claims(checks, u.claims)
     claims = [c for c in resolve_claims(source, u.claims, u.translations) if c.id in flagged]
     return (source_segments(source) if not is_chinese(source) else []), claims
@@ -351,7 +398,7 @@ def gate1_apply_audit(source: str, u: SourceUnderstanding, checks: list[GateChec
             out[k] = bad
     verdict = {c.id: c for c in audit.claims}
     for k, c in enumerate(out):
-        if c.kind == "strength_flag" and c.status == "fail":
+        if c.kind in CLAIM_FLAGS and c.status == "fail":
             behind = flagged_claims([c], u.claims)
             if behind and all(verdict.get(x) and verdict[x].verdict == "faithful" for x in behind):
                 out[k] = c.model_copy(update={"status": "pass", "detail": c.detail + "（核對：力度一致）"})
@@ -406,12 +453,12 @@ def gate1_decide(checks: list[GateCheck], *, audited: bool, need_audit: bool, ca
     - missing symbol evidence (unverified) holds: no revision can supply it."""
     fails = [c for c in checks if c.status == "fail"]
     unverified = [c for c in checks if c.status == "unverified"]
-    structural = [c for c in fails if c.kind not in ("strength_flag", "translation_flag")]
+    structural = [c for c in fails if c.kind not in ("strength_flag", "translation_flag", "rewrite_check")]
     if any(not c.fixable for c in unverified):   # missing evidence: nothing a revision or an audit can supply
         return "hold"
     if structural:
         return "revise" if can_revise else "hold"
-    if fails:   # strength flags only
+    if fails:   # claim flags only (strength / rewrite)
         if need_audit and not audited and can_audit:
             return "audit"
         return "revise" if can_revise else "hold"
@@ -473,11 +520,16 @@ def ra_overlap(text: str, ref: str) -> float:
 
 
 def gate2_program(source: str, guide: str, claims: list[SourceClaim], bridges: BridgePlan, bridges_used: list[str],
-                  task) -> list[ra.Finding]:
-    """Program checks of the 主要正文 alone (formulas, KaTeX, independence from the 中文課文, process leaks) plus
-    the bridge rule: a 補充說明 paragraph needs an approved supplement bridge."""
+                  task, symbol_evidence: dict | None = None) -> list[ra.Finding]:
+    """Program checks of the 主要正文 alone (formulas, KaTeX, independence from the 中文課文, process leaks), the
+    formulas read from PDF regions (each must be in the guide), and the bridge rule: a 補充說明 paragraph needs an
+    approved supplement bridge."""
     fs = ra.validate_draft(task, ra.GuideDraft(guide=guide or "（空）", chinese_text="（不檢查）"))
     fs = [f for f in fs if f.target == "guide"]
+    ev_math = evidence_formulas(symbol_evidence)
+    if ev_math:
+        fs += [f.model_copy(update={"detail": f.detail.replace("主要正文沒有原樣保留", "主要正文沒有寫出依 PDF 版面取證的")})
+               for f in ra._check_formulas(" ".join(f"$${x}$$" for x in ev_math), guide or "", "guide", "formula_not_verbatim")]
     # a 補充說明 label is not an approval: with no approved bridge at all it is a fact; with bridges, the audit must
     # tie its content to one (an addition that matches no bridge is reported there)
     if re.search(r"補充說明", guide or "") and not bridges.bridges:
@@ -544,6 +596,28 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
         elif v.verdict == "unnecessary":
             out.append(ra.Finding(code="bridge_questioned", severity="minor", origin="review", item=b.id,
                                   detail=f"檢查認為 {b.id} 可能不必要：{v.note[:80]}"))
+        if v.verdict in ("ok", "unnecessary"):
+            # present: the quoted guide passage must exist and carry the bridge's content
+            full = ra.expand_quote(guide, v.guide_quote, 6)
+            if not full or ra_overlap(b.content, full) < SUPPLEMENT_MATCH:
+                out.append(ra.Finding(code="bridge_unconfirmed", severity="major", status="unconfirmed", origin="review",
+                                      item=b.id, source_excerpt=b.content, draft_excerpt=v.guide_quote,
+                                      detail=f"教學橋梁 {b.id} 是否寫進正文無法確認："
+                                             + ("引用的句子不在主要正文" if not full else "引用的句子與橋梁內容不符")))
+        if v.verdict != "absent":
+            # correct: judged on its own, with support the program can at least check the shape of
+            segs = {sid for sid, _ in source_segments(source)}
+            cited = set(re.findall(r"S\d+", v.support))
+            support_ok = (cited and cited <= segs) if b.basis == "source" else bool(v.support.strip())
+            if v.correct == "no":
+                out.append(ra.Finding(code="bridge_incorrect", severity="major", origin="review", item=b.id,
+                                      detail=f"教學橋梁 {b.id} 的內容不正確：{v.note[:80] or b.content[:60]}",
+                                      suggested_fix="改正或刪除這項補充內容"))
+            elif v.correct == "unsure" or not support_ok:
+                out.append(ra.Finding(code="bridge_correctness_unconfirmed", severity="major", status="unconfirmed",
+                                      origin="review", item=b.id, source_excerpt=b.content,
+                                      detail=f"教學橋梁 {b.id} 的正確性沒有可核對的依據"
+                                             + ("（依據原文的橋梁必須引用存在的原文句子編號）" if b.basis == "source" else "")))
     kinds = {"unsupported": "unsupported_claim", "incorrect": "unsupported_claim", "process": "process_leak",
              "narration": "narration", "redirect": "redirect_to_source"}
     for a in audit.additions:

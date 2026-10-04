@@ -39,7 +39,10 @@ class MockBackend(LLMBackend):
         elif step == "context":
             text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
         elif step in ("understand", "revise_source"):
-            text = json.dumps(self._understand(meta.get("quote_text", ""), meta.get("segments") or []), ensure_ascii=False)
+            u = self._understand(meta.get("quote_text", ""), meta.get("segments") or [])
+            if meta.get("evidence_formulas"):   # formulas read from the PDF region go with the first claim
+                u["claims"][0]["formulas"] = list(meta["evidence_formulas"])
+            text = json.dumps(u, ensure_ascii=False)
         elif step == "source_audit":
             text = json.dumps({"sentences": [{"id": sid, "verdict": "faithful", "note": "（模擬）"}
                                              for sid, s in meta.get("sentences") or []],
@@ -50,12 +53,15 @@ class MockBackend(LLMBackend):
         elif step in ("draft", "revise_body") and meta.get("claims") is not None:
             # simulated 主要正文: restates every claimed source passage verbatim (formulas included); no teaching
             body = "\n\n".join(c["source_text"] for c in meta["claims"])
+            body += "".join(f"\n\n$${f}$$" for f in meta.get("evidence_formulas") or [])
+            body += "".join(f"\n\n{b['content']}" for b in meta.get("bridges") or [])
             text = json.dumps({"guide": "（模擬導讀）以下逐句重述原文。\n\n" + body, "key_points": [self._first_sentence(body)[:40]],
                                "check": "你能用自己的話說出這一段的重點嗎？", "bridges_used": [], "limits": []}, ensure_ascii=False)
         elif step == "body_audit":
             text = json.dumps({"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": c["source_text"], "note": ""}
                                           for c in meta.get("claims") or []],
-                               "bridges": [{"id": b, "verdict": "ok", "guide_quote": "", "note": ""} for b in meta.get("bridge_ids") or []],
+                               "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": "S1",
+                                            "guide_quote": b["content"], "note": ""} for b in meta.get("bridges") or []],
                                "additions": [], "uncovered_source": [], "coherence": "pass", "coherence_note": "（模擬）"},
                               ensure_ascii=False)
         elif step in ("notes", "notes_revise"):   # simulated notes: one per verified claim, its statement as is

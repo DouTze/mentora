@@ -189,8 +189,13 @@ class ClaimCoverage(BaseModel):
 
 
 class BridgeReview(BaseModel):
+    """Being approved by the planner is not being correct: an "ok" needs a guide passage that carries the bridge,
+    and the bridge's subject matter is judged separately (correct) with its support (source sentence ids for a
+    source-based bridge, the derivation or why it is standard prerequisite knowledge otherwise)."""
     id: str
     verdict: Literal["ok", "absent", "incorrect", "unnecessary"]
+    correct: Literal["yes", "no", "unsure"]
+    support: str = ""
     guide_quote: str = ""
     note: str = ""
 

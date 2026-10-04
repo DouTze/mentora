@@ -46,18 +46,27 @@ def per_sentence(text: str, cn: str | None = None) -> dict:
 
 def covered_audit(meta) -> dict:
     return {"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": c["source_text"]} for c in meta["claims"]],
-            "bridges": [{"id": b, "verdict": "ok", "guide_quote": ""} for b in meta.get("bridge_ids") or []],
+            "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": "S1", "guide_quote": b["content"]}
+                        for b in meta.get("bridges") or []],
             "additions": [], "uncovered_source": [], "coherence": "pass"}
 
 
 def verbatim_body(meta) -> dict:
-    return {"guide": "這一段的內容如下。\n\n" + "\n\n".join(c["source_text"] for c in meta["claims"]),
+    return {"guide": "這一段的內容如下。\n\n" + "\n\n".join(c["source_text"] for c in meta["claims"])
+                     + "".join(f"\n\n$${f}$$" for f in meta.get("evidence_formulas") or [])
+                     + "".join(f"\n\n{b['content']}" for b in meta.get("bridges") or []),
             "key_points": ["重點"], "check": "？", "bridges_used": [], "limits": []}
 
 
+def with_evidence(u: dict, m: dict) -> dict:
+    if m.get("evidence_formulas"):   # a faithful model writes the formulas read from the PDF region
+        u["claims"][0]["formulas"] = list(m["evidence_formulas"])
+    return u
+
+
 DEFAULTS = {
-    "understand": lambda m: per_sentence(m["quote_text"]),
-    "revise_source": lambda m: per_sentence(m["quote_text"]),
+    "understand": lambda m: with_evidence(per_sentence(m["quote_text"]), m),
+    "revise_source": lambda m: with_evidence(per_sentence(m["quote_text"]), m),
     "source_audit": lambda m: {"sentences": [{"id": s, "verdict": "faithful", "chinese_quote": ""} for s, _ in m["sentences"]],
                                "claims": [{"id": c, "verdict": "faithful"} for c in m["claim_ids"]]},
     "plan_bridges": lambda m: {"learning_goal": "讀懂", "bridges": []},
@@ -472,3 +481,73 @@ async def test_a_supplement_paragraph_must_carry_an_approved_bridge():
     b = Scripted({"plan_bridges": [bridge], "draft": [body("三次握手確保雙方建立可靠的連線。")]})
     out, _ = await run(b, index=0)
     assert "unapproved_supplement" in b.prompt("revise_body")                     # content no bridge approved
+
+
+async def test_a_rewritten_claim_is_audited_before_it_can_be_cached():
+    """Review counterexample: a cited sentence proves where a claim comes from, not that it is understood. "長乘以寬"
+    restated as "長加上寬" must not become a verified source; the cited text itself takes the fast path."""
+    area = [{"id": "q", "index": 0, "unit_id": "u-area", "label": "第 1 行", "heading": None, "text": "矩形面積等於長乘以寬。"}]
+    wrong = {"chinese_text": None, "claims": [claim(1, ["S1"], "矩形面積等於長加上寬。")]}
+    distorted = {"sentences": [], "claims": [{"id": "C1", "verdict": "distorted", "note": "乘被改成加"}]}
+    cache: dict = {}
+    b = Scripted({"understand": [wrong], "revise_source": [wrong], "source_audit": [distorted, distorted]})
+    out, _ = await run(b, index=0, quotes=area, vsrc_cache=cache)
+    assert b.steps() == ["understand", "source_audit", "revise_source", "source_audit"]
+    assert out["status"] == "failed" and out["error"]["code"] == "source_unverified" and not cache
+    b = Scripted({"understand": [wrong]})                        # the audit (default) judges it faithful: allowed
+    out, _ = await run(b, index=0, quotes=area)
+    assert b.steps()[:2] == ["understand", "source_audit"] and out["status"] == "accepted"
+    verbatim = {"chinese_text": None, "claims": [claim(1, ["S1"], "")]}
+    b = Scripted({"understand": [verbatim]})
+    out, _ = await run(b, index=0, quotes=area)
+    assert "source_audit" not in b.steps() and out["status"] == "accepted"
+    added = {"chinese_text": None, "claims": [claim(1, ["S1"], "", conditions=["長與寬都是正數"])]}
+    b = Scripted({"understand": [added]})
+    await run(b, index=0, quotes=area)
+    assert "source_audit" in b.steps()                          # an added condition is checked too
+
+
+async def test_formulas_read_from_the_pdf_region_must_reach_the_claims_and_the_guide():
+    """Review counterexample: confirmed symbol evidence, but claims and guide drop the formula entirely."""
+    no_formula = {"chinese_text": None, "claims": [claim(1, ["S1"], "")]}
+    b = Scripted({"understand": [no_formula], "revise_source": [no_formula]}, vision=True)
+    out, _ = await run(b, index=0, quotes=PDF_UNIT, kind="pdf", evidence=needs_visual())
+    assert out["status"] == "failed" and "依 PDF 版面取證的公式" in out["error"]["detail"]
+    assert "draft" not in b.steps()
+
+    prose = lambda m: {"guide": "權重向量會沿梯度的反方向更新，學習率決定每一步的大小。", "key_points": [], "check": "",
+                       "bridges_used": []}
+    b = Scripted({"draft": [prose], "revise_body": [prose]}, vision=True)
+    out, _ = await run(b, index=0, quotes=PDF_UNIT, kind="pdf", evidence=needs_visual())
+    assert out["status"] == "failed" and "依 PDF 版面取證的" in out["error"]["detail"]
+    assert "\\mathbf{w} \\leftarrow" in b.prompt("draft") and "\\mathbf{w} \\leftarrow" in b.prompt("revise_body")
+    b = Scripted(vision=True)
+    out, _ = await run(b, index=0, quotes=PDF_UNIT, kind="pdf", evidence=needs_visual())
+    assert out["status"] == "accepted" and "\\mathbf{w} \\leftarrow" in b.prompt("body_audit")
+
+
+async def test_an_ok_bridge_needs_a_real_guide_passage_and_a_supported_correctness_judgement():
+    """Review counterexample: the bridge never reaches the guide, the audit says ok with an empty quote."""
+    bridge = {"learning_goal": "x", "bridges": [{"id": "B1", "obstacle": "不熟悉可微", "targets": ["C1"],
+                                                "content": "可微表示函數在該點有切線斜率。", "basis": "source"}]}
+    no_bridge_body = lambda m: {**verbatim_body({**m, "bridges": []}), "bridges_used": ["B1"]}
+
+    def audit(**b1):
+        return lambda m: {**covered_audit({**m, "bridges": []}),
+                          "bridges": [{"id": "B1", "verdict": "ok", "correct": "yes", "support": "S1", "guide_quote": "", **b1}]}
+    b = Scripted({"plan_bridges": [bridge], "draft": [no_bridge_body], "revise_body": [no_bridge_body],
+                  "body_audit": [audit(), audit()]})
+    out, _ = await run(b, index=0)
+    assert out["status"] == "failed" and "是否寫進正文無法確認" in out["error"]["detail"]
+
+    b = Scripted({"plan_bridges": [bridge], "body_audit": [audit(guide_quote="可微表示函數在該點有切線斜率", correct="no",
+                                                                note="可微不等於只有切線")] * 2})
+    out, _ = await run(b, index=0)
+    assert out["status"] == "failed" and "內容不正確" in out["error"]["detail"]
+
+    b = Scripted({"plan_bridges": [bridge], "body_audit": [audit(guide_quote="可微表示函數在該點有切線斜率", support="S9")]})
+    out, _ = await run(b, index=0)
+    # a source-based bridge citing no real sentence is not "correct": re-checked (the re-check confirms the doubt),
+    # revised, and accepted only when the next audit gives real support
+    steps = b.steps()
+    assert steps.index("verify") < steps.index("revise_body") and out["status"] == "accepted"

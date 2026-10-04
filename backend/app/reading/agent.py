@@ -27,8 +27,10 @@ MAJOR = {"wrong_formula", "missing_condition", "unsupported_claim", "missing_key
          "followed_injection", "broken_math", "missing_chinese_text", "empty_guide", "formula_not_verbatim",
          "depends_on_chinese_text", "redirect_to_source", "process_leak", "review_failed_check",
          "coverage_unconfirmed", "bridge_missing", "bridge_incorrect", "unapproved_supplement", "incoherent",
+         "bridge_unconfirmed", "bridge_correctness_unconfirmed",
          "context_missing"}
 MINOR = {"narration", "unclear", "verbose", "formula_paraphrased", "short_guide", "review_withdrawn", "formula_rewritten",
+         "bridge_checked_by_model",
          "bridge_questioned", "review_citation_invalid", "context_outside_range"}
 MISSING_CODES = {"missing_condition", "missing_key_claim"}
 DRAFT_CODES = {"unsupported_claim", "meaning_changed", "wrong_formula", "followed_injection"}
@@ -210,7 +212,8 @@ def target_text(d: dict, target: str) -> str:
 
 
 VERIFIABLE = MISSING_CODES | {"meaning_changed", "wrong_formula", "formula_not_verbatim", "unsupported_claim",
-                              "followed_injection", "review_failed_check", "coverage_unconfirmed"}
+                              "followed_injection", "review_failed_check", "coverage_unconfirmed", "bridge_unconfirmed",
+                              "bridge_correctness_unconfirmed"}
 
 
 def review_findings(r: ReviewResult, draft: GuideDraft | dict, source: str) -> list[Finding]:
@@ -286,6 +289,14 @@ def apply_verify(findings: list[Finding], idx: list[int], v: VerifyResult, draft
             ok = True
         elif f.code in ("unsupported_claim", "followed_injection", "meaning_changed") and f.status == "confirmed":
             ok, why = False, "有效引用的新增／改義問題需經修訂處理"
+        elif f.code == "bridge_unconfirmed":   # the guide passage must exist and carry the bridge's content
+            from .gates import SUPPLEMENT_MATCH, ra_overlap
+            full = expand_quote(field, c.guide_quote, 6)
+            ok = bool(full) and ra_overlap(f.source_excerpt, full) >= SUPPLEMENT_MATCH
+            why = "" if ok else "沒有引出寫進這項橋梁內容的正文句子"
+        elif f.code == "bridge_correctness_unconfirmed":   # a focused second judgement with its reason, recorded as such
+            ok = bool(c.reason.strip())
+            why = "" if ok else "沒有說明判斷依據"
         elif f.code == "formula_not_verbatim":   # the guide's own (rewritten) formula must be quoted from the guide
             ok = contains_quote(field, c.guide_quote, 3) and "$" in c.guide_quote
             why = "" if ok else "沒有從主要正文複製出改寫後的公式"
@@ -300,7 +311,8 @@ def apply_verify(findings: list[Finding], idx: list[int], v: VerifyResult, draft
             why = ("引用的句子不在" + ("中文課文" if f.target == "chinese_text" else "主要正文") if not quoted else
                    "；".join(lost) if lost else f"缺少公式 {missing_math}" if missing_math else "沒有可核對的原文依據" if not ok else "")
         if ok:
-            out[idx[k]] = f.model_copy(update={"code": "review_withdrawn" if f.origin == "review" else "formula_rewritten",
+            out[idx[k]] = f.model_copy(update={"code": "bridge_checked_by_model" if f.code == "bridge_correctness_unconfirmed"
+                                                else "review_withdrawn" if f.origin == "review" else "formula_rewritten",
                                                 "severity": "minor", "status": "confirmed",
                                                 "detail": f.detail + f"（核對撤回：{(c.guide_quote or c.reason)[:60]}）"})
         else:
