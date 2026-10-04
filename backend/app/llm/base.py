@@ -8,6 +8,12 @@ class LLMError(Exception):
     """Raised when the backend cannot produce a response (connection, timeout, load failure)."""
 
 
+class DegenerateOutput(LLMError):
+    """The backend ran but aborted the generation because the model kept repeating itself (Ollama: "prediction
+    aborted, token repeat limit reached"). The model is available; the output is invalid. A subclass of LLMError so
+    callers that only know LLMError (the legacy pipeline) behave as before."""
+
+
 @dataclass(frozen=True)
 class Capabilities:
     """What the loaded model can actually take, as reported by the backend (never guessed from a model name).

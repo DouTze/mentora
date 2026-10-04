@@ -183,3 +183,31 @@ def test_the_guide_schema_bounds_its_strings_by_the_output_budget():
     assert sch["properties"]["key_points"]["maxItems"] == 3 and sch["properties"]["limits"]["maxItems"] == 4
     assert body_schema(long_)["properties"]["guide"]["maxLength"] > sch["properties"]["guide"]["maxLength"]
 
+
+class Looping(Limited):
+    """Outputs in order; the string "LOOP" stands for a generation the server aborted as a repetition loop."""
+
+    async def generate(self, messages, *, temperature, max_tokens, context_tokens, meta=None):
+        from app.llm.base import DegenerateOutput
+        out = self.outputs[0]
+        if out == "LOOP":
+            self.outputs.pop(0)
+            self.requests.append({"messages": messages})
+            raise DegenerateOutput("模型輸出陷入重複而被中止：prediction aborted, token repeat limit reached")
+        return await super().generate(messages, temperature=temperature, max_tokens=max_tokens,
+                                      context_tokens=context_tokens, meta=meta)
+
+
+async def test_repetition_abort_is_an_invalid_output_retried_once_not_an_outage():
+    b = Looping(32768, ["LOOP", json.dumps({"answer": "好"})])
+    ctx = ctx_for(b)
+    out, recs = await run_structured(ctx, [HumanMessage(content="問題")], Out, task="ask", node="answer", prompt_version="t")
+    assert out.answer == "好"
+    assert [r.error_kind for r in recs] == ["invalid_output", None] and recs[1].purpose == "format_fix"
+    retry = b.requests[1]["messages"]
+    assert "重複" in retry[-1]["content"] and retry[0]["content"] == "問題"   # same task, plus the warning
+
+    b = Looping(32768, ["LOOP", "LOOP"])
+    with pytest.raises(TaskError) as e:
+        await run_structured(ctx_for(b), [HumanMessage(content="問題")], Out, task="ask", node="answer", prompt_version="t")
+    assert e.value.kind == "invalid_output" and len(b.requests) == 2      # one retry only, then a held output

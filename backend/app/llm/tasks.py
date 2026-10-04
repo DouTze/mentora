@@ -20,7 +20,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, ValidationError
 
-from .base import LLMError
+from .base import DegenerateOutput, LLMError
 from .context import PacketRecord, check_fit
 from .langchain_bridge import to_backend_messages
 from .runtime import BudgetExceeded, CallBudget, CallRecord, ModelRuntime, TraceSink
@@ -242,6 +242,19 @@ async def run_structured(ctx: TaskContext, messages: list[BaseMessage], schema: 
         chain = model.bind(**bind) | RunnableLambda(lambda m: (m, m.content))
         try:
             ai, text = await chain.ainvoke(msgs)
+        except DegenerateOutput as e:
+            # the model is up but looped until the server aborted it: an invalid output, fixed like one (no text to
+            # quote back, so the retry only adds the warning; the changed prompt also moves a fixed seed off the loop)
+            rec.error, rec.error_kind = str(e), "invalid_output"
+            ctx.sink.record(rec)
+            records.append(rec)
+            if not allow_fix or purpose == "format_fix" or not ctx.budget.can("format_fix"):
+                raise TaskError("invalid_output", str(e), records=records) from e
+            msgs = list(messages) + [HumanMessage(content=(
+                "上一次輸出一直重複同一段文字，被中止了。請重新作答：每個欄位只寫一次，不要重複句子或符號，"
+                "只輸出一個符合格式的 JSON 物件。"))]
+            purpose = "format_fix"
+            continue
         except LLMError as e:
             rec.error, rec.error_kind = str(e), "unavailable"
             ctx.sink.record(rec)

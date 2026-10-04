@@ -197,3 +197,19 @@ def test_local_digest_falls_back_to_the_manifest_file(tmp_path, monkeypatch):
     p = er.provenance(args, cfg, er.build_backend(cfg), models_dir=str(tmp_path))
     assert p["run_class"] == "remote-quality" and p["local_model_digest"] == want
 
+
+def test_ollama_repetition_abort_is_degenerate_output_locally_and_through_the_proxy(monkeypatch):
+    from app.llm.base import DegenerateOutput
+    loop = {"error": "prediction aborted, token repeat limit reached"}
+    replies = [httpx.Response(500, json=loop), httpx.Response(200, json=loop),
+               httpx.Response(500, json={"error": "model runner has unexpectedly stopped"})]
+    real = httpx.AsyncClient
+    monkeypatch.setattr(ollama.httpx, "AsyncClient", lambda **kw: real(
+        transport=httpx.MockTransport(lambda req: replies.pop(0)), **kw))
+    with pytest.raises(DegenerateOutput):
+        chat("http://127.0.0.1:11434")             # local Ollama: HTTP 500
+    with pytest.raises(DegenerateOutput):
+        chat("http://127.0.0.1:11434")             # remote proxy: 200 with the error in the body
+    with pytest.raises(LLMError) as e:
+        chat("http://127.0.0.1:11434")             # a crashed runner is still an outage
+    assert not isinstance(e.value, DegenerateOutput)

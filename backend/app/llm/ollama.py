@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .base import Capabilities, LLMBackend, LLMError, LLMResult
+from .base import Capabilities, DegenerateOutput, LLMBackend, LLMError, LLMResult
 
 
 # Ollama 0.35 (qwen3-vl 2b/4b/8b) ignores think:false: the reasoning lands in `thinking`, content stays empty and the
@@ -24,6 +24,15 @@ from .base import Capabilities, LLMBackend, LLMError, LLMResult
 # already closed (what Qwen3's own template emits for enable_thinking=False, as the OpenVINO adapter does) makes
 # Ollama continue that turn: content is the schema-constrained JSON again. Only for Qwen3-family models.
 THINK_PREFILL = "<think>\n\n</think>\n\n"
+
+
+REPEAT_ABORT = ("token repeat limit", "prediction aborted")
+
+
+def generation_error(detail: str) -> LLMError:
+    """Ollama aborts a generation stuck in a repetition loop with a 500; that is an invalid output, not an outage."""
+    return DegenerateOutput(f"模型輸出陷入重複而被中止：{detail}") if any(k in detail for k in REPEAT_ABORT) \
+        else LLMError(f"Ollama 錯誤：{detail}")
 
 
 def needs_think_prefill(model: str) -> bool:
@@ -138,12 +147,14 @@ class OllamaBackend(LLMBackend):
             self._guard()
             async with httpx.AsyncClient(timeout=self.timeout, headers=request_headers()) as client:
                 r = await client.post(f"{self.host}/api/chat", json=payload)
+                if r.status_code >= 500 and any(k in r.text for k in REPEAT_ABORT):
+                    raise generation_error(r.text[:300])
                 r.raise_for_status()
                 data = r.json()
         except httpx.HTTPError as e:
             raise LLMError(f"Ollama 連線失敗：{e}") from e
         if data.get("error"):   # the remote proxy answers 200 early (tunnel keep-alive) and reports upstream errors here
-            raise LLMError(f"Ollama 錯誤：{data['error']}")
+            raise generation_error(str(data["error"]))
         latency = int((time.perf_counter() - t0) * 1000)
         usage = {
             "prompt_tokens": data.get("prompt_eval_count"),
