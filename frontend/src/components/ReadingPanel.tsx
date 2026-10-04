@@ -3,7 +3,7 @@ import { api, RequestError } from "../api";
 import type { ApiError, SessionView } from "../types";
 import { RichText } from "./RichText";
 import { Working } from "./Working";
-import { useT } from "../i18n";
+import { useT, type Key } from "../i18n";
 import { CommandRefused, isGraph, useCommands } from "../workflow";
 
 interface Props {
@@ -17,6 +17,18 @@ const POLL_MS = 2000;
  *  runs as a background job on the server; this panel asks for it, then polls the session every 2 s until
  *  `reading.job` is gone. The student moves on only by saying they understood, can ask about the current
  *  quote first, and can go to the questions early. */
+// student-facing headline of a held guide / quiz (the check record with claim ids stays folded below it)
+const ERROR_HEADLINE: Record<string, Key> = {
+  notation_unverified: "reading.error.notation_unverified",
+  source_unverified: "reading.error.source_unverified",
+  quality_check_failed: "reading.error.quality_check_failed",
+  context_overflow: "reading.error.context_overflow",
+  context_missing: "reading.error.context_missing",
+  review_invalid: "reading.error.review_invalid",
+  quiz_basis_insufficient: "reading.error.quiz_basis_insufficient",
+  quiz_unverified: "reading.error.quiz_unverified",
+};
+
 export function ReadingPanel({ session, onSession }: Props) {
   const t = useT();
   const rd = session.reading!;
@@ -243,10 +255,22 @@ export function ReadingPanel({ session, onSession }: Props) {
 
       {shownError && (
         <div className="error" data-testid="error">
-          {shownError.detail}
+          {ERROR_HEADLINE[shownError.code] ? (
+            <>
+              <div data-testid="error-headline">{t(ERROR_HEADLINE[shownError.code])}</div>
+              <details style={{ marginTop: 4 }}>
+                <summary>{t("reading.error.details")}</summary>
+                {shownError.detail}
+              </details>
+            </>
+          ) : (
+            shownError.detail
+          )}
+          {shownError.retryable === false && <div style={{ marginTop: 4 }}>{t("reading.error.noRetry")}</div>}
           <div style={{ marginTop: 6 }}>
             {graph ? (
-              (wf?.waiting === "retry" || failedAsk) && <button onClick={retry} disabled={sending || asking}>{t("reading.retry")}</button>
+              (wf?.waiting === "retry" || failedAsk) &&
+              shownError.retryable !== false && <button onClick={retry} disabled={sending || asking}>{t("reading.retry")}</button>
             ) : !guide ? (
               <button onClick={retry}>{t("reading.retry")}</button>
             ) : (

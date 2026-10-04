@@ -138,6 +138,12 @@ export interface WorkflowView {
   last_failed: string | null;
   failed_node: string | null;
   runner_active: boolean;
+  workflow_version?: string | null;
+  reading_workflow_version?: string | null;   // reading-graph-v1 (older sessions) | reading-graph-v2
+  prompt_bundle_hash?: string | null;
+  model_config_hash?: string | null;
+  task_contract?: { depth: "close" | "skim"; goal: string; reader_background: string; defaults: string[] } | null;
+  migrations?: { from: string | null; to: string; at: string; note: string }[];
 }
 
 export interface SessionView {
