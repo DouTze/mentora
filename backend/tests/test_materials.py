@@ -53,20 +53,18 @@ def test_learn_within_a_line_range(client):
     s = client.post("/api/sessions", json={"material_id": m["id"], "start": 1, "end": 5}).json()
     assert s["source"]["label"] == "第 1–5 行" and s["source"]["material_id"] == m["id"]
     assert "呼吸作用" not in s["source"]["text"]  # outside the range
-    # the range is read quote by quote first; questions are written once every quote has been understood
+    # the range is read unit by unit first; questions are written once every unit has been read
     assert s["state"]["phase"] == "reading" and s["current_question"] is None and not s["concepts"]
-    from test_reading import guide_ready, next_ready
-    for _ in range(s["reading"]["total"]):
-        guide_ready(client, s["id"])
-        s = next_ready(client, s["id"])
+    from test_workflow import idle, run
+    s = idle(client, s["id"])
+    k = 0
+    while s["state"]["phase"] == "reading":
+        s, _ = run(client, s["id"], "next", f"n{k}")
+        k += 1
     assert s["current_question"]["type"] == "diagnostic" and s["concepts"]
     assert client.get("/api/sessions").json()[0]["source"]["label"] == "第 1–5 行"
-
-    r = answer(client, s["id"], "我不知道")
-    assert r["message"]["action"] == "hint" and r["message"]["hint"]
-    # generated questions live only in the snapshot; replay must still work after the material is gone
-    client.delete(f"/api/materials/{m['id']}")
-    rp = client.post(f"/api/sessions/{s['id']}/replay").json()
-    assert rp["replayed_answers"] == 1 and rp["session"]["source"]["label"] == "第 1–5 行"
+    s, cmd = run(client, s["id"], "answer", "a1", question_id=s["current_question"]["id"], payload={"answer": "我不知道"})
+    assert cmd["status"] == "completed" and cmd["result"]["message"]["action"] == "hint"
+    client.delete(f"/api/materials/{m['id']}")   # the record lives in the session snapshot
     md = client.get(f"/api/sessions/{s['id']}/export", params={"format": "md"}).text
     assert "第 1–5 行" in md

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, RequestError } from "../api";
 import type { ApiError, SessionView } from "../types";
 import { RichText } from "./RichText";
@@ -13,10 +13,10 @@ interface Props {
 
 const POLL_MS = 2000;
 
-/** 導讀: one quote at a time. Model work (segmenting, writing a guide, compacting a part, writing the questions)
- *  runs as a background job on the server; this panel asks for it, then polls the session every 2 s until
- *  `reading.job` is gone. The student moves on only by saying they understood, can ask about the current
- *  quote first, and can go to the questions early. */
+/** 導讀: one unit at a time. Every action is a command of the reading workflow (resent safely, resumed after a
+ *  reload); the workflow writes and checks the guides on its own and the panel polls the session while it works.
+ *  The student moves on only by saying they understood, can ask about the current unit first, and can go to the
+ *  questions early. A session left by the removed old flow is shown read-only. */
 // student-facing headline of a held guide / quiz (the check record with claim ids stays folded below it)
 const ERROR_HEADLINE: Record<string, Key> = {
   notation_unverified: "reading.error.notation_unverified",
@@ -43,11 +43,9 @@ export function ReadingPanel({ session, onSession }: Props) {
   const [showOriginal, setShowOriginal] = useState(false);
   const [showPrevious, setShowPrevious] = useState(false);
   const [confirmFinish, setConfirmFinish] = useState(false);
-  const requested = useRef<string | null>(null); // "<session>:<index>" for which the guide was asked
   const isLast = rd.index + 1 >= rd.total;
   const busy = !!job && !job.error;
-  // LangGraph sessions: every action is a command with its own id (resent safely, resumed after a reload)
-  const graph = isGraph(session);
+  const readOnly = !isGraph(session); // created by the removed old flow: viewable, not continued
   const wf = session.workflow ?? null;
   const cmds = useCommands(session, onSession, ["ask", "next", "finish", "retry", "guide"]);
   const [failedAsk, setFailedAsk] = useState<string | null>(null);
@@ -67,21 +65,6 @@ export function ReadingPanel({ session, onSession }: Props) {
     }
   };
 
-  // ask for the guide of the current quote (starts the job, or returns it when cached)
-  useEffect(() => {
-    const key = `${session.id}:${rd.index}`;
-    if (graph) return; // the workflow writes the guide on its own; the page only polls
-    if (guide || segmenting) return; // while segmenting, only poll; the guide is asked for once the quotes are final
-    if ((job && !job.error) || requested.current === key) return;
-    requested.current = key;
-    setError(null);
-    api
-      .readingGuide(session.id)
-      .then((r) => onSession(r.session))
-      .catch((e: RequestError) => setError(e.body));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, rd.index, guide, segmenting]);
-
   // poll while the server is working
   useEffect(() => {
     if (!busy && !segmenting) return;
@@ -96,54 +79,23 @@ export function ReadingPanel({ session, onSession }: Props) {
   }, [session.id, busy, segmenting]);
 
   const retry = () => {
-    if (graph) {
-      const target = wf?.waiting === "retry" ? wf.failed_command_id : failedAsk;
-      if (!target) return;
-      if (target === failedAsk) return askRetry(target);
-      command("retry", { target_command_id: target });
-      return;
-    }
-    requested.current = null;
-    setError(null);
-    api
-      .readingGuide(session.id)
-      .then((r) => onSession(r.session))
-      .catch((e: RequestError) => setError(e.body));
+    const target = wf?.waiting === "retry" ? wf.failed_command_id : failedAsk;
+    if (!target) return;
+    if (target === failedAsk) return askRetry(target);
+    command("retry", { target_command_id: target });
   };
 
   const next = async () => {
-    if (graph) {
-      const cmd = await command("next");
-      if (cmd?.status === "completed") {
-        setQuestion("");
-        setShowOriginal(false);
-      }
-      return;
-    }
-    setError(null);
-    try {
-      const r = await api.readingNext(session.id);
+    const cmd = await command("next");
+    if (cmd?.status === "completed") {
       setQuestion("");
       setShowOriginal(false);
-      onSession(r.session);
-    } catch (e) {
-      setError((e as RequestError).body);
     }
   };
 
   const finish = async () => {
     setConfirmFinish(false);
-    if (graph) {
-      await command("finish");
-      return;
-    }
-    setError(null);
-    try {
-      const r = await api.readingFinish(session.id);
-      onSession(r.session);
-    } catch (e) {
-      setError((e as RequestError).body);
-    }
+    await command("finish");
   };
 
   const askRetry = async (target: string) => {
@@ -158,27 +110,13 @@ export function ReadingPanel({ session, onSession }: Props) {
 
   const ask = async () => {
     if (!question.trim()) return;
-    if (graph) {
-      setAsking(true);
-      const cmd = await command("ask", { question: question.trim() });
-      setAsking(false);
-      if (cmd?.status === "completed") {
-        setQuestion(""); // only cleared on success — on failure the question stays and can be retried
-        setFailedAsk(null);
-      } else if (cmd) setFailedAsk(cmd.command_id);
-      return;
-    }
     setAsking(true);
-    setError(null);
-    try {
-      const r = await api.readingAsk(session.id, question.trim());
-      setQuestion("");
-      onSession(r.session);
-    } catch (e) {
-      setError((e as RequestError).body);
-    } finally {
-      setAsking(false);
-    }
+    const cmd = await command("ask", { question: question.trim() });
+    setAsking(false);
+    if (cmd?.status === "completed") {
+      setQuestion(""); // only cleared on success — on failure the question stays and can be retried
+      setFailedAsk(null);
+    } else if (cmd) setFailedAsk(cmd.command_id);
   };
 
   const partEnds = rd.parts.length > 1 && rd.parts[quote.part]?.quote_to === rd.index;
@@ -224,10 +162,9 @@ export function ReadingPanel({ session, onSession }: Props) {
               <RichText text={guide.check} inline />
             </div>
           )}
-          {guide.agent === "pi" && <div className="muted">{t("reading.byPi")}</div>}
         </div>
       ) : (
-        !shownError && (
+        !shownError && !readOnly && (
           <div className="tutor" data-testid="guide-loading">
             <div className="label">{t("common.tutor")}</div>
             <Working stage={segmenting ? "segment" : (job?.stage ?? "guide")} detail={job?.detail_stage} />
@@ -268,19 +205,20 @@ export function ReadingPanel({ session, onSession }: Props) {
           )}
           {shownError.retryable === false && <div style={{ marginTop: 4 }}>{t("reading.error.noRetry")}</div>}
           <div style={{ marginTop: 6 }}>
-            {graph ? (
-              (wf?.waiting === "retry" || failedAsk) &&
-              shownError.retryable !== false && <button onClick={retry} disabled={sending || asking}>{t("reading.retry")}</button>
-            ) : !guide ? (
-              <button onClick={retry}>{t("reading.retry")}</button>
-            ) : (
-              <button onClick={rd.stopped_at != null ? finish : next}>{t("reading.retry")}</button>
+            {(wf?.waiting === "retry" || failedAsk) && shownError.retryable !== false && (
+              <button onClick={retry} disabled={sending || asking}>{t("reading.retry")}</button>
             )}
           </div>
         </div>
       )}
 
-      {guide && !busy && (
+      {readOnly && (
+        <div className="muted" data-testid="read-only">
+          {t("reading.readOnly")}
+        </div>
+      )}
+
+      {guide && !busy && !readOnly && (
         <>
           <div className="composer">
             <input

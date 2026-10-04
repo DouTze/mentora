@@ -61,11 +61,6 @@ export const api = {
   session: (id: string) => call<SessionView>(`/sessions/${id}`),
   answer: (id: string, answer: string) =>
     call<{ turn: Turn; message: TutorMessage; session: SessionView }>(`/sessions/${id}/answer`, { method: "POST", body: JSON.stringify({ answer }) }),
-  readingGuide: (id: string) => call<{ status: "ready" | "pending"; guide: Guide | null; session: SessionView }>(`/sessions/${id}/reading/guide`, { method: "POST" }),
-  readingAsk: (id: string, question: string) =>
-    call<{ answer: ReadingQA; session: SessionView }>(`/sessions/${id}/reading/ask`, { method: "POST", body: JSON.stringify({ question }) }),
-  readingNext: (id: string) => call<{ status: "ready" | "pending"; session: SessionView }>(`/sessions/${id}/reading/next`, { method: "POST" }),
-  readingFinish: (id: string) => call<{ status: "pending"; session: SessionView }>(`/sessions/${id}/reading/finish`, { method: "POST" }),
   /** LangGraph sessions: 202 accepted (queued/running) or 200 already finished (a resend of a known command_id) */
   event: (id: string, body: { command_id: string; type: string; payload?: Record<string, unknown>; unit_id?: string; question_id?: string; expected_revision?: number }) =>
     call<CommandView & { session: SessionView }>(`/sessions/${id}/events`, { method: "POST", body: JSON.stringify(body) }),

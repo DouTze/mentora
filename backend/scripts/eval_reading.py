@@ -1,14 +1,13 @@
 """Opt-in reading evaluation on the fixed fixtures (evals/reading/manifest.json).
 
     cd backend
-    .venv/bin/python scripts/eval_reading.py baseline  --backend mock
-    .venv/bin/python scripts/eval_reading.py baseline  --backend ollama --model qwen3-vl:4b --stages segment,guide
+    .venv/bin/python scripts/eval_reading.py candidate --backend mock
     .venv/bin/python scripts/eval_reading.py candidate --backend ollama --model qwen3-vl:4b --stages segment,guide
-    .venv/bin/python scripts/eval_reading.py compare   data/evals/<baseline-run> data/evals/<candidate-run>
+    .venv/bin/python scripts/eval_reading.py compare   data/evals/<run-A> data/evals/<run-B>
 
-baseline  = the legacy pipeline (rule atoms → model grouping → one guide call per quote; session.py behaviour).
-candidate = the LangGraph pipeline (source blocks → planned units → guided-reading subgraph).
-compare   = metrics side by side + a blind A/B review packet (blind/packet.md, key.json, scores.template.json);
+candidate = the reading pipeline the app runs (source blocks → planned units → guided-reading subgraph).
+compare   = metrics side by side + a blind A/B review packet (blind/packet.md, key.json, scores.template.json) of two
+            saved runs — e.g. a new run against the results of the removed legacy pipeline kept in data/evals;
             pass --scores <filled scores.json> to add the human rubric averages.
 
 Each run writes <out>/results.json and <out>/report.md (default out: data/evals/<timestamp>-<mode>-<backend>,
@@ -20,7 +19,7 @@ The run records provenance (host, remote and local model digests, seed, jobs). W
 local one it is the same model, so the quality results (segmentation, guides, gates, blind packets) count for
 acceptance ("remote-quality"); otherwise it is only a development reference ("remote-unverified"). Latency counts
 only for local sequential runs ("local-acceptance").
---jobs N runs N candidate fixtures concurrently (one counter per fixture); the legacy baseline stays sequential."""
+--jobs N runs N fixtures concurrently (one counter per fixture)."""
 from __future__ import annotations
 
 import argparse
@@ -38,7 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 from app import config  # noqa: E402
 from app.llm.base import LLMBackend, LLMError, LLMResult  # noqa: E402
-from app.llm.registry import Registry, build_backend  # noqa: E402
+from app.llm.registry import build_backend  # noqa: E402
 from app.materials import MaterialError  # noqa: E402
 from app.models import ModelConfig  # noqa: E402
 from evals import reading_eval as ev  # noqa: E402
@@ -119,73 +118,8 @@ def model_config(args) -> ModelConfig:
                        temperature=args.temperature, max_tokens=512, context_tokens=8192)
 
 
-def range_label(unit: str, n: int) -> str:
-    return f"第 1–{n} {'頁' if unit == 'page' else '行'}"
 
-
-# -- legacy pipeline ------------------------------------------------------------------
-
-async def run_legacy_case(case: dict, registry: Registry, counter: CountingBackend, stages: list[str], tmp: Path) -> dict:
-    from app.tutor import reading
-    from app.tutor.reading_agent import InProcessReadingAgent, ReadingAgentError, ReadingWorkspace
-
-    unit, units = ev.load_units(case)
-    agent = InProcessReadingAgent(registry)
-    r: dict = {"id": case["id"], "fallback_notes": [], "calls": [], "guide_latency_ms": []}
-    t0 = time.perf_counter()
-    atoms = reading.split_atoms(units, unit, 1)
-    groups = atoms
-    if "segment" in stages:
-        groups = []
-        for a, b in reading.plan_segments(atoms, case.get("window_chars")):
-            chunk = atoms[a:b]
-            try:
-                groups += reading.apply_segmentation(chunk, await agent.segment(case["id"], chunk))
-            except ReadingAgentError as e:
-                r["fallback_notes"].append(f"候選段落 {a + 1}–{b} 改用規則切法：{e.code}: {e.detail[:120]}")
-                groups += chunk
-    quotes = reading.finish_quotes(unit, groups)
-    parts = reading.plan_parts(quotes)
-    r["segment_ms"] = int((time.perf_counter() - t0) * 1000)
-    segments = [{"text": q["text"], "heading": q.get("heading")} for q in quotes]
-    rep = ev.check_segmentation(case, unit, units, segments)
-    r["unit_count"] = len(quotes)
-    r["segmentation"] = rep.as_dict()
-    r["units"] = [{"label": q["label"], "heading": q.get("heading"), "text": q["text"]} for q in quotes]
-    r["calls"] += counter.take()
-    if "guide" in stages:
-        content = {"source": {"material_title": case["id"], "label": range_label(unit, len(units))}, "quotes": quotes, "parts": parts}
-        ws = ReadingWorkspace(tmp, case["id"])
-        ws.init(content)
-        guides: list[dict | None] = []
-        state_guides: dict[str, dict] = {}
-        for q in quotes:
-            prev = [p for i in range(max(0, q["index"] - 3), q["index"]) for p in state_guides.get(str(i), {}).get("key_points", [])][-6:]
-            g0 = time.perf_counter()
-            try:
-                g = await agent.guide(ws, content, q, prev)
-                state_guides[str(q["index"])] = g
-                guides.append({k: g.get(k) for k in ("chinese_text", "guide", "key_points", "check")})
-            except ReadingAgentError as e:
-                guides.append(None)
-                r.setdefault("guide_errors", []).append(f"{q['label']}: {e.code}: {e.detail[:160]}")
-            ms = int((time.perf_counter() - g0) * 1000)
-            r["guide_latency_ms"].append(ms)
-            if q["index"] == 0:
-                r["first_guide_ms"] = r["segment_ms"] + ms
-        calls = counter.take()
-        r["retries"] = max(0, sum(1 for c in calls if c["task"] == "guide") - len(quotes))
-        r["calls"] += calls
-        r["guides"] = guides
-        r["guides_check"] = ev.check_guides(case, rep, segments, guides)
-        attach_unit_guides(r, case, rep, segments, guides)
-    if case.get("flow"):
-        upto = case["flow"]["read_units"] - 1
-        read = quotes[:upto + 1]
-        text, _ = reading.quiz_source_text("\n\n".join(q["text"] for q in read), [p for p in parts if p["quote_from"] <= upto], {})
-        r["quiz_scope"] = ev.check_quiz_scope(case, text)
-    return r
-
+# -- candidate pipeline -----------------------------------------------------------------
 
 def attach_unit_guides(r: dict, case: dict, rep, segments: list[dict], guides: list[dict | None]) -> None:
     """Per gold unit: the source span and the concatenated guide(s) covering it (for the blind packet)."""
@@ -199,8 +133,6 @@ def attach_unit_guides(r: dict, case: dict, rep, segments: list[dict], guides: l
             "guide": "\n\n".join(g["guide"] for g in gs)}
 
 
-# -- candidate pipeline -----------------------------------------------------------------
-
 async def run_candidate_case(case: dict, cfg: ModelConfig, counter: CountingBackend, stages: list[str], tmp: Path) -> dict:
     try:
         from app.reading.evaluation import run_case  # added with the new pipeline (P2/P3)
@@ -211,7 +143,7 @@ async def run_candidate_case(case: dict, cfg: ModelConfig, counter: CountingBack
 
 # -- driver --------------------------------------------------------------------------
 
-async def run_one(args, case: dict, cfg: ModelConfig, registry: Registry, counter: CountingBackend, stages: list[str],
+async def run_one(args, case: dict, cfg: ModelConfig, counter: CountingBackend, stages: list[str],
                   tmp: Path) -> dict:
     if "expect_import_error" in case:
         try:
@@ -223,8 +155,6 @@ async def run_one(args, case: dict, cfg: ModelConfig, registry: Registry, counte
         res["import_error_ok"] = res["import_error"] == case["expect_import_error"]
         return res
     try:
-        if args.mode == "baseline":
-            return await run_legacy_case(case, registry, counter, stages, tmp)
         return await run_candidate_case(case, cfg, counter, stages, tmp)
     except LLMError as e:
         return {"id": case["id"], "error": f"model_unavailable: {e}", "calls": counter.take()}
@@ -234,15 +164,13 @@ async def run(args, prov: dict | None = None) -> Path:
     cfg = model_config(args)
     inner = build_backend(cfg)
     counter = CountingBackend(inner)
-    registry = Registry(cfg)
-    registry._backend = counter  # the legacy agent reads registry.backend; counting wraps the real adapter
     stages = args.stages.split(",")
     manifest = ev.load_manifest()
     cases = ev.select_cases(manifest, args.cases.split(",") if args.cases else None)
     out = Path(args.out) if args.out else ROOT / "data" / "evals" / f"{datetime.now():%Y%m%d-%H%M%S}-{args.mode}-{cfg.backend}"
     out.mkdir(parents=True, exist_ok=True)
     started, t0 = datetime.now().isoformat(timespec="seconds"), time.perf_counter()
-    jobs = max(1, args.jobs) if args.mode == "candidate" else 1
+    jobs = max(1, args.jobs)
     results: list[dict | None] = [None] * len(cases)
 
     def save_partial():
@@ -253,7 +181,7 @@ async def run(args, prov: dict | None = None) -> Path:
         if jobs == 1:
             for i, case in enumerate(cases):
                 print(f"[{args.mode}] {case['id']} …", flush=True)
-                results[i] = await run_one(args, case, cfg, registry, counter, stages, Path(td))
+                results[i] = await run_one(args, case, cfg, counter, stages, Path(td))
                 save_partial()
         else:
             gate = asyncio.Semaphore(jobs)
@@ -261,11 +189,11 @@ async def run(args, prov: dict | None = None) -> Path:
             async def one(i: int, case: dict):
                 async with gate:   # each fixture counts its own calls; the adapter itself is shared
                     print(f"[{args.mode}] {case['id']} …", flush=True)
-                    results[i] = await run_one(args, case, cfg, registry, CountingBackend(inner), stages, Path(td))
+                    results[i] = await run_one(args, case, cfg, CountingBackend(inner), stages, Path(td))
                     save_partial()
             await asyncio.gather(*(one(i, c) for i, c in enumerate(cases)))
     results = [r for r in results if r]
-    run_doc = {"mode": args.mode, "pipeline": "legacy" if args.mode == "baseline" else "langgraph",
+    run_doc = {"mode": args.mode, "pipeline": "langgraph",
                "started_at": started, "elapsed_s": round(time.perf_counter() - t0, 1),
                "backend": {**cfg.model_dump(), "resolved_model": counter.model, "simulated": counter.simulated},
                "provenance": prov or {},
@@ -309,7 +237,7 @@ def compare(args) -> Path:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="mode", required=True)
-    for mode in ("baseline", "candidate"):
+    for mode in ("candidate",):
         p = sub.add_parser(mode)
         p.add_argument("--backend", choices=["mock", "ollama", "openvino"], default="mock")
         p.add_argument("--model", default="")
@@ -320,7 +248,7 @@ def main() -> None:
         p.add_argument("--stages", default="segment,guide", help="comma list: segment, guide")
         p.add_argument("--cases", default="", help="comma list of case ids (default: all)")
         p.add_argument("--out", default="")
-        p.add_argument("--jobs", type=int, default=1, help="candidate only: fixtures run concurrently (latency then not comparable)")
+        p.add_argument("--jobs", type=int, default=1, help="fixtures run concurrently (latency then not comparable)")
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")

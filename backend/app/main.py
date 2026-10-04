@@ -60,6 +60,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     @app.exception_handler(SessionError)
     async def _session_error(_, e: SessionError):
         status = {"not_found": 404, "completed": 409, "backend_changed": 409, "reading": 409, "not_reading": 409, "use_events": 409,
+                  "legacy_readonly": 409,
                   "model_unavailable": 502, "invalid_model_output": 502}.get(e.code, 400)
         return JSONResponse(status_code=status, content={"code": e.code, "detail": e.detail, "turn": e.turn,
                                                          "retryable": e.code in ("model_unavailable", "invalid_model_output")})
@@ -180,12 +181,10 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
         if req.material_id:
             if req.start is None or req.end is None:
                 raise MaterialError("bad_range", "請指定學習範圍的起點與終點。")
-            if config.WORKFLOW == "langgraph":
-                row = workflow.start_from_material(req.material_id, req.start, req.end, req.strategy_id,
-                                                   depth=req.reading_depth, goal=req.reading_goal,
-                                                   background=req.reader_background)
-                return svc.view(row["id"])
-            return await svc.start_from_material(req.material_id, req.start, req.end, req.strategy_id)
+            row = workflow.start_from_material(req.material_id, req.start, req.end, req.strategy_id,
+                                               depth=req.reading_depth, goal=req.reading_goal,
+                                               background=req.reader_background)
+            return svc.view(row["id"])
         return svc.start(req.content_id, req.strategy_id)
 
     @app.get("/api/sessions")
@@ -200,24 +199,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     async def answer(sid: str, req: AnswerRequest, debug_invalid: bool = Query(False, include_in_schema=False)):
         return await svc.answer(sid, req.answer, debug_force_invalid=debug_invalid)
 
-    # -- 導讀 (guided reading before the questions) --------------------------
-    @app.post("/api/sessions/{sid}/reading/guide")
-    async def reading_guide(sid: str):
-        return await svc.reading_guide(sid)
-
-    @app.post("/api/sessions/{sid}/reading/ask")
-    async def reading_ask(sid: str, req: AskRequest):
-        return await svc.reading_ask(sid, req.question)
-
-    @app.post("/api/sessions/{sid}/reading/next")
-    async def reading_next(sid: str):
-        return await svc.reading_next(sid)
-
-    @app.post("/api/sessions/{sid}/reading/finish")
-    async def reading_finish(sid: str):
-        return await svc.reading_finish(sid)
-
-    # -- LangGraph sessions: one asynchronous entry point -------------------------------------
+    # -- reading sessions: one asynchronous entry point (guide / ask / next / finish / answer / retry) --
     @app.post("/api/sessions/{sid}/events")
     async def post_event(sid: str, req: EventRequest):
         cmd, created = workflow.submit(sid, req.model_dump())

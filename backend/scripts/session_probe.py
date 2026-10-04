@@ -35,7 +35,6 @@ def probe_case(case: dict, args) -> dict:
     from evals import reading_eval as ev
 
     path = ev.EVAL_DIR / case["source"]
-    config.WORKFLOW = "langgraph"
     config.READING_PREFETCH = False
     with tempfile.TemporaryDirectory() as td:
         config.READING_DIR = Path(td) / "reading"

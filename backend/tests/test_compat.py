@@ -24,7 +24,6 @@ FIX = Path(__file__).parent / "fixtures" / "v1_session"
 def old_app(tmp_path, monkeypatch):
     for f in ("db.sqlite3", "checkpoints.sqlite3"):
         shutil.copy(FIX / f, tmp_path / f)
-    monkeypatch.setattr(config, "WORKFLOW", "langgraph")
     monkeypatch.setattr(config, "READING_PREFETCH", False)
     app = create_app(Database(tmp_path / "db.sqlite3"), Registry(ModelConfig(backend="mock")))
     with TestClient(app) as c:
@@ -100,7 +99,6 @@ def test_upgrading_a_pdf_session_backfills_layout_evidence_from_the_stored_file(
     import io
     import json as _json
     from app.workflows.migrations import upgrade_session
-    monkeypatch.setattr(config, "WORKFLOW", "langgraph")
     monkeypatch.setattr(config, "READING_PREFETCH", False)
     app = create_app(Database(tmp_path / "db.sqlite3"), Registry(ModelConfig(backend="mock")))
     with TestClient(app) as c:

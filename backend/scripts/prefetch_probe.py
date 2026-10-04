@@ -36,7 +36,6 @@ def run_mode(prefetch: bool, args, text: str, name: str) -> dict:
     from app.main import create_app
     from app.models import ModelConfig
 
-    config.WORKFLOW = "langgraph"
     config.READING_PREFETCH = prefetch
     with tempfile.TemporaryDirectory() as td:
         config.READING_DIR = Path(td) / "reading"

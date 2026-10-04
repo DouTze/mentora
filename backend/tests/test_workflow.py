@@ -25,7 +25,6 @@ MD = (HELPERS / "flow.md").read_text(encoding="utf-8")
 
 @pytest.fixture
 def graph_app(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "WORKFLOW", "langgraph")
     monkeypatch.setattr(config, "READING_PREFETCH", False)   # call counts below are per command; prefetch has its own tests
     app = create_app(Database(tmp_path / "db.sqlite3"), Registry(ModelConfig(backend="mock")))
     with TestClient(app) as c:
@@ -103,20 +102,24 @@ def test_full_flow_through_events_api(graph_app):
     assert all(n <= BUDGETS[task]["max_calls"] for (task, _), n in by_op.items()), by_op
 
 
-def test_legacy_endpoints_refuse_graph_sessions_and_legacy_sessions_stay_legacy(graph_app, monkeypatch):
+def test_reading_sessions_run_only_through_events_and_old_flow_sessions_are_read_only(graph_app):
+    """Every material session uses the reading workflow; the endpoints of the removed old flow are gone, and a
+    session the old flow left in the database can still be viewed and exported but not continued."""
     c = graph_app
     s = start(c)
     for path in ("reading/guide", "reading/next", "reading/finish"):
-        r = c.post(f"/api/sessions/{s['id']}/{path}")
-        assert r.status_code == 409 and r.json()["code"] == "use_events"
+        assert c.post(f"/api/sessions/{s['id']}/{path}").status_code in (404, 405)
     assert c.post(f"/api/sessions/{s['id']}/answer", json={"answer": "x"}).json()["code"] == "use_events"
-    monkeypatch.setattr(config, "WORKFLOW", "legacy")
-    m = c.post("/api/materials", files={"file": ("x.md", io.BytesIO(MD.encode()))}).json()
-    legacy = c.post("/api/sessions", json={"material_id": m["id"], "start": 1, "end": 5}).json()
-    assert legacy["workflow_runner"] == "legacy" and legacy["workflow"] is None
-    r = c.post(f"/api/sessions/{legacy['id']}/events", json={"command_id": "x", "type": "next"})
+    db = c.app_ref.state.db
+    row = db.get_session(s["id"])
+    old = db.create_session(row["content_snapshot"], row["strategy_snapshot"], row["model_config"], row["state"])
+    view = c.get(f"/api/sessions/{old['id']}").json()
+    assert view["workflow_runner"] == "legacy" and view["workflow"] is None and view["reading"]["job"] is None
+    r = c.post(f"/api/sessions/{old['id']}/events", json={"command_id": "x", "type": "next"})
     assert r.status_code == 409 and r.json()["code"] == "legacy_session"
-    assert c.get(f"/api/sessions/{s['id']}").json()["workflow_runner"] == "langgraph"   # pinned at creation
+    r = c.post(f"/api/sessions/{old['id']}/answer", json={"answer": "x"})
+    assert r.status_code == 409 and r.json()["code"] == "legacy_readonly"
+    assert c.get(f"/api/sessions/{old['id']}/export", params={"format": "md"}).status_code == 200
 
 
 # -- idempotency / concurrency ---------------------------------------------------------------
@@ -316,7 +319,6 @@ def test_restart_after_quiz_commit_and_after_assess_commit(tmp_path):
 
 
 def test_second_runner_on_the_same_database_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "WORKFLOW", "langgraph")
     db = tmp_path / "db.sqlite3"
     a = create_app(Database(db), Registry(ModelConfig(backend="mock")))
     b = create_app(Database(db), Registry(ModelConfig(backend="mock")))
