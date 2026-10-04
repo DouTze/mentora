@@ -237,12 +237,14 @@ def compare(args) -> Path:
     for k in keys:
         fa, fb = (json.dumps(x.get(k), ensure_ascii=False) for x in (a["summary"], b["summary"]))
         lines.append(f"| {k} | {fa} | {fb} |")
-    packet, key, template = ev.blind_packet(a, b)
+    packet, key, template = ev.blind_packet(a, b, label_a=Path(args.a).name, label_b=Path(args.b).name)
     (out / "blind" / "packet.md").write_text(packet, encoding="utf-8")
     (out / "blind" / "key.json").write_text(json.dumps(key, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "blind" / "scores.template.json").write_text(json.dumps(template, ensure_ascii=False, indent=1), encoding="utf-8")
     if args.scores:
-        human = ev.score_blind(key if not args.key else json.loads(Path(args.key).read_text()), json.loads(Path(args.scores).read_text()))
+        k = key if not args.key else json.loads(Path(args.key).read_text())
+        sc = json.loads(Path(args.scores).read_text())
+        human = {"paired": ev.score_blind(k, sc), "held_review": ev.score_held(k, sc)}
         lines += ["", "## 人工 rubric（盲評）", "", "```json", json.dumps(human, ensure_ascii=False, indent=1), "```"]
     lines += ["", f"盲評包：`{out / 'blind' / 'packet.md'}`（{len(key)} 題）。評分後以 `--scores` 重新執行 compare。"]
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

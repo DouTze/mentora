@@ -132,3 +132,26 @@ def test_blind_packet_scores_the_guide_without_the_chinese_text():
     template["c/u1"]["X"]["guide"].update(faithfulness=5)
     s = ev.score_blind(key, template)[key["c/u1"]["X"]]
     assert s["guide"]["major_errors"] == 0 and s["chinese_text"]["major_errors"] == 1
+
+
+def test_two_candidate_runs_are_never_merged_and_held_drafts_are_reviewed():
+    """Review counterexample: before / after runs are both mode "candidate"; scored 1 and 5 they must stay apart."""
+    def run(guide, held=None):
+        status = [{"unit": "第 1 行", "unit_id": "unit-x", "status": "accepted"}]
+        if held:
+            status.append({"unit": "第 3 行", "unit_id": "unit-y", "status": "failed", "held_draft": held,
+                           "error": {"code": "quality_check_failed", "detail": "…"}})
+        return {"mode": "candidate", "results": [{"id": "c", "unit_source": {"u1": "src"}, "unit_guides": {"u1": {"guide": guide}},
+                                                  "units": [{"text": "src"}, {"text": "src2"}], "guide_status": status}]}
+    a, b = run("修改前"), run("修改後", held="被擋下的草稿")
+    packet, key, template = ev.blind_packet(a, b, label_a="r0-graph-prechange", label_b="r8-graph-final2")
+    assert set(key["c/u1"].values()) == {"r0-graph-prechange", "r8-graph-final2"}
+    for side, mode in key["c/u1"].items():
+        template["c/u1"][side]["guide"].update(faithfulness=1 if mode == "r0-graph-prechange" else 5)
+    template["held/01"].update(draft_acceptable=True, has_major_error=False)
+    s = ev.score_blind(key, template)
+    assert s["r0-graph-prechange"]["faithfulness"] == 1 and s["r8-graph-final2"]["faithfulness"] == 5
+    assert "被擋下的草稿" in packet and "r8-graph-final2" not in packet
+    assert ev.score_held(key, template)["r8-graph-final2"]["wrongly_blocked"] == 1
+    _, key2, _ = ev.blind_packet(a, b)                     # no labels given: still two distinct ids
+    assert len(set(key2["c/u1"].values())) == 2

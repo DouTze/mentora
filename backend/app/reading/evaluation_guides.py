@@ -43,7 +43,8 @@ async def run_guides(r, case, quotes, parts, runtime, sink, bundle, rep, segment
         r["guide_latency_ms"].append(ms)
         if q["index"] == 0:
             r["first_guide_ms"] = r["segment_ms"] + ms
-        statuses.append({"unit": q["label"], "status": out["status"], "error": out.get("error"),
+        statuses.append({"unit": q["label"], "unit_id": q["unit_id"], "status": out["status"], "error": out.get("error"),
+                         "held_draft": (out.get("draft") or {}).get("guide") if out["status"] != "accepted" else None,
                          "calls": out.get("budget", {}).get("calls"),
                          "revised": bool(out.get("body_revisions") or out.get("source_revisions")),
                          "source_revisions": out.get("source_revisions"), "body_revisions": out.get("body_revisions"),

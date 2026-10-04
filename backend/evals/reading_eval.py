@@ -395,11 +395,53 @@ CN_FIELDS = {"faithfulness": None, "completeness": None, "wrong_formula": False,
              "missing_key_condition": False, "note": ""}
 
 
-def blind_packet(a: dict, b: dict, seed: int = 7) -> tuple[str, dict, dict]:
+HELD_FIELDS = {"draft_acceptable": None, "has_major_error": None, "note": ""}
+
+
+def run_labels(a: dict, b: dict, label_a: str | None, label_b: str | None) -> tuple[str, str]:
+    """Distinct run identifiers for the key: two candidate runs (before / after a change) must never be merged."""
+    la, lb = label_a or a.get("run_id") or a["mode"], label_b or b.get("run_id") or b["mode"]
+    return (la, lb) if la != lb else (f"{la}#A", f"{lb}#B")
+
+
+def _unit_id(block_ids: list[str]) -> str:
+    from app.llm.runtime import stable_hash
+    return f"unit-{stable_hash([block_ids[0], block_ids[-1]], 10)}"
+
+
+def held_items(run: dict) -> list[dict]:
+    """Units a graph run did not publish, with the last draft it held back (stored, or recovered from the raw trace
+    of older result files) — reviewed to measure correct drafts that were wrongly blocked."""
+    out = []
+    for r in run.get("results", []):
+        units = r.get("units") or []
+        for k, s in enumerate(r.get("guide_status") or []):
+            if s["status"] == "accepted":
+                continue
+            unit = units[k] if k < len(units) else {}
+            draft = s.get("held_draft")
+            if draft is None and unit.get("block_ids"):
+                uid = s.get("unit_id") or _unit_id(unit["block_ids"])
+                for t in r.get("llm_trace", []):
+                    if t["node"] in ("draft", "revise_body") and f":{uid}:" in (t.get("operation_key") or "") and t.get("raw"):
+                        try:
+                            draft = json.loads(t["raw"]).get("guide") or draft
+                        except ValueError:
+                            pass
+            out.append({"case": r["id"], "unit": s.get("unit"), "source": unit.get("text", ""), "draft": draft,
+                        "reason": (s.get("error") or {}).get("code"), "detail": (s.get("error") or {}).get("detail", "")})
+    return out
+
+
+def blind_packet(a: dict, b: dict, seed: int = 7, label_a: str | None = None,
+                 label_b: str | None = None) -> tuple[str, dict, dict]:
     """Pair the outputs of two runs per gold unit in random A/B order. Returns (markdown packet, key, score template).
     The 主要正文 is scored on its own first (it must teach the unit without the 中文課文); the 中文課文, when there
-    is one, is shown afterwards and scored separately. Scores follow RUBRIC.md."""
+    is one, is shown afterwards and scored separately. Runs are keyed by a run id (never by mode: two candidate
+    runs stay apart). Drafts a run held back are listed afterwards for a separate review (wrongly blocked?).
+    Scores follow RUBRIC.md."""
     rng = random.Random(seed)
+    la, lb = run_labels(a, b, label_a, label_b)
     by_id = {r["id"]: r for r in b["results"]}
     lines = ["# 導讀盲評包", "", "每一題比較兩份導讀（X／Y 順序隨機）。先只讀兩份**主要正文**評分（不要先看中文課文），"
              "再看各自的中文課文另外評分。依 evals/reading/RUBRIC.md 評分，填入 scores.json。", ""]
@@ -416,7 +458,7 @@ def blind_packet(a: dict, b: dict, seed: int = 7) -> tuple[str, dict, dict]:
             item = f"{ra['id']}/{uid}"
             flip = rng.random() < 0.5
             x, y = (gb, ga) if flip else (ga, gb)
-            key[item] = {"X": b["mode"] if flip else a["mode"], "Y": a["mode"] if flip else b["mode"]}
+            key[item] = {"X": lb if flip else la, "Y": la if flip else lb}
             has_cn = bool(x.get("chinese_text") or y.get("chinese_text"))
             template[item] = {side: {"guide": dict(GUIDE_FIELDS), **({"chinese_text": dict(CN_FIELDS)} if has_cn else {})}
                               for side in ("X", "Y")}
@@ -426,6 +468,16 @@ def blind_packet(a: dict, b: dict, seed: int = 7) -> tuple[str, dict, dict]:
             if has_cn:
                 for side, g in (("X", x), ("Y", y)):
                     lines += [f"### {side}：中文課文（另評）", "", g.get("chinese_text") or "（沒有）", ""]
+    held = [(lbl, h) for lbl, run in ((la, a), (lb, b)) for h in held_items(run) if h["draft"]]
+    if held:
+        lines += ["# 未公開草稿審查", "", "以下草稿被流程擋下沒有公開（不標示來自哪一份輸出）。只看原文與草稿，判斷：草稿其實可以公開嗎"
+                  "（draft_acceptable）？草稿有重大錯誤嗎（has_major_error）？", ""]
+        rng.shuffle(held)
+        for k, (lbl, h) in enumerate(held, 1):
+            item = f"held/{k:02d}"
+            key[item] = {"run": lbl, "kind": "held", "reason": h["reason"]}
+            template[item] = dict(HELD_FIELDS)
+            lines += [f"## {item}", "", "**原文**", "", "```text", h["source"], "```", "", "**被擋下的主要正文**", "", h["draft"], ""]
     return "\n".join(lines) + "\n", key, template
 
 
@@ -435,6 +487,8 @@ def score_blind(key: dict, scores: dict) -> dict:
     majors = ("wrong_formula", "fabricated_claim", "missing_key_condition")
     agg: dict[str, dict[str, dict[str, list]]] = {}
     for item, sides in scores.items():
+        if key.get(item, {}).get("kind") == "held":
+            continue
         for side, sc in sides.items():
             mode = key[item][side]
             parts = sc if "guide" in sc else {"guide": sc}
@@ -456,4 +510,23 @@ def score_blind(key: dict, scores: dict) -> dict:
                                "n": len(a["major"])}
         g = out[mode].get("guide", {})   # flat aliases of the 主要正文 scores (the acceptance gate)
         out[mode].update({k: g.get(k) for k in ("faithfulness", "completeness", "clarity", "major_errors", "n")})
+    return out
+
+
+def score_held(key: dict, scores: dict) -> dict:
+    """Per run: held drafts reviewed, how many were acceptable (wrongly blocked) or had a major error (rightly)."""
+    out: dict[str, dict] = {}
+    for item, k in key.items():
+        if k.get("kind") != "held" or item not in scores:
+            continue
+        sc = scores[item]
+        o = out.setdefault(k["run"], {"reviewed": 0, "wrongly_blocked": 0, "rightly_blocked": 0, "by_reason": {}})
+        if sc.get("draft_acceptable") is None:
+            continue
+        o["reviewed"] += 1
+        o["wrongly_blocked"] += int(bool(sc["draft_acceptable"]) and not sc.get("has_major_error"))
+        o["rightly_blocked"] += int(bool(sc.get("has_major_error")))
+        r = o["by_reason"].setdefault(k.get("reason") or "?", {"reviewed": 0, "wrongly_blocked": 0})
+        r["reviewed"] += 1
+        r["wrongly_blocked"] += int(bool(sc["draft_acceptable"]) and not sc.get("has_major_error"))
     return out
