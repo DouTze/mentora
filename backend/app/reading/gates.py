@@ -549,6 +549,18 @@ def gate2_program(source: str, guide: str, claims: list[SourceClaim], bridges: B
     return fs
 
 
+def verbatim_covered(c: SourceClaim, guide: str, source: str) -> bool:
+    """The guide writes the claim's whole cited text (a Chinese source) or its whole audited translation verbatim,
+    formulas included: coverage is a program fact and the claim needs no auditor verdict. Additions, missing source
+    text and coherence are still audited."""
+    text = c.source_text if is_chinese(source) else c.statement
+    if len(_plain(text)) < 8 or _plain(text) not in _plain(guide):
+        return False
+    gn = ra._norm_math(guide)
+    need = [ra._norm_math(f) for f in c.formulas] + [f for f in sum(ra.source_formulas(c.source_text), []) if ra._is_real_math(f)]
+    return all(f in gn for f in need if f)
+
+
 def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridges: BridgePlan,
                       audit: BodyAudit) -> list[ra.Finding]:
     """Body audit → findings with checked evidence (see module doc)."""

@@ -532,7 +532,12 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
     async def body_audit(state, ctx):
         t = task(state)
         d = state["draft"]
-        claims = claims_of(state)
+        # claims the guide writes out verbatim are covered by program fact; only the rest go to the auditor
+        all_ids = [c["id"] for c in state["verified"]["claims"]]
+        claims = [c for c in claims_of(state) if not gates.verbatim_covered(c, d["guide"], t.text)]
+        audited = {c.id for c in claims}
+        state = {**state, "verified": {**state["verified"],
+                                       "claims": [c for c in state["verified"]["claims"] if c["id"] in audited]}}
         bridges = BridgePlan.model_validate(state.get("bridges") or {})
         ids = {"claims": [c.id for c in claims], "bridges": [b.id for b in bridges.bridges]}
         out = template(ids, {"claims": {"verdict": "covered", "guide_quote": "…", "note": ""},
@@ -551,7 +556,8 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                     min_max_tokens=ra.GUIDE_MAX_TOKENS, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         program = [ra.Finding.model_validate(f) for f in state.get("findings") or [] if f["origin"] == "program"]
         fs = program + gates.coverage_findings(t.text, d["guide"], claims, bridges, a)
-        return {"findings": [f.model_dump() for f in fs], "audit": a.model_dump(),
+        return {"findings": [f.model_dump() for f in fs],
+                "audit": {**a.model_dump(), "program_covered": [x for x in all_ids if x not in audited]},
                 "decision": judged(state, ctx.budget, fs, allow_verify=True)}
 
     async def verify(state, ctx):

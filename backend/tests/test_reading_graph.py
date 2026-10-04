@@ -44,15 +44,21 @@ def per_sentence(text: str, cn: str | None = None) -> dict:
             "needs_context": [], "limits": []}
 
 
+def reworded(text: str) -> str:
+    """How the scripted drafter restates a claim: not verbatim (so coverage goes through the auditor), same meaning."""
+    body = text.rstrip("。.！？!?")
+    return body[:-1] + "確實" + body[-1:] + text[len(body):] if len(body) > 1 else "確實" + text
+
+
 def covered_audit(meta) -> dict:
-    return {"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": c["source_text"]} for c in meta["claims"]],
+    return {"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": reworded(c["source_text"])} for c in meta["claims"]],
             "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": "S1", "guide_quote": b["content"]}
                         for b in meta.get("bridges") or []],
             "additions": [], "uncovered_source": [], "coherence": "pass"}
 
 
 def verbatim_body(meta) -> dict:
-    return {"guide": "這一段的內容如下。\n\n" + "\n\n".join(c["source_text"] for c in meta["claims"])
+    return {"guide": "這一段的內容如下。\n\n" + "\n\n".join(reworded(c["source_text"]) for c in meta["claims"])
                      + "".join(f"\n\n$${f}$$" for f in meta.get("evidence_formulas") or [])
                      + "".join(f"\n\n{b['content']}" for b in meta.get("bridges") or []),
             "key_points": ["重點"], "check": "？", "bridges_used": [], "limits": []}
@@ -298,7 +304,7 @@ async def test_a_covered_verdict_counts_only_with_a_quote_from_the_guide():
         a["claims"][0]["guide_quote"] = "這句只在中文課文裡"
         return a
     b = Scripted({"body_audit": [from_chinese], "verify": [
-        {"checks": [{"item": 1, "verdict": "no_problem", "guide_quote": QUOTES[0]["text"]}]}]})
+        {"checks": [{"item": 1, "verdict": "no_problem", "guide_quote": reworded(QUOTES[0]["text"])}]}]})
     out, _ = await run(b, index=0)
     assert b.steps()[-1] == "verify" and out["status"] == "accepted"
     assert [w["code"] for w in out["artifact"]["warnings"]] == ["review_withdrawn"]
@@ -551,3 +557,19 @@ async def test_an_ok_bridge_needs_a_real_guide_passage_and_a_supported_correctne
     # revised, and accepted only when the next audit gives real support
     steps = b.steps()
     assert steps.index("verify") < steps.index("revise_body") and out["status"] == "accepted"
+
+
+
+async def test_claims_the_guide_writes_verbatim_are_covered_by_the_program_not_the_auditor():
+    """Cost: a claim whose whole cited text is in the guide, formulas included, needs no auditor verdict."""
+    def mixed(m):
+        cs = m["claims"]
+        return {"guide": cs[0]["source_text"] + "\n\n" + "\n\n".join(reworded(c["source_text"]) for c in cs[1:]),
+                "key_points": [], "check": "", "bridges_used": []}
+    quotes = QUOTES + [EXCEPTION]
+    b = Scripted({"draft": [mixed]})
+    out, _ = await run(b, index=3, quotes=quotes)
+    audit_prompt = b.prompt("body_audit")
+    assert "- C1［" not in audit_prompt and "- C2［" in audit_prompt
+    assert out["status"] == "accepted" and out["audit"]["program_covered"] == ["C1"]
+    assert out["artifact"]["gate2"]["status"] == "pass"
