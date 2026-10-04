@@ -429,6 +429,27 @@ def understanding_schema(source: str) -> dict:
     return sch
 
 
+def body_tokens(source: str, bridges: int = 0) -> int:
+    """Output reserved for the 主要正文: about twice the source plus room per bridge, 2048–4096 tokens."""
+    from ..llm.context import estimate_tokens
+    return max(2048, min(4096, 2 * estimate_tokens(source) + 300 * bridges + 512))
+
+
+def body_schema(source: str, bridges: int = 0) -> dict:
+    """Constrained-decoding schema of the 主要正文 with bounded strings. A small model sometimes falls into repeating
+    "\\n" until the token limit, leaving JSON that cannot be parsed; with a length bound the string is closed and the
+    (useless) guide is caught by the gates and revised instead of wasting a format fix."""
+    from .contracts import BodyDraft
+    sch = BodyDraft.model_json_schema()
+    props = dict(sch["properties"])
+    props["guide"] = {**props["guide"], "maxLength": int(body_tokens(source, bridges) * 0.8)}
+    props["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": 160}, "maxItems": 3}
+    props["check"] = {**props["check"], "maxLength": 240}
+    props["limits"] = {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 4}
+    sch["properties"] = props
+    return sch
+
+
 def exact_ids_schema(model_cls, lists: dict[str, list[str]]) -> dict:
     """The model's JSON schema with each listed array restricted to exactly these ids (enum + item count), so
     constrained decoding cannot leave an expected check out. The Pydantic check still validates the result."""

@@ -171,3 +171,15 @@ def test_valid_json_keeps_code_regex_and_quotes_exactly():
     one_line = _json.dumps({"guide": '用 `print("\\n")` 換行，或寫 ```\\n```', "quote": quote}, ensure_ascii=False)
     g = parse_model_json(one_line, G, prose_fields=("guide",))   # no real line break, but the \n is inside code
     assert g.guide == '用 `print("\\n")` 換行，或寫 ```\\n```'
+
+
+def test_the_guide_schema_bounds_its_strings_by_the_output_budget():
+    """A degenerate repetition cannot run to the token limit and leave unparsable JSON: the guide string is bounded."""
+    from app.reading.gates import body_schema, body_tokens
+    short, long_ = "短句。" * 10, "這是一個很長的段落。" * 200
+    assert body_tokens(short) == 2048 and body_tokens(long_) == 4096
+    sch = body_schema(short)
+    assert sch["properties"]["guide"]["maxLength"] == int(2048 * 0.8)
+    assert sch["properties"]["key_points"]["maxItems"] == 3 and sch["properties"]["limits"]["maxItems"] == 4
+    assert body_schema(long_)["properties"]["guide"]["maxLength"] > sch["properties"]["guide"]["maxLength"]
+

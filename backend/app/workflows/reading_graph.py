@@ -496,16 +496,19 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
 
     async def draft(state, ctx):
         t = task(state)
+        n_bridges = len((state.get("bridges") or {}).get("bridges") or [])
+        out_tokens = gates.body_tokens(t.text, n_bridges)
         msg, rec = await prompt_for(ctx, state, "draft", "reading_body",
                                     ("quote_text", "symbol_evidence", "claims", "bridges", "chinese_text", "supplements",
                                      "prev_points", "qa_context"),
-                                    {}, ra.GUIDE_MAX_TOKENS)
+                                    {}, out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", prose_fields=("guide",), node="draft",
+                                    json_schema=gates.body_schema(t.text, n_bridges),
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
                                     meta={"step": "draft", "quote_text": t.text, "claims": state["verified"]["claims"],
                                           "bridges": (state.get("bridges") or {}).get("bridges") or [],
                                           "evidence_formulas": gates.evidence_formulas(state.get("symbol_evidence"))},
-                                    min_max_tokens=ra.GUIDE_MAX_TOKENS, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+                                    min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         return {"draft": d.model_dump()}
 
     def claims_of(state) -> list[SourceClaim]:
@@ -579,19 +582,22 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
     async def revise_body(state, ctx):
         t = task(state)
         ctx.budget.charge("revision")
+        n_bridges = len((state.get("bridges") or {}).get("bridges") or [])
+        out_tokens = gates.body_tokens(t.text, n_bridges)
         majors = [ra.Finding.model_validate(f) for f in state["findings"] if f["severity"] == "major"]
         extra = {"issues": ra.findings_text(majors), "draft_json": json.dumps(state["draft"], ensure_ascii=False)}
         msg, rec = await prompt_for(ctx, state, "revise_body", "reading_body_revise",
                                     ("quote_text", "symbol_evidence", "claims", "bridges", "supplements"), extra,
-                                    ra.GUIDE_MAX_TOKENS)
+                                    out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", prose_fields=("guide",), node="revise_body",
+                                    json_schema=gates.body_schema(t.text, n_bridges),
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
                                     purpose="revision", meta={"step": "revise_body", "quote_text": t.text,
                                                               "claims": state["verified"]["claims"],
                                                               "bridges": (state.get("bridges") or {}).get("bridges") or [],
                                                               "evidence_formulas": gates.evidence_formulas(state.get("symbol_evidence")),
                                                               "issues": [f.code for f in majors]},
-                                    min_max_tokens=ra.GUIDE_MAX_TOKENS, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+                                    min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         return {"draft": d.model_dump(), "body_revisions": state.get("body_revisions", 0) + 1,
                 "history": [{"stage": "body", "draft": state["draft"], "findings": state["findings"]}]}
 
