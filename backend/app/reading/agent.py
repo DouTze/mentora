@@ -193,18 +193,34 @@ def contains_quote(haystack: str, quote: str, min_chars: int = 2) -> bool:
 
 def expand_quote(text: str, fragment: str, min_chars: int = 6) -> str:
     """The whole sentence(s) of `text` that contain the quoted fragment ("" if the fragment is not there). An
-    auditor may quote a short locating fragment; strength markers and formulas are checked on the full sentence."""
-    if not contains_quote(text, fragment, min_chars):
-        return ""
+    auditor may quote a short locating fragment; strength markers and formulas are checked on the full sentence.
+    A small model often merges two sentences into one quotation ("A，且 B"): then the quotation is cut at commas and
+    sentence marks, a connective the auditor added at the start of a piece (且、並、而且、同時…) is dropped, every
+    remaining piece — short ones included, so an inserted 「不」 cannot hide — must be verbatim in the text, and the
+    evidence is the sentences holding the pieces."""
     from .gates import source_segments
-    q = norm_text(fragment).strip("….。，,;；:：「」\"'")
     sents = [x for _, x in source_segments(text)]
-    for n in range(1, len(sents) + 1):
-        for i in range(len(sents) - n + 1):
-            joined = " ".join(sents[i:i + n])
-            if q in norm_text(joined):
-                return joined
-    return fragment
+
+    def holding(q: str) -> list[int]:
+        return [k for k, x in enumerate(sents) if q in norm_text(x)]
+
+    if contains_quote(text, fragment, min_chars):
+        q = norm_text(fragment).strip("….。，,;；:：「」\"'")
+        for n in range(1, len(sents) + 1):
+            for i in range(len(sents) - n + 1):
+                joined = " ".join(sents[i:i + n])
+                if q in norm_text(joined):
+                    return joined
+        return fragment
+    pieces = [re.sub(r"^(?:並且|而且|以及|同時|且|並|和|及|而)", "", norm_text(x).strip("，,:：「」\"'"))
+              for x in re.split(r"[，,。！？；;!?]|…|\.\.\.", fragment or "")]
+    pieces = [x for x in pieces if x]
+    if len(pieces) < 2 or sum(len(x) for x in pieces) < min_chars:
+        return ""
+    found = [holding(x) for x in pieces]
+    if not all(found):
+        return ""
+    return " ".join(sents[k] for k in sorted({ks[0] for ks in found}))
 
 
 def target_text(d: dict, target: str) -> str:

@@ -121,3 +121,15 @@ def test_markers_ignore_code_and_treat_only_if_not_only_as_a_condition():
     assert "condition" not in profile(code)                          # `if` inside code is not a condition
     assert parity("This paragraph explains the idea in words only.", "這段只用文字說明。") == []
     assert parity("Only if x > 0 is the formula valid.", "這個公式有效。")    # "only if" still is a condition
+
+
+def test_a_merged_quotation_counts_only_when_every_piece_is_in_the_guide():
+    """Auditors often join two guide sentences into one quotation with an added 「且」; each piece must still be verbatim."""
+    guide = "在均衡價格下，消費者想買的數量恰好等於生產者想賣的數量。兩條曲線的交點稱為市場均衡點。"
+    merged = "在均衡價格下，消費者想買的數量恰好等於生產者想賣的數量，且兩條曲線的交點稱為市場均衡點。"
+    full = ra.expand_quote(guide, merged)
+    assert "在均衡價格下" in full and "市場均衡點" in full
+    invented = "消費者想買的數量恰好等於生產者想賣的數量；價格會立刻回到均衡"
+    assert ra.expand_quote(guide, invented) == ""                      # one piece is not in the guide
+    hidden = "在均衡價格下，不，消費者想買的數量恰好等於生產者想賣的數量"
+    assert ra.expand_quote(guide, hidden) == ""                        # a short inserted piece is checked too
