@@ -112,7 +112,23 @@ cd backend
 .venv/bin/python scripts/prefetch_probe.py --model qwen3-vl:4b --read-seconds 20           # 預取開／關時讀者實際等待與背景呼叫成本
 ```
 
-`--stages segment` 只評切段（快）；`--cases` 指定教材。腳本只用本機模型，不會下載模型或把教材送到雲端。自動檢查只是信號，品質以 `RUBRIC.md` 的人工盲評為準：盲評包先只呈現兩份主要正文，中文課文另外評分。放行漏洞的回歸 fixtures 在 `backend/evals/reading/regressions/`，自製 PDF fixtures 在 `backend/evals/reading/pdf/`。
+`--stages segment` 只評切段（快）；`--cases` 指定教材。腳本預設只用本機模型，不會下載模型或把教材送到雲端。自動檢查只是信號，品質以 `RUBRIC.md` 的人工盲評為準：盲評包先只呈現兩份主要正文，中文課文另外評分。放行漏洞的回歸 fixtures 在 `backend/evals/reading/regressions/`，自製 PDF fixtures 在 `backend/evals/reading/pdf/`。
+
+### 遠端推論（品質驗收用，選用）
+
+要驗證 prompt 與流程在 qwen 模型下的運作成果（切段、導讀、關卡、筆記與題目），但本機跑一輪太慢時，可以只把模型呼叫送到 Colab GPU 上的同一個 Ollama 模型。其他步驟（切段規則、關卡、LangGraph、資料庫）仍在本機執行。步驟：
+
+1. 在 Colab 上傳 `backend/scripts/colab/mentor_ollama_remote.ipynb`，選 GPU 執行環境，按「全部執行」。斷線時再按一次即可（token 不變，網址會換）。
+2. 評估腳本會自動比對遠端與本機的模型 digest；本機 Ollama 沒啟動時，改讀本機 manifest 檔。
+3. 把 notebook 印出的整段設定存成本機檔案（例如 `remote.env`），`source` 後執行評估：`--host $REMOTE_URL --jobs $REMOTE_JOBS`。
+
+限制與防護：
+
+- 驗收範圍：遠端 digest 與本機相同時是同一個模型，品質結果（自動檢查與人工盲評）可以驗收，`run_class` 為 `remote-quality`。digest 不同或無法比對時為 `remote-unverified`，只供開發參考。耗時與效能只認本機循序執行（`local-acceptance`）；平行或遠端的耗時不能比較。`results.json` 的 `provenance` 記錄主機、兩邊的 digest、seed 與平行數，報告開頭也會標出。
+- 只送自製評估教材。adapter 遇到網際網路上的主機（公開 IP 或公開網域，例如 tunnel 網址）時，必須設定 `MENTOR_ALLOW_REMOTE_MODEL=1` 才會送出請求。
+- proxy token 只從環境變數 `MENTOR_OLLAMA_TOKEN` 讀取，不寫入設定、session 或評估紀錄。proxy 只轉送 `/api/chat`、`/api/show`、`/api/tags`、`/api/version`。
+- `MENTOR_OLLAMA_SEED` 可固定 sampling seed。Colab（CUDA）與本機（Metal）即使 seed 相同，輸出仍可能不同，品質判斷看多次執行的分佈與人工盲評。
+- 不要 `export OLLAMA_HOST`：本機的 `ollama` 指令也讀這個變數。app 改用遠端模型時，只在啟動指令前加上 `OLLAMA_HOST=<網址>`；如果設定頁已存了主機位址，以設定頁為準。
 
 ## 結構
 

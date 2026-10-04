@@ -12,7 +12,15 @@ compare   = metrics side by side + a blind A/B review packet (blind/packet.md, k
             pass --scores <filled scores.json> to add the human rubric averages.
 
 Each run writes <out>/results.json and <out>/report.md (default out: data/evals/<timestamp>-<mode>-<backend>,
-which is git-ignored). Real backends only run when asked; nothing is downloaded and nothing leaves the machine."""
+which is git-ignored). Real backends only run when asked; nothing is downloaded.
+
+Remote inference (development only): with --host pointing at an Ollama on the internet (e.g. the Colab notebook in
+scripts/colab/), the fixture text is sent to that host, so it is refused unless MENTOR_ALLOW_REMOTE_MODEL=1 is set.
+The run records provenance (host, remote and local model digests, seed, jobs). When the remote digest equals the
+local one it is the same model, so the quality results (segmentation, guides, gates, blind packets) count for
+acceptance ("remote-quality"); otherwise it is only a development reference ("remote-unverified"). Latency counts
+only for local sequential runs ("local-acceptance").
+--jobs N runs N candidate fixtures concurrently (one counter per fixture); the legacy baseline stays sequential."""
 from __future__ import annotations
 
 import argparse
@@ -78,6 +86,31 @@ def prompt_hash() -> str:
         h.update(p.name.encode())
         h.update(p.read_bytes())
     return h.hexdigest()[:16]
+
+
+def provenance(args, cfg: ModelConfig, backend: LLMBackend, local_host: str = "http://127.0.0.1:11434",
+               models_dir: str | None = None) -> dict:
+    """Where the model ran and what the run may be accepted for: quality (same model, checked by digest) and/or
+    latency (local, sequential only)."""
+    from app.llm import ollama
+    remote = cfg.backend == "ollama" and ollama.is_remote(cfg.host)
+    digest = local_digest = None
+    if cfg.backend == "ollama":
+        digest = asyncio.run(backend.model_digest())
+        if remote:   # the same model locally, to prove the remote one is not a different model
+            local_digest = (asyncio.run(ollama.OllamaBackend(local_host, cfg.model).model_digest())
+                            or ollama.manifest_digest(cfg.model, models_dir))
+    jobs = getattr(args, "jobs", 1)
+    digest_match = (digest is not None and digest == local_digest) if remote else None
+    run_class = ("mock" if cfg.backend == "mock" else
+                 ("remote-quality" if digest_match else "remote-unverified") if remote else
+                 "local-parallel" if jobs > 1 else "local-acceptance")
+    return {"host": cfg.host if cfg.backend == "ollama" else None, "remote": remote, "model_digest": digest,
+            "local_model_digest": local_digest, "digest_match": digest_match,
+            "seed": ollama.sampling_seed() if cfg.backend == "ollama" else None, "temperature": cfg.temperature,
+            "jobs": jobs, "run_class": run_class,
+            "quality_acceptable": cfg.backend != "mock" and digest_match is not False,
+            "latency_comparable": not remote and jobs == 1}
 
 
 def model_config(args) -> ModelConfig:
@@ -178,9 +211,29 @@ async def run_candidate_case(case: dict, cfg: ModelConfig, counter: CountingBack
 
 # -- driver --------------------------------------------------------------------------
 
-async def run(args) -> Path:
+async def run_one(args, case: dict, cfg: ModelConfig, registry: Registry, counter: CountingBackend, stages: list[str],
+                  tmp: Path) -> dict:
+    if "expect_import_error" in case:
+        try:
+            ev.load_units(case)
+            res = {"id": case["id"], "import_error": None}
+        except MaterialError as e:
+            res = {"id": case["id"], "import_error": e.code}
+        res["expect_import_error"] = case["expect_import_error"]
+        res["import_error_ok"] = res["import_error"] == case["expect_import_error"]
+        return res
+    try:
+        if args.mode == "baseline":
+            return await run_legacy_case(case, registry, counter, stages, tmp)
+        return await run_candidate_case(case, cfg, counter, stages, tmp)
+    except LLMError as e:
+        return {"id": case["id"], "error": f"model_unavailable: {e}", "calls": counter.take()}
+
+
+async def run(args, prov: dict | None = None) -> Path:
     cfg = model_config(args)
-    counter = CountingBackend(build_backend(cfg))
+    inner = build_backend(cfg)
+    counter = CountingBackend(inner)
     registry = Registry(cfg)
     registry._backend = counter  # the legacy agent reads registry.backend; counting wraps the real adapter
     stages = args.stages.split(",")
@@ -189,32 +242,33 @@ async def run(args) -> Path:
     out = Path(args.out) if args.out else ROOT / "data" / "evals" / f"{datetime.now():%Y%m%d-%H%M%S}-{args.mode}-{cfg.backend}"
     out.mkdir(parents=True, exist_ok=True)
     started, t0 = datetime.now().isoformat(timespec="seconds"), time.perf_counter()
-    results = []
+    jobs = max(1, args.jobs) if args.mode == "candidate" else 1
+    results: list[dict | None] = [None] * len(cases)
+
+    def save_partial():
+        (out / "results.partial.json").write_text(json.dumps([r for r in results if r], ensure_ascii=False, indent=1),
+                                                  encoding="utf-8")
+
     with tempfile.TemporaryDirectory() as td:
-        for case in cases:
-            print(f"[{args.mode}] {case['id']} …", flush=True)
-            if "expect_import_error" in case:
-                try:
-                    ev.load_units(case)
-                    res = {"id": case["id"], "import_error": None}
-                except MaterialError as e:
-                    res = {"id": case["id"], "import_error": e.code}
-                res["expect_import_error"] = case["expect_import_error"]
-                res["import_error_ok"] = res["import_error"] == case["expect_import_error"]
-                results.append(res)
-                continue
-            try:
-                if args.mode == "baseline":
-                    res = await run_legacy_case(case, registry, counter, stages, Path(td))
-                else:
-                    res = await run_candidate_case(case, cfg, counter, stages, Path(td))
-            except LLMError as e:
-                res = {"id": case["id"], "error": f"model_unavailable: {e}", "calls": counter.take()}
-            results.append(res)
-            (out / "results.partial.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+        if jobs == 1:
+            for i, case in enumerate(cases):
+                print(f"[{args.mode}] {case['id']} …", flush=True)
+                results[i] = await run_one(args, case, cfg, registry, counter, stages, Path(td))
+                save_partial()
+        else:
+            gate = asyncio.Semaphore(jobs)
+
+            async def one(i: int, case: dict):
+                async with gate:   # each fixture counts its own calls; the adapter itself is shared
+                    print(f"[{args.mode}] {case['id']} …", flush=True)
+                    results[i] = await run_one(args, case, cfg, registry, CountingBackend(inner), stages, Path(td))
+                    save_partial()
+            await asyncio.gather(*(one(i, c) for i, c in enumerate(cases)))
+    results = [r for r in results if r]
     run_doc = {"mode": args.mode, "pipeline": "legacy" if args.mode == "baseline" else "langgraph",
                "started_at": started, "elapsed_s": round(time.perf_counter() - t0, 1),
                "backend": {**cfg.model_dump(), "resolved_model": counter.model, "simulated": counter.simulated},
+               "provenance": prov or {},
                "stages": stages, "prompt_hash": prompt_hash(), "manifest_hash": ev.file_hash(ev.MANIFEST),
                "results": results, "summary": ev.summarize(results)}
     (out / "results.json").write_text(json.dumps(run_doc, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -266,6 +320,7 @@ def main() -> None:
         p.add_argument("--stages", default="segment,guide", help="comma list: segment, guide")
         p.add_argument("--cases", default="", help="comma list of case ids (default: all)")
         p.add_argument("--out", default="")
+        p.add_argument("--jobs", type=int, default=1, help="candidate only: fixtures run concurrently (latency then not comparable)")
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
@@ -276,7 +331,16 @@ def main() -> None:
     if args.mode == "compare":
         compare(args)
     else:
-        asyncio.run(run(args))
+        cfg = model_config(args)
+        from app.llm import ollama
+        if cfg.backend == "ollama" and ollama.is_remote(cfg.host) and not ollama.remote_allowed():
+            raise SystemExit(f"{cfg.host} 是網際網路上的主機；遠端推論會把教材送到該主機，確認後設定 MENTOR_ALLOW_REMOTE_MODEL=1")
+        prov = provenance(args, cfg, build_backend(cfg))
+        if prov["remote"]:
+            verdict = ("digest 與本機相同，品質結果可驗收；耗時不能驗收" if prov["digest_match"] else
+                       f"digest 無法和本機比對（本機 {prov['local_model_digest']}），結果只供開發參考")
+            print(f"[{prov['run_class']}] 推論送往 {cfg.host}（digest {prov['model_digest']}）：{verdict}", flush=True)
+        asyncio.run(run(args, prov))
 
 
 if __name__ == "__main__":

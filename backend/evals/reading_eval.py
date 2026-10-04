@@ -346,12 +346,28 @@ def summarize(results: list[dict]) -> dict:
     return s
 
 
+def provenance_lines(prov: dict | None) -> list[str]:
+    if not prov:
+        return []
+    lines = [f"- 執行類別：{prov.get('run_class')}　主機：{prov.get('host')}　模型 digest：`{prov.get('model_digest')}`"
+             f"　seed：{prov.get('seed')}　平行：{prov.get('jobs')}"]
+    if prov.get("remote"):
+        if prov.get("digest_match"):
+            lines.append("- **遠端推論**：模型 digest 與本機相同，切段、導讀、關卡與盲評結果可作為品質驗收；耗時不能當作驗收。")
+        else:
+            lines.append(f"- **遠端推論，模型未驗證**：遠端 digest 無法和本機（`{prov.get('local_model_digest')}`）比對，"
+                         "結果只供開發參考，不能驗收。")
+    elif not prov.get("latency_comparable", True):
+        lines.append("- 多份教材平行執行：品質結果可用；耗時不能和循序的本機驗收比較。")
+    return lines
+
+
 def markdown_report(run: dict) -> str:
     s = run["summary"]
     lines = [f"# 導讀評估：{run['mode']}", "",
              f"- 時間：{run['started_at']}　耗時 {run['elapsed_s']} 秒",
              f"- 後端：{run['backend']}　prompt bundle：`{run['prompt_hash']}`　manifest：`{run['manifest_hash']}`",
-             f"- pipeline：{run['pipeline']}　stages：{', '.join(run['stages'])}", "",
+             f"- pipeline：{run['pipeline']}　stages：{', '.join(run['stages'])}", *provenance_lines(run.get("provenance")), "",
              "## 摘要", "", "| 指標 | 值 |", "| --- | --- |"]
     for k, v in s.items():
         lines.append(f"| {k} | {json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v} |")
