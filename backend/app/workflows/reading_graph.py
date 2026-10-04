@@ -70,6 +70,7 @@ class GuideState(TypedDict, total=False):
     budget: dict
     gate_rules: str              # gates.GATE_RULES_VERSION this attempt runs under (checked before publishing)
     budget_base: int             # calls spent by earlier, discarded runs of this attempt (carried, never refilled)
+    bridges_dropped: list        # bridges removed because they could not be verified (the guide fell back to the source)
     rounds: dict                 # model node → times it has run (part of its step-cache key)
     supplements: list[dict]
     symbol_evidence: dict | None # R5: the unit's symbol evidence, confirmed by the symbols node when possible
@@ -134,6 +135,10 @@ def template(lists: dict[str, list[str]], item: dict, rest: dict) -> str:
     return json.dumps({**{k: [{"id": i, **item[k]} for i in ids] for k, ids in lists.items()}, **rest}, ensure_ascii=False)
 SUPPORT_SKELETON = {"source": "S…", "derivation": "前提 S…；推導：…", "prior_reading": "單元:C…", "user_authorized": "讀者說「…」",
                     "prerequisite": "…"}
+# Gate 2 findings that concern only the optional teaching added to the source; when nothing else blocks, the guide
+# falls back to the source alone instead of being held (bridges are never required, unverified ones never published)
+BRIDGE_CODES = {"bridge_missing", "bridge_incorrect", "bridge_unconfirmed", "bridge_correctness_unconfirmed",
+                "unapproved_supplement"}
 MAX_SOURCE_REVISIONS = 1
 MAX_BODY_REVISIONS = 1
 
@@ -563,12 +568,31 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         decision = "audit"
         if confirmed:
             decision = "revise" if state.get("body_revisions", 0) < MAX_BODY_REVISIONS and can(budget, 2) else "fail"
-        return {"findings": [f.model_dump() for f in fs], "decision": decision}
+        return {"findings": [f.model_dump() for f in fs], "decision": fallback(state, budget, fs, decision)}
+
+    def fallback(state, budget: CallBudget, fs: list[ra.Finding], decision: str) -> str:
+        """A guide about to be held only for its teaching additions is redrafted once from the source alone."""
+        majors = [f for f in fs if f.severity == "major"]
+        if (decision == "fail" and majors and all(f.code in BRIDGE_CODES for f in majors)
+                and state.get("bridges_dropped") is None and can(budget, 2)):
+            return "drop_bridges"
+        return decision
 
     def judged(state, budget: CallBudget, fs: list[ra.Finding], *, allow_verify: bool) -> str:
         revs = state.get("body_revisions", 0)
-        return ra.decide(fs, revised=revs >= MAX_BODY_REVISIONS, can_revise=can(budget, 2),
-                         can_verify=allow_verify and can(budget, 1) and state.get("verified_for") != revs)
+        return fallback(state, budget, fs, ra.decide(fs, revised=revs >= MAX_BODY_REVISIONS, can_revise=can(budget, 2),
+                                                     can_verify=allow_verify and can(budget, 1) and state.get("verified_for") != revs))
+
+    def drop_bridges(state: GuideState) -> dict:
+        """Remove every bridge (and any 補充說明) and write the guide again from the verified source alone; the
+        dropped bridges and why they could not be verified stay in the record. Spending is kept (one budget)."""
+        plan = BridgePlan.model_validate(state.get("bridges") or {})
+        why = [f["detail"][:160] for f in state.get("findings") or [] if f["severity"] == "major"]
+        dropped = [{"id": b.id, "content": b.content, "basis": b.basis} for b in plan.bridges]
+        return {"bridges": BridgePlan(learning_goal=plan.learning_goal, bridges=[]).model_dump(),
+                "bridges_dropped": [{"bridges": dropped, "reasons": why}],
+                "draft": None, "findings": [], "audit": None, "decision": None, "body_revisions": 0, "verified_for": None,
+                "history": [{"stage": "drop_bridges", "draft": state["draft"], "findings": state["findings"]}]}
 
     async def body_audit(state, ctx):
         t = task(state)
@@ -662,7 +686,9 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         b = state["budget"]
         return {"status": "accepted", "gate2": g2.model_dump(), "artifact": {
             "chinese_text": v.get("chinese_text"), "guide": d["guide"], "key_points": d.get("key_points") or [],
-            "check": d.get("check") or "", "limits": sorted(set((d.get("limits") or []) + (v.get("limits") or []))),
+            "check": d.get("check") or "", "limits": sorted(set((d.get("limits") or []) + (v.get("limits") or []) + (
+                ["教學補充無法核對，這段只依原文導讀"] if state.get("bridges_dropped") else []))),
+            "bridges_dropped": (state.get("bridges_dropped") or [{}])[0].get("bridges") or [],
             "supplement_notes": [x.content for x in bridges.bridges if x.boundary == "supplement"],
             "source_claims": v["claims"], "verified_source_key": v["key"], "gate1": v["gate1"], "gate2": g2.model_dump(),
             "coverage": (state.get("audit") or {}).get("claims"),
@@ -697,13 +723,13 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                      ("revise_source", revise_source), ("plan_bridges", plan_bridges), ("draft", draft),
                      ("body_audit", body_audit), ("verify", verify), ("revise_body", revise_body)):
         g.add_node(name, model_node(name, fn))
-    for name, fn in (("gate1", gate1), ("gate2", gate2), ("accept", accept), ("hold", hold)):
+    for name, fn in (("gate1", gate1), ("gate2", gate2), ("drop_bridges", drop_bridges), ("accept", accept), ("hold", hold)):
         g.add_node(name, fn)
 
     def failed_or(route):
         return lambda s: "hold" if s.get("status") == "failed" else route(s)
 
-    judge = {"pass": "accept", "revise": "revise_body", "verify": "verify", "fail": "hold"}
+    judge = {"pass": "accept", "revise": "revise_body", "verify": "verify", "fail": "hold", "drop_bridges": "drop_bridges"}
     g.add_edge(START, "prepare")
     g.add_conditional_edges("prepare", lambda s: "plan_bridges" if s.get("verified") else
                             "symbols" if needs_symbols(s) else "understand", ["plan_bridges", "symbols", "understand"])
@@ -719,11 +745,14 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
     g.add_conditional_edges("revise_source", failed_or(lambda s: "gate1"), ["gate1", "hold"])
     g.add_conditional_edges("plan_bridges", failed_or(lambda s: "draft"), ["draft", "hold"])
     g.add_conditional_edges("draft", failed_or(lambda s: "gate2"), ["gate2", "hold"])
-    g.add_conditional_edges("gate2", lambda s: {"audit": "body_audit", "revise": "revise_body", "fail": "hold"}[s["decision"]],
-                            ["body_audit", "revise_body", "hold"])
-    g.add_conditional_edges("body_audit", failed_or(lambda s: judge[s["decision"]]), ["accept", "revise_body", "verify", "hold"])
+    g.add_conditional_edges("gate2", lambda s: {"audit": "body_audit", "revise": "revise_body", "fail": "hold",
+                                                "drop_bridges": "drop_bridges"}[s["decision"]],
+                            ["body_audit", "revise_body", "drop_bridges", "hold"])
+    g.add_conditional_edges("body_audit", failed_or(lambda s: judge[s["decision"]]),
+                            ["accept", "revise_body", "verify", "drop_bridges", "hold"])
     g.add_conditional_edges("verify", failed_or(lambda s: judge.get(s["decision"], "hold") if s["decision"] != "verify" else "hold"),
-                            ["accept", "revise_body", "hold"])
+                            ["accept", "revise_body", "drop_bridges", "hold"])
+    g.add_edge("drop_bridges", "draft")
     g.add_conditional_edges("revise_body", failed_or(lambda s: "gate2"), ["gate2", "hold"])
     g.add_edge("accept", END)
     g.add_edge("hold", END)

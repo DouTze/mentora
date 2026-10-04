@@ -54,6 +54,13 @@ SUPPORT = {"source": "S1", "derivation": "由 S1 的條件代入定義，可得�
            "prerequisite": "切線斜率是導數的幾何意義，微積分入門課程都會教"}
 
 
+def dropped(out, content="可微表示函數在該點有切線斜率") -> bool:
+    """Published from the source alone: the unverifiable bridge is recorded as dropped and not in the guide."""
+    a = out["artifact"]
+    return (out["status"] == "accepted" and [b["id"] for b in a["bridges_dropped"]] == ["B1"] and not a["bridges"]["bridges"]
+            and content not in a["guide"] and "教學補充無法核對，這段只依原文導讀" in a["limits"])
+
+
 def covered_audit(meta) -> dict:
     return {"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": reworded(c["source_text"])} for c in meta["claims"]],
             "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": SUPPORT.get(b["basis"], "S1"),
@@ -548,12 +555,14 @@ async def test_an_ok_bridge_needs_a_real_guide_passage_and_a_supported_correctne
     b = Scripted({"plan_bridges": [bridge], "draft": [no_bridge_body], "revise_body": [no_bridge_body],
                   "body_audit": [audit(), audit()]})
     out, _ = await run(b, index=0)
-    assert out["status"] == "failed" and "是否寫進正文無法確認" in out["error"]["detail"]
+    assert dropped(out) and "drop_bridges" not in b.steps()      # a program node, not a model call
+    assert any(h.get("stage") == "drop_bridges" and "是否寫進正文無法確認" in json.dumps(h["findings"], ensure_ascii=False)
+               for h in out["history"])
 
     b = Scripted({"plan_bridges": [bridge], "body_audit": [audit(guide_quote="可微表示函數在該點有切線斜率", correct="no",
                                                                 note="可微不等於只有切線")] * 2})
     out, _ = await run(b, index=0)
-    assert out["status"] == "failed" and "內容不正確" in out["error"]["detail"]
+    assert dropped(out) and any("內容不正確" in json.dumps(h.get("findings"), ensure_ascii=False) for h in out["history"])
 
     b = Scripted({"plan_bridges": [bridge], "body_audit": [audit(guide_quote="可微表示函數在該點有切線斜率", support="S9")]})
     out, _ = await run(b, index=0)
@@ -671,7 +680,7 @@ async def test_verify_keeps_the_evidence_a_bridge_needs():
     bare = {"checks": [{"item": 1, "verdict": "no_problem", "reason": "這是正確的先備知識"}]}
     b = Scripted({"plan_bridges": [plan("source")], "body_audit": [bad, bad], "verify": [bare, bare]})
     out, _ = await run(b, index=0)
-    assert out["status"] == "failed" and "verify" in b.steps()
+    assert dropped(out) and "verify" in b.steps()                # never published with the unverified bridge
     assert "S1" in b.prompt("verify") and "只寫「這是正確的」不算依據" in b.prompt("verify")   # numbered source shown
 
     cited = {"checks": [{"item": 1, "verdict": "no_problem", "reason": "S1 說函數在開區間內可微，切線斜率即導數"}]}
@@ -717,7 +726,7 @@ async def test_verify_cannot_pass_a_non_source_bridge_on_a_bare_verdict():
     for basis in ("derivation", "prerequisite", "prior_reading", "user_authorized"):
         b = Scripted({"plan_bridges": [plan(basis)], "body_audit": [unsure, unsure], "verify": [bare, bare]})
         out, _ = await run(b, index=0, learning=read)
-        assert out["status"] == "failed" and "verify" in b.steps(), basis
+        assert dropped(out) and "verify" in b.steps(), basis
     cited = {"checks": [{"item": 1, "verdict": "no_problem", "reason": "u-0:C2 已讀過可微的定義"}]}
     b = Scripted({"plan_bridges": [plan("prior_reading")], "body_audit": [unsure], "verify": [cited]})
     out, _ = await run(b, index=0, learning=read)
@@ -826,3 +835,29 @@ def test_leaked_labels_and_loops_in_the_guide_are_program_findings():
     assert not codes(loop + "也就是說，其他放棄的選項不必加總。") & {"internal_label", "repeated_text"}
     t2 = t.model_copy(update={"text": "TCP 連線狀態 S1 轉移到 S2。"})
     assert "internal_label" not in {f.code for f in validate_draft(t2, GuideDraft(guide="連線從 S1 轉移到 S2，這是三向交握的一部分。", key_points=[], check=""))}
+
+
+async def test_a_guide_held_only_for_its_bridges_falls_back_to_the_source_once():
+    """Bridges are optional teaching. When Gate 2 would hold a guide only because a bridge cannot be verified, the
+    guide is written again from the verified source alone (once, same budget); other problems still hold it."""
+    plan = {"learning_goal": "x", "bridges": [{"id": "B1", "obstacle": "不熟悉可微", "targets": ["C1"],
+                                              "content": "可微表示函數在該點有切線斜率。", "basis": "prerequisite"}]}
+    unsure = lambda m: {**covered_audit(m), "bridges": [{"id": b["id"], "verdict": "ok", "correct": "unsure", "support": "",
+                                                         "guide_quote": b["content"]} for b in m.get("bridges") or []]}
+    b = Scripted({"plan_bridges": [plan], "body_audit": [unsure, unsure]})
+    out, _ = await run(b, index=0)
+    steps = b.steps()
+    assert dropped(out) and steps.count("draft") == 2 and steps.count("plan_bridges") == 1
+    assert out["budget"]["calls"] <= out["budget"]["max_calls"]
+
+    missing = lambda m: {**unsure(m), "claims": [{"id": c["id"], "verdict": "missing"} for c in m["claims"]]}
+    b = Scripted({"plan_bridges": [plan], "body_audit": [missing] * 4})
+    out, _ = await run(b, index=0)
+    assert out["status"] == "failed" and b.steps().count("draft") == 1      # a missing claim is not a bridge problem
+
+    always = lambda m: {**covered_audit(m), "bridges": [], "additions": [],
+                        "claims": [{"id": c["id"], "verdict": "missing"} for c in m["claims"]]}
+    supplement = lambda m: {**verbatim_body(m), "guide": verbatim_body(m)["guide"] + "\n\n補充說明：這是額外的背景。"}
+    b = Scripted({"draft": [supplement, supplement], "revise_body": [supplement], "body_audit": [always] * 4})
+    out, _ = await run(b, index=0)
+    assert out["status"] == "failed" and b.steps().count("draft") <= 2       # falls back at most once
