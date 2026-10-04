@@ -186,7 +186,7 @@ export interface SessionListItem {
 }
 
 export interface ModelConfig {
-  backend: "mock" | "ollama" | "openvino";
+  backend: "mock" | "ollama" | "remote" | "openvino";
   model: string;
   host: string;
   model_path: string;
@@ -194,6 +194,12 @@ export interface ModelConfig {
   temperature: number;
   max_tokens: number;
   context_tokens: number;
+}
+
+/** The remote model server saved on the backend; the token itself never comes back. */
+export interface RemoteEndpoint {
+  url: string;
+  has_token: boolean;
 }
 
 export interface ActiveBackend {

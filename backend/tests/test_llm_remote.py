@@ -1,6 +1,7 @@
 """Remote inference is a development option: only the model call goes to the remote Ollama, only when explicitly
 allowed, with the proxy token taken from the environment; eval runs record where the model ran."""
 import asyncio
+import json
 import importlib.util
 import sys
 from pathlib import Path
@@ -213,3 +214,37 @@ def test_ollama_repetition_abort_is_degenerate_output_locally_and_through_the_pr
     with pytest.raises(LLMError) as e:
         chat("http://127.0.0.1:11434")             # a crashed runner is still an outage
     assert not isinstance(e.value, DegenerateOutput)
+
+
+def test_settings_remote_endpoint_is_a_backend_choice_whose_token_never_leaves_the_server(seen, tmp_path):
+    """Choosing "remote" in the settings is the consent (no MENTOR_ALLOW_REMOTE_MODEL needed); the token is kept
+    server-side, sent only as the proxy header, and never appears in settings, sessions or the model call record."""
+    import io
+    from fastapi.testclient import TestClient
+    from app import config
+    from app.db import Database
+    from app.llm.registry import Registry
+    from app.main import create_app
+    from app.models import ModelConfig
+    config.READING_PREFETCH = False
+    app = create_app(Database(tmp_path / "db.sqlite3"), Registry(ModelConfig(backend="mock")))
+    with TestClient(app) as c:
+        assert c.put("/api/settings/remote", json={"url": "ftp://x"}).status_code == 400
+        r = c.put("/api/settings/remote", json={"url": REMOTE + "/", "token": "tok-123"}).json()
+        assert r["remote"] == {"url": REMOTE, "has_token": True}
+        cfg = {"backend": "remote", "model": "qwen3-vl:4b", "temperature": 0.2, "max_tokens": 512, "context_tokens": 8192}
+        s = c.put("/api/settings", json=cfg).json()
+        assert s["active"]["backend"] == "remote" and s["active"]["host"] == REMOTE and "tok-123" not in json.dumps(s)
+        assert c.get("/api/settings").json()["remote"] == {"url": REMOTE, "has_token": True}
+        h = c.post("/api/settings/check").json()["health"]
+        assert h["ok"] and seen[-1].headers["Authorization"] == "Bearer tok-123" and str(seen[-1].url).startswith(REMOTE)
+        c.put("/api/settings/remote", json={"url": "https://new-tunnel.trycloudflare.com"})   # Colab restarted
+        assert c.get("/api/settings").json()["remote"]["has_token"]                          # token kept
+        c.post("/api/settings/check")
+        assert seen[-1].url.host == "new-tunnel.trycloudflare.com" and seen[-1].headers["Authorization"] == "Bearer tok-123"
+        m = c.post("/api/materials", files={"file": ("a.md", io.BytesIO("光合作用把光能轉成化學能。".encode()))}).json()
+        sid = c.post("/api/sessions", json={"material_id": m["id"], "start": 1, "end": 1}).json()["id"]
+        row = app.state.db.get_session(sid)
+        assert row["model_config"]["backend"] == "remote"
+        dump = json.dumps(row, ensure_ascii=False, default=str) + json.dumps(app.state.repo.list_llm_calls(sid), default=str)
+        assert "tok-123" not in dump and "new-tunnel" not in json.dumps(row["model_config"])

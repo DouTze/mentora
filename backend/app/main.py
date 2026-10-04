@@ -13,8 +13,9 @@ from .db import Database
 from .llm.registry import Registry
 from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
+from .llm import remote
 from .models import (AnswerRequest, AskRequest, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
-                     StartSessionRequest)
+                     RemoteEndpointRequest, StartSessionRequest)
 from .persistence.repository import Repository
 from .tutor.session import SessionError, TutorService
 from .workflows.commands import CommandError
@@ -32,6 +33,7 @@ def checkpoint_path(db: Database) -> str:
 def create_app(db: Database | None = None, registry: Registry | None = None) -> FastAPI:
     db = db or Database()
     registry = registry or Registry()
+    remote.configure(db)
     saved = db.get_setting("model_config")
     if saved:
         registry.update(ModelConfig.model_validate(saved))
@@ -149,13 +151,20 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     # -- model settings -----------------------------------------------------
     @app.get("/api/settings")
     async def get_settings():
-        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe()}
+        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe(), "remote": remote.public()}
 
     @app.put("/api/settings")
     async def put_settings(cfg: ModelConfig):
         registry.update(cfg)
         db.set_setting("model_config", cfg.model_dump())
-        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe()}
+        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe(), "remote": remote.public()}
+
+    @app.put("/api/settings/remote")
+    async def put_remote(req: RemoteEndpointRequest):
+        """The remote model server (URL + token of the proxy). The token is stored server-side and never returned."""
+        if req.url.strip() and not req.url.strip().lower().startswith(("http://", "https://")):
+            raise HTTPException(400, "網址必須以 http:// 或 https:// 開頭")
+        return {"remote": remote.save(req.url, req.token)}
 
     @app.get("/api/companions")
     async def get_companions():

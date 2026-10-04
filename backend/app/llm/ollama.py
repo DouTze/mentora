@@ -83,17 +83,27 @@ class OllamaBackend(LLMBackend):
     name = "ollama"
 
     def __init__(self, host: str, model: str, timeout: float = 180.0):
-        self.host = host.rstrip("/")
+        self._host = host.rstrip("/")
         self.model = model
         self.timeout = timeout
         self._caps: Capabilities | None = None
 
     @property
+    def host(self) -> str:
+        return self._host
+
+    @property
     def remote(self) -> bool:
         return is_remote(self.host)
 
+    def headers(self) -> dict[str, str]:
+        return request_headers()
+
+    def remote_consent(self) -> bool:
+        return remote_allowed()
+
     def _guard(self) -> None:
-        if self.remote and not remote_allowed():
+        if self.remote and not self.remote_consent():
             raise LLMError(f"模型主機 {self.host} 在網際網路上；送出前必須明確設定 MENTOR_ALLOW_REMOTE_MODEL=1"
                            "（遠端推論只供開發，會把教材內容送到該主機）")
 
@@ -101,7 +111,7 @@ class OllamaBackend(LLMBackend):
         """The served model's digest (from /api/tags), so a remote run can be matched to the local model."""
         try:
             self._guard()
-            async with httpx.AsyncClient(timeout=10.0, headers=request_headers()) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=self.headers()) as client:
                 r = await client.get(f"{self.host}/api/tags")
                 r.raise_for_status()
         except (httpx.HTTPError, LLMError):
@@ -117,7 +127,7 @@ class OllamaBackend(LLMBackend):
         if self._caps is None:
             try:
                 self._guard()
-                async with httpx.AsyncClient(timeout=10.0, headers=request_headers()) as client:
+                async with httpx.AsyncClient(timeout=10.0, headers=self.headers()) as client:
                     r = await client.post(f"{self.host}/api/show", json={"model": self.model})
                     r.raise_for_status()
                     d = r.json()
@@ -145,7 +155,7 @@ class OllamaBackend(LLMBackend):
         t0 = time.perf_counter()
         try:
             self._guard()
-            async with httpx.AsyncClient(timeout=self.timeout, headers=request_headers()) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers()) as client:
                 r = await client.post(f"{self.host}/api/chat", json=payload)
                 if r.status_code >= 500 and any(k in r.text for k in REPEAT_ABORT):
                     raise generation_error(r.text[:300])
@@ -170,7 +180,7 @@ class OllamaBackend(LLMBackend):
     async def health(self) -> dict[str, Any]:
         try:
             self._guard()
-            async with httpx.AsyncClient(timeout=5.0, headers=request_headers()) as client:
+            async with httpx.AsyncClient(timeout=5.0, headers=self.headers()) as client:
                 v = await client.get(f"{self.host}/api/version")
                 v.raise_for_status()
                 tags = await client.get(f"{self.host}/api/tags")
@@ -187,3 +197,32 @@ class OllamaBackend(LLMBackend):
             "available_models": names,
             "detail": "就緒" if has_model else f"模型 {self.model} 未下載，請執行 ollama pull {self.model}",
         }
+
+
+class RemoteOllamaBackend(OllamaBackend):
+    """The remote endpoint chosen in the settings (app/llm/remote.py). URL and token are read on every call, so a
+    restarted Colab tunnel only needs its new URL saved; choosing this backend is the consent to send text there."""
+    name = "remote"
+
+    def __init__(self, model: str, timeout: float = 300.0):
+        super().__init__("", model, timeout)
+
+    @property
+    def host(self) -> str:
+        from . import remote
+        return remote.get()["url"]
+
+    def headers(self) -> dict[str, str]:
+        from . import remote
+        token = remote.get()["token"]
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    def remote_consent(self) -> bool:
+        return True
+
+    def _guard(self) -> None:
+        if not self.host:
+            raise LLMError("尚未設定遠端模型伺服器的網址（設定 → 遠端模型）")
+
+    def describe(self) -> dict[str, Any]:
+        return {**super().describe(), "host": self.host}

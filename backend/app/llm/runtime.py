@@ -51,6 +51,8 @@ class ModelSnapshot:
         """What makes two snapshots the same physical model (generation params excluded)."""
         if self.backend == "ollama":
             return ("ollama", self.host, self.model)
+        if self.backend == "remote":     # one remote endpoint; its URL may change (Colab restart), not its identity
+            return ("remote", self.model)
         if self.backend == "openvino":
             return ("openvino", self.model_path, self.device)
         return ("mock",)

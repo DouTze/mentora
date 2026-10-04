@@ -1,5 +1,5 @@
 import type { CompanionSettings } from "./companions";
-import type { ActiveBackend, ApiError, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReadingQA, SessionListItem, SessionView, Strategy, TutorMessage, Turn } from "./types";
+import type { ActiveBackend, ApiError, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReadingQA, SessionListItem, SessionView, Strategy, TutorMessage, Turn } from "./types";
 
 export class RequestError extends Error {
   constructor(public status: number, public body: ApiError & { session?: SessionView | null }) {
@@ -31,7 +31,10 @@ export const api = {
   contents: () => call<Pick<Content, "id" | "version" | "title" | "description">[]>("/content"),
   content: (id: string) => call<Content>(`/content/${id}`),
   strategies: () => call<Strategy[]>("/strategies"),
-  settings: () => call<{ config: ModelConfig; active: ActiveBackend }>("/settings"),
+  settings: () => call<{ config: ModelConfig; active: ActiveBackend; remote: RemoteEndpoint }>("/settings"),
+  /** an empty token keeps the saved one */
+  saveRemote: (url: string, token: string) =>
+    call<{ remote: RemoteEndpoint }>("/settings/remote", { method: "PUT", body: JSON.stringify({ url, token: token || null }) }),
   saveSettings: (cfg: ModelConfig) =>
     call<{ config: ModelConfig; active: ActiveBackend }>("/settings", { method: "PUT", body: JSON.stringify(cfg) }),
   companions: () => call<CompanionSettings | null>("/companions"),

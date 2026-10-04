@@ -5,7 +5,7 @@ from .. import config
 from ..models import ModelConfig
 from .base import LLMBackend
 from .mock import MockBackend
-from .ollama import OllamaBackend
+from .ollama import OllamaBackend, RemoteOllamaBackend
 from .openvino import OpenVINOBackend
 
 
@@ -23,6 +23,8 @@ def default_config() -> ModelConfig:
 def build_backend(cfg: ModelConfig) -> LLMBackend:
     if cfg.backend == "ollama":
         return OllamaBackend(cfg.host or config.OLLAMA_HOST, cfg.model or config.OLLAMA_MODEL)
+    if cfg.backend == "remote":
+        return RemoteOllamaBackend(cfg.model or config.OLLAMA_MODEL)
     if cfg.backend == "openvino":
         return OpenVINOBackend(cfg.model_path or config.OPENVINO_MODEL_PATH, cfg.device or "GPU")
     return MockBackend()

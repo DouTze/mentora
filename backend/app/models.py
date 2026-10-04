@@ -22,14 +22,21 @@ class ModelJudgement(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    backend: Literal["mock", "ollama", "openvino"] = "mock"
+    backend: Literal["mock", "ollama", "remote", "openvino"] = "mock"
     model: str = ""
-    host: str = ""          # ollama host
+    host: str = ""          # ollama host (local / LAN); "remote" uses the endpoint saved in the settings instead
     model_path: str = ""    # openvino model dir
     device: str = "GPU"     # openvino device
     temperature: float = 0.2
     max_tokens: int = 512
     context_tokens: int = 8192
+
+
+class RemoteEndpointRequest(BaseModel):
+    """The remote model server (Colab or any server behind the same token proxy). An empty token keeps the saved one."""
+
+    url: str = Field(max_length=300)
+    token: str | None = Field(default=None, max_length=300)
 
 
 class CompanionSettings(BaseModel):
