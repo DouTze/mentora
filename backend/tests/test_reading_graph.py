@@ -50,10 +50,14 @@ def reworded(text: str) -> str:
     return body[:-1] + "確實" + body[-1:] + text[len(body):] if len(body) > 1 else "確實" + text
 
 
+SUPPORT = {"source": "S1", "derivation": "由 S1 的條件代入定義，可得這個結果",
+           "prerequisite": "切線斜率是導數的幾何意義，微積分入門課程都會教"}
+
+
 def covered_audit(meta) -> dict:
     return {"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": reworded(c["source_text"])} for c in meta["claims"]],
-            "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": "S1", "guide_quote": b["content"]}
-                        for b in meta.get("bridges") or []],
+            "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": SUPPORT.get(b["basis"], "S1"),
+                         "guide_quote": b["content"]} for b in meta.get("bridges") or []],
             "additions": [], "uncovered_source": [], "coherence": "pass"}
 
 
@@ -573,3 +577,220 @@ async def test_claims_the_guide_writes_verbatim_are_covered_by_the_program_not_t
     assert "- C1［" not in audit_prompt and "- C2［" in audit_prompt
     assert out["status"] == "accepted" and out["audit"]["program_covered"] == ["C1"]
     assert out["artifact"]["gate2"]["status"] == "pass"
+
+
+# -- second review: stale caches, "same text" that is not, bridge support on re-check ----------------------------
+
+AREA = [{"id": "q", "index": 0, "unit_id": "u-area", "label": "第 1 行", "heading": None, "text": "矩形面積等於長乘以寬。"}]
+
+
+async def test_a_source_verified_under_older_gate_rules_is_verified_again(monkeypatch):
+    """Review counterexample: a "長加上寬" verification cached by the looser rules was reused by the new code, which
+    skipped understand and source_audit and accepted it. A cached verification counts only under the same rules."""
+    from app.reading import gates
+    cache: dict = {}
+    await run(Scripted(), index=0, quotes=AREA, vsrc_cache=cache)
+    (key, entry), = cache.items()
+    assert entry["verifier_version"] == gates.GATE_RULES_VERSION
+    stale = {**entry, "claims": [{**entry["claims"][0], "statement": "矩形面積等於長加上寬。"}]}
+    del stale["verifier_version"]                              # what the older code wrote
+    cache[key] = stale
+    wrong = {"chinese_text": None, "claims": [claim(1, ["S1"], "矩形面積等於長加上寬。")]}
+    distorted = {"sentences": [], "claims": [{"id": "C1", "verdict": "distorted", "note": "乘被改成加"}]}
+    b = Scripted({"understand": [wrong], "revise_source": [wrong], "source_audit": [distorted, distorted]})
+    out, _ = await run(b, index=0, quotes=AREA, vsrc_cache=cache, session="s2")
+    assert b.steps()[:2] == ["understand", "source_audit"] and out["status"] == "failed"
+
+    cache[key] = {**entry, "verifier_version": "gate1-older"}  # same key, other rules: not reused either
+    b = Scripted()
+    await run(b, index=0, quotes=AREA, vsrc_cache=cache, session="s3")
+    assert b.steps()[0] == "understand"
+
+    monkeypatch.setattr(gates, "GATE_RULES_VERSION", "gate1-next")   # changed rules → another key
+    b = Scripted()
+    await run(b, index=0, quotes=AREA, vsrc_cache=cache, session="s4")
+    assert b.steps()[0] == "understand" and len(cache) == 2
+
+
+def test_gate_rules_version_follows_the_acceptance_code():
+    from app.reading import gates
+    assert gates.GATE_RULES_VERSION.startswith(gates.GATE_RULES_LABEL + "+")
+
+
+async def test_only_provably_lossless_differences_count_as_the_same_text():
+    """Review counterexamples: punctuation stripping turned 1.5 into 15, .5 into 5 and 2**3 into 23, so a changed
+    claim passed Gate 1 as the cited text itself. Only whitespace and the final sentence mark are ignored now."""
+    from app.reading.gates import _plain
+    for a, b in [("平均值是 1.5 公尺。", "平均值是 15 公尺。"), ("長度是 .5 公尺", "長度是 5 公尺"), ("結果是 2**3", "結果是 23"),
+                 ("共 1,000 人", "共 1000 人"), ("比例 1:2", "比例 12"), ("他不，是學生", "他不是學生"), ("「長」乘以寬", "長乘以寬"),
+                 ("x²", "x2"), ("f(a, b)", "f(ab)")]:
+        assert _plain(a) != _plain(b), (a, b)
+    assert _plain("矩形面積 等於長乘以寬。") == _plain("矩形面積等於長乘以寬") and _plain("a  b.") == _plain("a b")
+
+    for src, changed in [("平均值是 1.5 公尺。", "平均值是 15 公尺。"), ("長度是 .5 公尺。", "長度是 5 公尺。"),
+                         ("程式印出 `2**3` 的值。", "程式印出 `23` 的值。")]:
+        q = [{"id": "q", "index": 0, "unit_id": "u-n", "label": "第 1 行", "heading": None, "text": src}]
+        b = Scripted({"understand": [{"chinese_text": None, "claims": [claim(1, ["S1"], changed)]}]})
+        await run(b, index=0, quotes=q)
+        assert "source_audit" in b.steps(), changed
+        b = Scripted({"understand": [{"chinese_text": None, "claims": [claim(1, ["S1"], src)]}]})
+        await run(b, index=0, quotes=q)
+        assert "source_audit" not in b.steps(), src
+
+
+def test_only_a_paragraph_of_source_sentences_is_covered_by_the_program():
+    """Review counterexamples: 「並非 X」 contained X, and 「X。這個說法不正確。」 was judged on X's sentence alone. The
+    program covers a claim only in a paragraph made of whole source sentences; everything else is audited."""
+    from app.reading.contracts import SourceClaim
+    from app.reading.gates import verbatim_covered
+    src = "矩形面積等於長乘以寬。正方形是長寬相等的矩形。"
+    c = SourceClaim(id="C1", sentences=["S1"], statement="矩形面積等於長乘以寬。", source_text="矩形面積等於長乘以寬。")
+    assert verbatim_covered(c, "我們先看定義。\n\n矩形面積等於長乘以寬。\n\n接著看例子。", src)
+    assert verbatim_covered(c, "矩形面積等於長乘以寬。正方形是長寬相等的矩形。", src)
+    for guide in ["並非矩形面積等於長乘以寬。", "有人誤以為矩形面積等於長乘以寬。", "只有在正方形時，矩形面積等於長乘以寬。",
+                  "矩形面積等於長乘以寬。這個說法不正確。", "矩形面積等於長乘以寬，這種說法不正確。",
+                  "原文指出：矩形面積等於長乘以寬。", "所謂「矩形面積等於長乘以寬」其實是迷思。"]:
+        assert not verbatim_covered(c, guide, src), guide
+
+
+async def test_a_negated_verbatim_claim_goes_to_the_auditor():
+    negated = lambda m: {"guide": "並非" + m["claims"][0]["source_text"], "key_points": [], "check": "", "bridges_used": []}
+    b = Scripted({"draft": [negated]})
+    out, _ = await run(b, index=0, quotes=AREA)
+    assert "- C1［" in b.prompt("body_audit") and out["audit"]["program_covered"] == []
+
+
+async def test_verify_keeps_the_evidence_a_bridge_needs():
+    """Review counterexample: a source-based bridge citing S999, then a re-check saying "這是正確的先備知識" with no
+    valid citation, was downgraded to minor and passed Gate 2."""
+    def plan(basis):
+        return {"learning_goal": "x", "bridges": [{"id": "B1", "obstacle": "不熟悉可微", "targets": ["C1"],
+                                                    "content": "可微表示函數在該點有切線斜率。", "basis": basis}]}
+    bad = lambda m: {**covered_audit({**m, "bridges": []}), "bridges": [
+        {"id": "B1", "verdict": "ok", "correct": "yes", "support": "S999", "guide_quote": "可微表示函數在該點有切線斜率"}]}
+    bare = {"checks": [{"item": 1, "verdict": "no_problem", "reason": "這是正確的先備知識"}]}
+    b = Scripted({"plan_bridges": [plan("source")], "body_audit": [bad, bad], "verify": [bare, bare]})
+    out, _ = await run(b, index=0)
+    assert out["status"] == "failed" and "verify" in b.steps()
+    assert "S1" in b.prompt("verify") and "只寫「這是正確的」不算依據" in b.prompt("verify")   # numbered source shown
+
+    cited = {"checks": [{"item": 1, "verdict": "no_problem", "reason": "S1 說函數在開區間內可微，切線斜率即導數"}]}
+    b = Scripted({"plan_bridges": [plan("source")], "body_audit": [bad], "verify": [cited]})
+    out, _ = await run(b, index=0)
+    assert out["status"] == "accepted" and "revise_body" not in b.steps()
+    assert any(f["code"] == "bridge_checked_by_model" for f in out["findings"])
+
+
+
+def test_every_bridge_basis_needs_its_own_checkable_support():
+    """Review counterexample: derivation / prerequisite / prior_reading / user_authorized bridges accepted
+    "這是正確的". Each basis now names what must be there; a bare verdict is never support."""
+    from app.reading.gates import bridge_support_problem as problem
+    src = "第一句。第二句。"
+    refs = {"read": {"u-a:C1"}, "reader": "我想知道可微和切線的關係"}
+    bare = "這是正確的"
+    for basis in ("source", "derivation", "prerequisite", "prior_reading", "user_authorized"):
+        assert problem(basis, bare, src, refs), basis
+        assert problem(basis, "", src, refs), basis
+    assert problem("source", "S1、S999", src) and not problem("source", "S2", src)
+    assert problem("derivation", "S1", src)                                     # premises without the step
+    assert problem("derivation", "先求導數再代入，可得切線斜率", src)            # a step without premises
+    assert not problem("derivation", "由 S1 的連續與 S2 的可微，代入均值定理可得", src)
+    assert problem("prerequisite", "這是標準的先備知識", src)
+    assert not problem("prerequisite", "切線斜率是導數的幾何意義，微積分入門即教", src)
+    assert problem("prior_reading", "前面讀過", src, refs) and problem("prior_reading", "u-z:C9", src, refs)
+    assert not problem("prior_reading", "u-a:C1 已說明連續的條件", src, refs)
+    assert problem("user_authorized", "讀者要求的", src, refs) and problem("user_authorized", "「解釋一下」", src, refs)
+    assert not problem("user_authorized", "讀者說「想知道可微和切線的關係」", src, refs)
+    assert problem("user_authorized", "「想知道可微和切線的關係」", src, {"reader": ""})   # no request, no authorization
+
+
+async def test_verify_cannot_pass_a_non_source_bridge_on_a_bare_verdict():
+    def plan(basis):
+        return {"learning_goal": "x", "bridges": [{"id": "B1", "obstacle": "不熟悉可微", "targets": ["C1"],
+                                                    "content": "可微表示函數在該點有切線斜率。", "basis": basis}]}
+    unsure = lambda m: {**covered_audit({**m, "bridges": []}), "bridges": [
+        {"id": "B1", "verdict": "ok", "correct": "unsure", "support": "", "guide_quote": "可微表示函數在該點有切線斜率"}]}
+    bare = {"checks": [{"item": 1, "verdict": "no_problem", "reason": "這是正確的"}]}
+    read = LearningSnapshot(read_claims=[{"unit_id": "u-0", "claim_id": "C2", "statement": "可微必連續"}],
+                            goal="想知道可微和切線的關係")
+    for basis in ("derivation", "prerequisite", "prior_reading", "user_authorized"):
+        b = Scripted({"plan_bridges": [plan(basis)], "body_audit": [unsure, unsure], "verify": [bare, bare]})
+        out, _ = await run(b, index=0, learning=read)
+        assert out["status"] == "failed" and "verify" in b.steps(), basis
+    cited = {"checks": [{"item": 1, "verdict": "no_problem", "reason": "u-0:C2 已讀過可微的定義"}]}
+    b = Scripted({"plan_bridges": [plan("prior_reading")], "body_audit": [unsure], "verify": [cited]})
+    out, _ = await run(b, index=0, learning=read)
+    assert out["status"] == "accepted" and "u-0:C2 可微必連續" in b.prompt("verify")
+
+
+async def test_a_session_pinned_to_the_older_verify_prompt_still_runs_verify():
+    older = {**BUNDLE["prompts"], "reading_verify": BUNDLE["prompts"]["reading_verify"]
+             .replace("## 原文（程式逐句編號）\n{{sentences}}", "## 原文\n{{quote_text}}")}
+    assert "{{quote_text}}" in older["reading_verify"]
+    plan = {"learning_goal": "x", "bridges": [{"id": "B1", "obstacle": "不熟悉可微", "targets": ["C1"],
+                                              "content": "可微表示函數在該點有切線斜率。", "basis": "source"}]}
+    unsure = lambda m: {**covered_audit({**m, "bridges": []}), "bridges": [
+        {"id": "B1", "verdict": "ok", "correct": "unsure", "support": "", "guide_quote": "可微表示函數在該點有切線斜率"}]}
+    b = Scripted({"plan_bridges": [plan], "body_audit": [unsure]})
+    await run(b, index=0, prompts=older)
+    assert "verify" in b.steps() and QUOTES[0]["text"] in b.prompt("verify") and "{{quote_text}}" not in b.prompt("verify")
+
+
+# -- third review: verbatim spans, carried budget after a failure, every cited ref valid ------------------------
+
+async def test_whitespace_inside_code_and_strings_is_compared_verbatim():
+    """Review counterexample: "a  b" (length 4) restated as "a b" passed Gate 1 as the cited text itself."""
+    from app.reading.gates import _plain
+    pairs = [('Python 字串 "a  b" 的長度是 4', 'Python 字串 "a b" 的長度是 4'), ("執行 `x  = 1`", "執行 `x = 1`"),
+             ("    if x:\n        y = 1", "    if x:\n    y = 1"), ("$a  b$", "$a b$"), ("「a  b」", "「a b」"),
+             ("```\nif x:\n    y\n```", "```\nif x:\n  y\n```")]
+    for a, b in pairs:
+        assert _plain(a) != _plain(b), (a, b)
+    assert _plain("矩形面積 等於\n長乘以寬。") == _plain("矩形面積等於長乘以寬") and _plain("    code") == "    code"
+    src = 'Python 字串 "a  b" 的長度是 4。'
+    q = [{"id": "q", "index": 0, "unit_id": "u-s", "label": "第 1 行", "heading": None, "text": src}]
+    b = Scripted({"understand": [{"chinese_text": None, "claims": [claim(1, ["S1"], 'Python 字串 "a b" 的長度是 4。')]}]})
+    await run(b, index=0, quotes=q)
+    assert "source_audit" in b.steps()
+    b = Scripted({"understand": [{"chinese_text": None, "claims": [claim(1, ["S1"], src)]}]})
+    await run(b, index=0, quotes=q)
+    assert "source_audit" not in b.steps()
+
+
+async def test_a_carried_budget_counts_every_call_of_the_new_run_failures_included(tmp_path):
+    """Review counterexample: 2 calls carried over, the new run made 5 (one failed on the connection, then resumed);
+    max(carried budget, trace of the new op) recorded 6, not 7. Now: carried base + every call traced under the new
+    run's key."""
+    from app.persistence.repository import Repository as Repo
+    repo = Repo(Database(tmp_path / "db.sqlite3"))
+    b = Scripted({"draft": [LLMError("Ollama 連線失敗")]})
+    carried = {**CallBudget_for_guide(), "calls": 2}
+    deps, task, _ = make(b, repo=repo, index=0)
+    state = initial_state(task, op="s1:c1:guide:u-a:1:new", budget=carried)
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "cp.sqlite3")) as cp:
+        with pytest.raises(ReadingUnavailable):
+            await invoke(build_reading_graph(deps, cp), state, {"configurable": {"thread_id": "t"}})
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "cp.sqlite3")) as cp:   # restart
+        deps, _, _ = make(b, repo=repo, index=0)
+        out = await invoke(build_reading_graph(deps, cp), None, {"configurable": {"thread_id": "t"}})
+    traced = repo.count_calls("s1:c1:guide:u-a:1:new:")
+    assert out["status"] == "accepted" and traced == len(b.calls)          # the failed draft call is traced
+    assert out["artifact"]["calls"] == 2 + traced
+
+
+def CallBudget_for_guide() -> dict:
+    from app.llm.runtime import CallBudget
+    return CallBudget.for_task("guide").to_dict()
+
+
+def test_every_cited_read_claim_and_reader_quote_must_be_valid():
+    """Review counterexample: with only u-a:C1 read, "u-a:C1 與 u-never-read:C999 支持此結論" passed (any overlap)."""
+    from app.reading.gates import bridge_support_problem as problem
+    refs = {"read": {"u-a:C1"}, "reader": "我想知道可微和切線的關係"}
+    why = problem("prior_reading", "u-a:C1 與 u-never-read:C999 支持此結論", "第一句。", refs)
+    assert why and "u-never-read:C999" in why and "u-a:C1" not in why
+    assert not problem("prior_reading", "u-a:C1 支持此結論", "第一句。", refs)
+    why = problem("user_authorized", "讀者說「想知道可微和切線的關係」也說「請多舉例子」", "第一句。", refs)
+    assert why and "請多舉例子" in why
+    assert not problem("user_authorized", "讀者說「想知道可微和切線的關係」", "第一句。", refs)

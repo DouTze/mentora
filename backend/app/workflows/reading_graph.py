@@ -52,6 +52,7 @@ from ..reading.contracts import (CONTRACT_VERSION, BodyAudit, BodyDraft, BridgeP
                                  SourceAudit, SourceClaim, SourceUnderstanding, SymbolTranscription, VerifiedSource)
 from ..reading.prompts import render
 from ..reading.tools import ReadingScope, build_tools, tools_text
+from . import faults
 
 
 class ReadingUnavailable(Exception):
@@ -67,6 +68,8 @@ class GuideState(TypedDict, total=False):
     op: str                      # operation key prefix of this attempt (session:command:guide:unit:attempt:version)
     command_id: str | None
     budget: dict
+    gate_rules: str              # gates.GATE_RULES_VERSION this attempt runs under (checked before publishing)
+    budget_base: int             # calls spent by earlier, discarded runs of this attempt (carried, never refilled)
     rounds: dict                 # model node → times it has run (part of its step-cache key)
     supplements: list[dict]
     symbol_evidence: dict | None # R5: the unit's symbol evidence, confirmed by the symbols node when possible
@@ -104,8 +107,12 @@ class ReadingDeps:
     evidence_dir: Any = None                            # where rendered regions are kept (Path); None = not kept
 
 
-def initial_state(task: ra.ReadingTaskInput, op: str, command_id: str | None = None) -> GuideState:
-    return {"task": task.model_dump(), "op": op, "command_id": command_id, "budget": CallBudget.for_task("guide").to_dict(),
+def initial_state(task: ra.ReadingTaskInput, op: str, command_id: str | None = None,
+                  budget: dict | None = None) -> GuideState:
+    """`budget`: what an earlier, discarded run of the same attempt already spent (a run restarted because the gate
+    rules changed keeps its spending; the budget is never refilled)."""
+    return {"task": task.model_dump(), "op": op, "command_id": command_id, "gate_rules": gates.GATE_RULES_VERSION,
+            "budget": budget or CallBudget.for_task("guide").to_dict(), "budget_base": int((budget or {}).get("calls") or 0),
             "rounds": {}, "supplements": [], "symbol_evidence": task.symbol_evidence, "context_status": "not_needed",
             "model_context_done": False,
             "understanding": None, "gate1": None, "audited": False, "source_revisions": 0, "verified": None,
@@ -152,11 +159,17 @@ def bridges_text(plan: dict | None) -> str:
 
 
 def build_reading_graph(deps: ReadingDeps, checkpointer=None):
+    def spent_calls(state) -> int:
+        """Calls this attempt has made: what earlier, discarded runs spent (budget_base, fixed when the run starts)
+        plus every call recorded under this run's operation key — failed calls included, even those the checkpoint
+        never saw. The two never overlap: each run has its own operation key."""
+        return int(state.get("budget_base") or 0) + deps.repo.count_calls(state["op"] + ":")
+
     def ctx_for(state: GuideState, key: str) -> TaskContext:
         t = state["task"]
         budget = CallBudget.from_dict(state["budget"])
         if deps.repo is not None:   # calls made before a crash count, even if the checkpoint missed them
-            budget.calls = max(budget.calls, deps.repo.count_calls(state["op"] + ":"))
+            budget.calls = max(budget.calls, spent_calls(state))
         return TaskContext(deps.runtime_for(t["session_id"]), budget, deps.sink, session_id=t["session_id"],
                            command_id=state.get("command_id"), operation_key=key)
 
@@ -170,6 +183,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                     return cached["payload"]
             if deps.on_stage:
                 deps.on_stage(state["task"]["session_id"], state.get("command_id"), name)
+            faults.hit(f"before:{name}")
             ctx = ctx_for(state, key)
             try:
                 update = await fn(state, ctx)
@@ -239,11 +253,29 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             "read_claims": lambda: ContextItem(key="read_claims", text="\n".join(
                 f"  - [{x['unit_id']}] {x['statement']}" for x in learning.read_claims) or "  （尚未讀過其他段落）",
                 required=False, priority=2, source_ids=[f"{x['unit_id']}:{x['claim_id']}" for x in learning.read_claims]),
+            "bridge_refs": lambda: ContextItem(key="bridge_refs", text=bridge_refs_text(learning), required=False, priority=2,
+                                               source_ids=[f"{x['unit_id']}:{x['claim_id']}" for x in learning.read_claims]),
             "open_questions": lambda: ContextItem(key="open_questions", text="\n".join(
                 f"  - [{x['unit_id']}] {x['question']}" for x in learning.open_questions) or "  （無）",
                 required=False, priority=1),
         }
         return [make[k]() for k in keys]
+
+    def bridge_refs(t: ra.ReadingTaskInput) -> dict:
+        """What a non-source bridge may cite as checkable support (see gates.bridge_support_problem)."""
+        lr = t.learning
+        return {"read": {f"{x['unit_id']}:{x['claim_id']}" for x in lr.read_claims},
+                "reader": "\n".join(x for x in (lr.goal, lr.background) if x)}
+
+    def bridge_refs_text(lr) -> str:
+        read = "\n".join(f"  - {x['unit_id']}:{x['claim_id']} {x['statement']}" for x in lr.read_claims) or "  （無）"
+        reader = "\n".join(f"  - {x}" for x in (lr.goal, lr.background) if x) or "  （讀者沒有提出）"
+        return f"讀者已讀的命題（依據為已讀段落時，引用「單元:命題編號」）：\n{read}\n讀者提出的要求與背景（依據為讀者授權時，用「」引用原話）：\n{reader}"
+
+    def with_optional(template_name: str, state, keys: tuple[str, ...], optional: tuple[str, ...]) -> tuple[str, ...]:
+        """Items a session pinned to an older prompt bundle has no placeholder for are not sent."""
+        tmpl = prompts(state)[template_name]
+        return keys + tuple(k for k in optional if "{{" + k + "}}" in tmpl)
 
     def symbol_text(ev: dict | None) -> str:
         if not ev or ev.get("status") != "confirmed":
@@ -284,15 +316,19 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         key = "vsrc:" + stable_hash([t.text, t.block_ids, t.source_kind, t.symbol_evidence,
                                      [s["content"] for s in state.get("supplements") or [] if s["ok"]],
                                      {k: p.get(k) for k in SOURCE_PROMPTS}, t.model_config_hash,
-                                     ra.READING_WORKFLOW_VERSION, CONTRACT_VERSION,
+                                     ra.READING_WORKFLOW_VERSION, CONTRACT_VERSION, gates.GATE_RULES_VERSION,
                                      None if shareable else t.session_id], 24)
         return key, shareable
 
     def vsrc_get(key: str) -> dict | None:
+        """A cached verification counts only if it passed the current Gate 1 rules (an entry written by older rules,
+        or one whose rules field does not match, is verified again)."""
         if deps.repo is not None:
             a = deps.repo.get_artifact(key)
-            return a["payload"] if a else None
-        return (deps.vsrc_cache or {}).get(key)
+            v = a["payload"] if a else None
+        else:
+            v = (deps.vsrc_cache or {}).get(key)
+        return v if v and v.get("verifier_version") == gates.GATE_RULES_VERSION else None
 
     def vsrc_put(key: str, v: dict, t: ra.ReadingTaskInput, shareable: bool) -> None:
         if deps.repo is not None:
@@ -433,7 +469,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             key, shareable = vsrc_key(state)
             v = VerifiedSource(key=key, unit_id=t.unit_id, source_hash=t.source_hash, chinese_text=u.chinese_text,
                                claims=gates.resolve_claims(t.text, u.claims, u.translations), gate1=result, supplement_ids=supplement_ids(state), shareable=shareable,
-                               limits=u.limits).model_dump()
+                               limits=u.limits, verifier_version=gates.GATE_RULES_VERSION).model_dump()
             vsrc_put(key, v, t, shareable)
             upd["verified"] = v
         return upd
@@ -547,7 +583,9 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                              "bridges": {"verdict": "ok", "correct": "yes", "support": "S1", "guide_quote": "…", "note": ""}},
                        {"additions": [], "uncovered_source": [], "coherence": "pass", "coherence_note": ""})
         msg, rec = await prompt_for(ctx, state, "body_audit", "reading_body_audit",
-                                    ("quote_text", "symbol_evidence", "supplements", "claims", "bridges"),
+                                    with_optional("reading_body_audit", state,
+                                                  ("quote_text", "symbol_evidence", "supplements", "claims", "bridges"),
+                                                  ("bridge_refs",)),
                                     {"guide": d["guide"], "output_template": out}, ra.GUIDE_MAX_TOKENS)
         a, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyAudit, task="guide", node="body_audit",
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
@@ -558,7 +596,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                           "bridges": bridges.model_dump()["bridges"]},
                                     min_max_tokens=ra.GUIDE_MAX_TOKENS, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         program = [ra.Finding.model_validate(f) for f in state.get("findings") or [] if f["origin"] == "program"]
-        fs = program + gates.coverage_findings(t.text, d["guide"], claims, bridges, a)
+        fs = program + gates.coverage_findings(t.text, d["guide"], claims, bridges, a, bridge_refs(t))
         return {"findings": [f.model_dump() for f in fs],
                 "audit": {**a.model_dump(), "program_covered": [x for x in all_ids if x not in audited]},
                 "decision": judged(state, ctx.budget, fs, allow_verify=True)}
@@ -570,12 +608,16 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         idx = ra.to_verify(fs)
         extra = {"chinese_text": "（這項核對只看主要正文）", "guide": d["guide"], "claims": ra.verify_items_text(fs, idx)}
         out_tokens = min(4096, 512 + 320 * len(idx))
-        msg, rec = await prompt_for(ctx, state, "verify", "reading_verify", ("quote_text",), extra, out_tokens)
+        # numbered sentences, so a bridge's source support can be cited by id; a session pinned to an older prompt
+        # bundle still gets the plain text its template asks for (the program check is the same either way)
+        source_key = "sentences" if "{{sentences}}" in prompts(state)["reading_verify"] else "quote_text"
+        msg, rec = await prompt_for(ctx, state, "verify", "reading_verify",
+                                    with_optional("reading_verify", state, (source_key,), ("bridge_refs",)), extra, out_tokens)
         v, _ = await run_structured(ctx, [HumanMessage(content=msg)], ra.VerifyResult, task="guide", node="verify",
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
                                     meta={"step": "verify", "quote_text": t.text}, allow_fix=False,
                                     min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
-        fs = ra.apply_verify(fs, idx, v, d, t.text)
+        fs = ra.apply_verify(fs, idx, v, d, t.text, bridge_refs(t))
         return {"findings": [f.model_dump() for f in fs], "verified_for": state.get("body_revisions", 0),
                 "decision": judged(state, ctx.budget, fs, allow_verify=False)}
 
@@ -602,6 +644,11 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                 "history": [{"stage": "body", "draft": state["draft"], "findings": state["findings"]}]}
 
     def accept(state: GuideState) -> dict:
+        if state.get("gate_rules") != gates.GATE_RULES_VERSION:
+            # a run checked under other gate rules (e.g. resumed from an older checkpoint) is never published; the
+            # runner restarts such runs before resuming, this is the last line of defence
+            return {"status": "failed", "error": {"code": "gate_rules_changed",
+                                                  "detail": "檢查規則在這段導讀產生期間更新了，需要依新規則重新檢查"}}
         t, v, d = state["task"], state["verified"], state["draft"]
         fs = [ra.Finding.model_validate(f) for f in state.get("findings") or []]
         bridges = BridgePlan.model_validate(state.get("bridges") or {})
@@ -621,7 +668,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             "revised": state.get("body_revisions", 0) > 0 or state.get("source_revisions", 0) > 0,
             "prompt_version": t["prompt_bundle_hash"], "model_config_hash": t["model_config_hash"],
             "workflow_version": ra.READING_WORKFLOW_VERSION, "contract_version": CONTRACT_VERSION,
-            "learning_hash": task(state).learning.hash,
+            "learning_hash": task(state).learning.hash, "gate_rules": state["gate_rules"],
             "calls": b["calls"], "attempt": t["attempt"], "agent": "langgraph"}}
 
     def hold(state: GuideState) -> dict:

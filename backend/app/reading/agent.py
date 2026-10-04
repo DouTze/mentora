@@ -171,6 +171,7 @@ class Finding(BaseModel):
     target: Literal["guide", "chinese_text", "source"] = "guide"
     status: Literal["confirmed", "unconfirmed"] = "confirmed"
     item: str = ""                 # the claim / bridge id the finding is about (Gate 2), if any
+    basis: str = ""                # a bridge finding: the bridge's basis (source / derivation / prerequisite / …)
     source_excerpt: str = ""
     draft_excerpt: str = ""
     suggested_fix: str = ""
@@ -279,7 +280,8 @@ def verify_items_text(findings: list[Finding], idx: list[int]) -> str:
     return "\n".join(lines)
 
 
-def apply_verify(findings: list[Finding], idx: list[int], v: VerifyResult, draft: GuideDraft | dict, source: str) -> list[Finding]:
+def apply_verify(findings: list[Finding], idx: list[int], v: VerifyResult, draft: GuideDraft | dict, source: str,
+                 refs: dict | None = None) -> list[Finding]:
     """A blocking finding is withdrawn only with evidence the program can check:
     - "missing" / strength / formula claims: the re-check copies the passage of the *same field* that covers it,
       the passage is really there, keeps every strength marker of the cited source (markers.parity) and every
@@ -310,9 +312,12 @@ def apply_verify(findings: list[Finding], idx: list[int], v: VerifyResult, draft
             full = expand_quote(field, c.guide_quote, 6)
             ok = bool(full) and ra_overlap(f.source_excerpt, full) >= SUPPLEMENT_MATCH
             why = "" if ok else "沒有引出寫進這項橋梁內容的正文句子"
-        elif f.code == "bridge_correctness_unconfirmed":   # a focused second judgement with its reason, recorded as such
-            ok = bool(c.reason.strip())
-            why = "" if ok else "沒有說明判斷依據"
+        elif f.code == "bridge_correctness_unconfirmed":
+            # a focused second judgement, held to the same evidence as the first audit: a source-based bridge needs
+            # source sentence ids that exist, anything else its derivation / why it is prerequisite knowledge
+            from .gates import bridge_support_problem
+            why = bridge_support_problem(f.basis or "source", c.reason, source, refs)
+            ok = not why
         elif f.code == "formula_not_verbatim":   # the guide's own (rewritten) formula must be quoted from the guide
             ok = contains_quote(field, c.guide_quote, 3) and "$" in c.guide_quote
             why = "" if ok else "沒有從主要正文複製出改寫後的公式"

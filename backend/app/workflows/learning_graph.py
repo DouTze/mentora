@@ -83,6 +83,7 @@ class WorkflowState(TypedDict, total=False):
     cmd_error: dict | None        # non-blocking failure of the current ask / answer
     result: dict | None
     guide_attempt: dict           # unit id → attempt number (a quality failure starts a new attempt)
+    guide_budget_carry: dict      # "unit:aN" → budget an interrupted run spent before the gate rules changed
     todo_compact: list
     then: str | None
 
@@ -245,7 +246,8 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
     def prefetch_key(t: ra.ReadingTaskInput) -> str:
         """Everything the guide depends on; a question asked meanwhile or another model / prompt misses the cache."""
         return f"{t.session_id}:prefetch:{t.unit_id}:" + stable_hash([t.source_hash, t.context_hash, t.prompt_bundle_hash,
-                                                                         t.model_config_hash, ra.READING_WORKFLOW_VERSION])
+                                                                         t.model_config_hash, ra.READING_WORKFLOW_VERSION,
+                                                                         gates.GATE_RULES_VERSION])
 
     async def guide(state: WorkflowState, config: RunnableConfig) -> dict:
         sid = state["session_id"]
@@ -259,13 +261,14 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         q = content["quotes"][idx]
         attempt = (state.get("guide_attempt") or {}).get(q["unit_id"], 1)
         task = guide_task(sid, idx, attempt)
-        op = f"{sid}:guide:{q['unit_id']}:a{attempt}:{ra.READING_WORKFLOW_VERSION}"
+        op = f"{sid}:guide:{q['unit_id']}:a{attempt}:{ra.READING_WORKFLOW_VERSION}:{gates.GATE_RULES_VERSION}"
         cached = repo.get_artifact(prefetch_key(task)) if attempt == 1 else None
         try:
             if cached and cached["status"] == "accepted":
                 out = {"status": "accepted", "artifact": {**cached["payload"], "prefetched": True}}
             else:
-                out = await invoke(reading_graph, guide_initial(task, op, state.get("pending_event_id")), config)
+                carry = (state.get("guide_budget_carry") or {}).get(f"{q['unit_id']}:a{attempt}")
+                out = await invoke(reading_graph, guide_initial(task, op, state.get("pending_event_id"), carry), config)
         except ReadingUnavailable as e:
             return {"error": model_error(e), "failed_node": "guide"}
         if out["status"] != "accepted":

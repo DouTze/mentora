@@ -244,8 +244,39 @@ def evidence_formulas(evidence: dict | None) -> list[str]:
     return [f.strip() for f in (ev.get("transcription") or {}).get("formulas", []) if f.strip()]
 
 
+CJK = r"\u3000-\u303f\u4e00-\u9fff\uff00-\uffef"
+# spans compared character for character: fenced and inline code, math, string literals (ASCII, curly and corner
+# quotes) and indented code lines; whitespace in them can be meaning ("a  b" has length 4, "a b" 3)
+VERBATIM_RE = re.compile(r"```.*?(?:```|$)|`[^`\n]*`|\$\$.*?\$\$|\$[^$\n]*\$|\"[^\"\n]*\"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’|"
+                         r"「[^」\n]*」|『[^』\n]*』|^(?: {4}|\t).*$", re.S | re.M)
+
+
+def _prose_ws(t: str) -> str:
+    t = re.sub(r"\s+", " ", t)
+    return re.sub(rf"(?<=[{CJK}]) | (?=[{CJK}])", "", t)
+
+
 def _plain(t: str) -> str:
-    return re.sub(r"[\s，。、；：！？,.;:!?「」『』（）()\"'*`]+", "", t or "")
+    """The comparison key for "is this the same text". Only differences that provably never change meaning are
+    removed, and only in prose: whitespace runs (a space next to a CJK character carries nothing; elsewhere one
+    space stays) and sentence-final punctuation at the very end. Code, string literals, math and indented lines are
+    kept character for character (VERBATIM_RE); digits, decimal points, signs, symbols and every inner punctuation
+    mark are kept everywhere (".5" ≠ "5", "2**3" ≠ "23", "不，是" ≠ "不是"). Any other difference means the text
+    is not the same and goes to a model check."""
+    t = t or ""
+    out, last = [], 0
+    for m in VERBATIM_RE.finditer(t):
+        out.append(_prose_ws(t[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    rest = _prose_ws(t[last:])
+    out.append(rest)
+    out[0] = out[0].lstrip()                 # only prose ends are trimmed; a verbatim span keeps its spacing
+    if rest.strip() or len(out) == 1:
+        out[-1] = out[-1].rstrip().rstrip("。．.！!？?；;").rstrip()
+    else:
+        out[-1] = ""
+    return "".join(out)
 
 
 def rewritten(source: str, raw: SourceClaim, resolved: SourceClaim, translations: list | None,
@@ -330,6 +361,26 @@ def notation_check(source: str, source_kind: str, evidence: dict | None) -> Gate
                      detail=ev.get("reason") or "PDF 文字層無法確認符號的字型（粗體／斜體／上下標），目前沒有可用的視覺取證",
                      evidence=ev.get("summary", ""))
 
+
+# Version of the Gate 1 / Gate 2 acceptance rules. Anything that passed the gates is reused only under the same
+# rules: the VerifiedSource cache (key and stored entry), a prefetched guide and the durable per-node results of a
+# guide operation all carry it, so work accepted by older (looser) rules is checked again. The label is bumped on
+# purpose; the hash of the modules that decide acceptance also changes it whenever that code changes, so a
+# forgotten bump cannot reuse a stale verification.
+GATE_RULES_LABEL = "gate1-v3"
+
+
+def _verifier_version() -> str:
+    import hashlib
+    from pathlib import Path
+    here = Path(__file__).parent
+    h = hashlib.sha256()
+    for name in ("gates.py", "markers.py", "contracts.py", "agent.py"):
+        h.update((here / name).read_bytes())
+    return f"{GATE_RULES_LABEL}+{h.hexdigest()[:12]}"
+
+
+GATE_RULES_VERSION = _verifier_version()
 
 CLAIM_FLAGS = ("strength_flag", "rewrite_check")
 
@@ -571,19 +622,87 @@ def gate2_program(source: str, guide: str, claims: list[SourceClaim], bridges: B
 
 
 def verbatim_covered(c: SourceClaim, guide: str, source: str) -> bool:
-    """The guide writes the claim's whole cited text (a Chinese source) or its whole audited translation verbatim,
-    formulas included: coverage is a program fact and the claim needs no auditor verdict. Additions, missing source
-    text and coherence are still audited."""
+    """Coverage the program can prove without a model: the guide has a paragraph made only of whole source sentences
+    (for a non-Chinese source: of this claim's audited translation), the claim's whole text is in that paragraph,
+    and so are its formulas. Whether a statement is asserted, denied (「並非 X」), attributed (「有人誤以為 X」) or
+    refuted afterwards (「X。這個說法不正確。」) is a matter of meaning, so the fast path only takes paragraphs with
+    nothing but source text in them; anything else goes to the auditor. Content elsewhere in the guide (a rebuttal
+    in another paragraph included) is still audited as an addition, and coherence is still audited."""
     text = c.source_text if is_chinese(source) else c.statement
-    if len(_plain(text)) < 8 or _plain(text) not in _plain(guide):
+    p = _plain(text)
+    if len(p) < 8:
+        return False
+    allowed = {_plain(x) for _, x in source_segments(source if is_chinese(source) else c.statement)}
+    for para in re.split(r"\n\s*\n", guide or ""):
+        if p not in _plain(para):
+            continue
+        sents = [x for _, x in source_segments(para)]
+        if sents and all(_plain(x) in allowed for x in sents):   # every sentence is a whole source sentence
+            break
+    else:
         return False
     gn = ra._norm_math(guide)
     need = [ra._norm_math(f) for f in c.formulas] + [f for f in sum(ra.source_formulas(c.source_text), []) if ra._is_real_math(f)]
     return all(f in gn for f in need if f)
 
 
+# words that only restate a verdict; support made of these (and ids / punctuation) explains nothing
+GENERIC_SUPPORT_RE = re.compile(r"這|是|個|的|很|正確|無誤|沒錯|對的|成立|先備|知識|常識|基本|基礎|標準|定義|事實|"
+                                r"眾所周知|顯然|明顯|一般|通常|本來|就|如此|因為|所以|"
+                                r"\b(?:this|it|is|correct|true|right|standard|basic|common|knowledge|prerequisite|"
+                                r"obvious(?:ly)?|fact|well|known|definition)\b", re.I)
+
+
+def _substance(text: str) -> str:
+    t = re.sub(r"\bS\d+\b|\[[^\]]*\]|[A-Za-z0-9_-]+:C\d+", " ", text or "")
+    t = GENERIC_SUPPORT_RE.sub("", t)
+    return re.sub(r"[\s，。、；：！？,.;:!?「」『』（）()\"'*`-]+", "", t)
+
+
+def bridge_support_problem(basis: str, support: str, source: str, refs: dict | None = None) -> str:
+    """Why the stated support of a bridge's correctness cannot be checked ("" = it has the required, checkable
+    parts). Used by the body audit and by verify alike, so a re-check cannot replace a missing citation or
+    derivation with a bare "it is correct". `refs`: {"read": {"unit:claim", …} the reader has read,
+    "reader": the reader's own words (goal and background)}.
+
+    - source: source sentence ids, every one of which exists;
+    - derivation: the premises as existing source sentence ids, plus the step written out (not a verdict);
+    - prior_reading: read claims cited as unit:claim, every one of which the reader has really read;
+    - user_authorized: passages quoted in 「」 from what the reader asked for (goal / background), every one of them;
+    - prerequisite: what the knowledge is and why it is standard, in words beyond a verdict. Nothing outside the
+      source can be checked by the program here, so passing this only makes it a recorded model judgement."""
+    refs = refs or {}
+    support = support or ""
+    segs = {sid for sid, _ in source_segments(source)}
+    cited = set(re.findall(r"\bS\d+\b", support))
+    bad = sorted(cited - segs)
+    if bad:
+        return f"引用的原文句子不存在：{'、'.join(bad)}"
+    if basis == "source":
+        return "" if cited else "依據原文的橋梁沒有引用原文句子編號"
+    if basis == "derivation":
+        if not cited:
+            return "推導沒有引用作為前提的原文句子編號"
+        return "" if len(_substance(support)) >= 6 else "推導沒有寫出推導步驟"
+    if basis == "prior_reading":
+        read = set(refs.get("read") or ())
+        named = set(re.findall(r"[A-Za-z0-9_-]+:C\d+", support))
+        if not named:
+            return "依據已讀段落的橋梁沒有引用已讀命題（單元:命題編號）"
+        unread = sorted(named - read)
+        return f"引用的已讀命題不在讀者讀過的內容中：{'、'.join(unread)}" if unread else ""
+    if basis == "user_authorized":
+        reader = _plain(refs.get("reader") or "")
+        quotes = re.findall(r"「([^」]*)」", support)
+        if not reader or not quotes:
+            return "讀者授權的橋梁沒有用「」引用讀者提出的要求"
+        bad = [q for q in quotes if len(_plain(q)) < 4 or _plain(q) not in reader]
+        return f"引用的內容不是讀者的原話：{'、'.join(bad)}" if bad else ""
+    return "" if len(_substance(support)) >= 6 else "沒有說明這是什麼先備知識、為何是標準內容"
+
+
 def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridges: BridgePlan,
-                      audit: BodyAudit) -> list[ra.Finding]:
+                      audit: BodyAudit, refs: dict | None = None) -> list[ra.Finding]:
     """Body audit → findings with checked evidence (see module doc)."""
     out: list[ra.Finding] = []
     by_id = {c.id: c for c in claims}
@@ -639,16 +758,14 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
                                              + ("引用的句子不在主要正文" if not full else "引用的句子與橋梁內容不符")))
         if v.verdict != "absent":
             # correct: judged on its own, with support the program can at least check the shape of
-            segs = {sid for sid, _ in source_segments(source)}
-            cited = set(re.findall(r"S\d+", v.support))
-            support_ok = (cited and cited <= segs) if b.basis == "source" else bool(v.support.strip())
+            support_ok = not bridge_support_problem(b.basis, v.support, source, refs)
             if v.correct == "no":
                 out.append(ra.Finding(code="bridge_incorrect", severity="major", origin="review", item=b.id,
                                       detail=f"教學橋梁 {b.id} 的內容不正確：{v.note[:80] or b.content[:60]}",
                                       suggested_fix="改正或刪除這項補充內容"))
             elif v.correct == "unsure" or not support_ok:
                 out.append(ra.Finding(code="bridge_correctness_unconfirmed", severity="major", status="unconfirmed",
-                                      origin="review", item=b.id, source_excerpt=b.content,
+                                      origin="review", item=b.id, source_excerpt=b.content, basis=b.basis,
                                       detail=f"教學橋梁 {b.id} 的正確性沒有可核對的依據"
                                              + ("（依據原文的橋梁必須引用存在的原文句子編號）" if b.basis == "source" else "")))
     kinds = {"unsupported": "unsupported_claim", "incorrect": "unsupported_claim", "process": "process_leak",

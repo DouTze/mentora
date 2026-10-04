@@ -21,6 +21,9 @@ from app.main import create_app  # noqa: E402
 from app.models import ModelConfig  # noqa: E402
 
 config.WORKFLOW = "langgraph"
+if os.environ.get("GATE_RULES"):   # simulate a release whose gate rules changed
+    from app.reading import gates  # noqa: E402
+    gates.GATE_RULES_VERSION = os.environ["GATE_RULES"]
 config.READING_PREFETCH = False
 DIR = Path(sys.argv[1])
 STEPS = json.loads(sys.argv[2])
@@ -61,5 +64,7 @@ with TestClient(app) as c:
            "commands": {x["command_id"]: x["status"] for x in repo.list_commands(sid)},
            "calls": [(x["node"], x["error_kind"]) for x in repo.list_llm_calls(sid)],
            "waiting": s["workflow"]["waiting"], "segmentation": s["reading"]["segmentation"]["status"] if s.get("reading") else None,
-           "concepts": len(s["concepts"])}
+           "concepts": len(s["concepts"]),
+           "guide_rules": {k: g.get("gate_rules") for k, g in (s["state"].get("reading") or {}).get("guides", {}).items()},
+           "guide_calls": {k: g.get("calls") for k, g in (s["state"].get("reading") or {}).get("guides", {}).items()}}
     print(json.dumps(out, ensure_ascii=False))

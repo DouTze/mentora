@@ -174,6 +174,30 @@ class WorkflowRunner:
     def event_of(self, cmd: dict) -> dict:
         return {"type": cmd["type"], "command_id": cmd["command_id"], "payload": cmd["payload"] or {}}
 
+    async def _restart_stale_guides(self, cfg: dict) -> None:
+        """A guide run interrupted under other gate rules (its checkpoint carries an older gates.GATE_RULES_VERSION,
+        or none) must not continue: LangGraph would resume the subgraph at the interrupted node with its old state,
+        skipping the source verification the new rules require. Writing to the parent state makes a new checkpoint,
+        so the pending guide node gets a new task id and its subgraph starts from the beginning (new operation key,
+        new rules). What the discarded run spent is carried over; the budget is never refilled."""
+        from ..llm.runtime import CallBudget
+        from ..reading import gates
+        snap = await self.graph.aget_state(cfg, subgraphs=True)
+        carry = {}
+        for t in snap.tasks:
+            sv = (t.state.values if t.state is not None else None) or {}
+            if "task" not in sv or "op" not in sv or sv.get("gate_rules") == gates.GATE_RULES_VERSION:
+                continue
+            b = CallBudget.from_dict(sv["budget"])
+            # same reconciliation as the guide itself: carried base + every call traced under that run's key
+            b.calls = max(b.calls, int(sv.get("budget_base") or 0) + self.repo.count_calls(sv["op"] + ":"))
+            carry[f"{sv['task']['unit_id']}:a{sv['task'].get('attempt', 1)}"] = b.to_dict()
+            log.info("guide %s ran under gate rules %s, now %s: restarting it", sv["op"], sv.get("gate_rules"),
+                     gates.GATE_RULES_VERSION)
+        if carry:
+            await self.graph.aupdate_state(cfg, {"guide_budget_carry": {**(snap.values.get("guide_budget_carry") or {}),
+                                                                        **carry}})
+
     async def _run(self, cmd: dict) -> None:
         sid, cid = cmd["session_id"], cmd["command_id"]
         upgrade_session(self.deps.db, sid)   # R7: a session from an older reading workflow is upgraded once, recorded
@@ -185,10 +209,12 @@ class WorkflowRunner:
         elif v.get("last_applied_event_id") == cid and (self._waiting(snap) or not snap.next):
             pass                                                     # case 1: ran before the restart
         elif v.get("pending_event_id") == cid and snap.next and not self._waiting(snap):
+            await self._restart_stale_guides(cfg)
             await invoke(self.graph, None, cfg)                      # case 2: continue the interrupted run
         elif self._waiting(snap):
             await invoke(self.graph, Command(resume=self.event_of(cmd)), cfg)   # case 3: deliver
         elif snap.next:
+            await self._restart_stale_guides(cfg)
             await invoke(self.graph, None, cfg)                      # another event's run was cut short
             return await self._run(cmd)
         else:

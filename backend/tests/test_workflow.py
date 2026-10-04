@@ -409,3 +409,20 @@ def test_next_during_a_prefetch_waits_for_it_and_adopts_the_guide(graph_app, mon
     log = c.app_ref.state.runner.prefetch_log
     assert cmd["status"] == "completed" and s["reading"]["guides"]["1"].get("prefetched") is True
     assert (s["id"], "cancelled") not in log and (s["id"], "written") in log
+
+
+def test_a_guide_interrupted_under_older_gate_rules_is_rechecked_not_resumed(tmp_path):
+    """Review counterexample: Gate 1 passed under the old rules, the process stopped in draft, and the resumed run
+    under new rules continued the subgraph from its checkpoint (old op, old verification) and published it. The
+    runner now restarts such a run from the start, under the new rules, keeping what it already spent."""
+    proc(tmp_path, START, fault="before:draft")              # unit 0: understood and verified, cut before draft
+    proc_env = {"GATE_RULES": "gate1-test-next"}
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)} | proc_env
+    p = subprocess.run([sys.executable, str(HELPERS / "workflow_proc.py"), str(tmp_path), json.dumps(WAIT)],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 0, p.stderr[-3000:]
+    out = json.loads(p.stdout.strip().splitlines()[-1])
+    assert out["guides"] == ["0"] and out["guide_rules"] == {"0": "gate1-test-next"}
+    nodes = [n for n, _ in out["calls"]]
+    assert nodes.count("understand") == 2                    # the source was verified again under the new rules
+    assert out["guide_calls"]["0"] >= len([n for n in nodes if n not in ("segment",) and not n.startswith("segment")])

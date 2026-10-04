@@ -152,6 +152,7 @@ class VerifiedSource(BaseModel):
     shareable: bool = True                    # no session data in its inputs (may be reused across sessions)
     limits: list[str] = Field(default_factory=list)
     version: str = CONTRACT_VERSION
+    verifier_version: str = ""                # the Gate 1 rules it passed (gates.GATE_RULES_VERSION); "" = older
 
 
 # -- D: bridges ---------------------------------------------------------------------------------
