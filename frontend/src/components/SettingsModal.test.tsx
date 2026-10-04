@@ -65,3 +65,27 @@ describe("SettingsModal", () => {
     expect(put.companions.fox.temperature).toBe(0.5);
   });
 });
+
+describe("SettingsModal · 遠端模型", () => {
+  test("choosing the remote backend shows the server fields; the token is sent once and never shown", async () => {
+    localStorage.setItem("mentor.locale", JSON.stringify("zh-Hant"));
+    const calls = mockFetch({
+      "GET /api/companions": () => ({ json: null }),
+      "GET /api/settings": () => ({ json: { config: cfg, active, remote: { url: "", has_token: false } } }),
+      "POST /api/settings/check": () => ({ json: { active, health: { ok: true, detail: "ok", available_models: [] } } }),
+      "PUT /api/settings/remote": (body) => ({ json: { remote: { url: (body as any).url, has_token: true } } }),
+    });
+    open("companion");
+    await screen.findByRole("radio", { name: "選擇 小栗" });
+    expect(screen.queryByTestId("remote-endpoint")).toBeNull();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "後端" }), "remote");
+    await userEvent.type(screen.getByLabelText("伺服器網址"), "https://abc.trycloudflare.com");
+    await userEvent.type(screen.getByLabelText("存取 token"), "tok-123");
+    await userEvent.click(screen.getByRole("button", { name: "儲存連線" }));
+    await waitFor(() => expect(calls.find((c) => c.key === "PUT /api/settings/remote")?.body).toEqual({ url: "https://abc.trycloudflare.com", token: "tok-123" }));
+    const token = screen.getByLabelText("存取 token") as HTMLInputElement;
+    expect(token.value).toBe("") ;
+    expect(token.placeholder).toBe("已設定，留空沿用");
+    expect(token.type).toBe("password");
+  });
+});

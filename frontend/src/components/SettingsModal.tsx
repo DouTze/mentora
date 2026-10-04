@@ -4,7 +4,7 @@ import { api, RequestError } from "../api";
 import { COMPANIONS, seedCompanions, type CompanionId, type CompanionSettings } from "../companions";
 import { LOCALES, useT, type Key, type Locale } from "../i18n";
 import { usePrefs, type Theme } from "../prefs";
-import type { ActiveBackend, ModelConfig } from "../types";
+import type { ActiveBackend, ModelConfig, RemoteEndpoint } from "../types";
 import { BackendBadge } from "./BackendBadge";
 import { Icon } from "./Icons";
 
@@ -113,6 +113,9 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [models, setModels] = useState<string[]>([]);
+  const [remote, setRemote] = useState<RemoteEndpoint>({ url: "", has_token: false });
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [remoteToken, setRemoteToken] = useState("");
 
   useEffect(() => {
     Promise.all([api.companions(), api.settings()])
@@ -121,6 +124,10 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
         setSaved(settings);
         setDraft(settings);
         setActive(s.active);
+        if (s.remote) {
+          setRemote(s.remote);
+          setRemoteUrl(s.remote.url);
+        }
       })
       .catch((e: RequestError) => setMsg({ ok: false, text: e.body.detail }));
     // the model picker suggests whatever the local Ollama already has pulled
@@ -157,6 +164,21 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
     }
     setSaving(false);
   };
+
+  const saveRemote = async () => {
+    setMsg(null);
+    try {
+      const r = await api.saveRemote(remoteUrl.trim(), remoteToken.trim());
+      setRemote(r.remote);
+      setRemoteUrl(r.remote.url);
+      setRemoteToken("");
+      setHealth(null);
+      setMsg({ ok: true, text: t("companion.remote.saved") });
+    } catch (e) {
+      setMsg({ ok: false, text: (e as RequestError).body.detail });
+    }
+  };
+  const remoteDirty = remoteUrl.trim() !== remote.url || remoteToken.trim() !== "";
 
   // checks the saved backend, so it only makes sense once the draft is saved
   const check = async () => {
@@ -216,10 +238,11 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
           <select value={cfg.backend} onChange={(e) => set("backend", e.target.value as ModelConfig["backend"])}>
             <option value="mock">{t("companion.backend.mock")}</option>
             <option value="ollama">{t("companion.backend.ollama")}</option>
+            <option value="remote">{t("companion.backend.remote")}</option>
             <option value="openvino">{t("companion.backend.openvino")}</option>
           </select>
         </label>
-        {cfg.backend === "ollama" && (
+        {(cfg.backend === "ollama" || cfg.backend === "remote") && (
           <label className="field">
             {t("companion.modelName")}
             <input value={cfg.model} onChange={(e) => set("model", e.target.value)} placeholder="qwen3-vl:4b" list="ollama-models" />
@@ -238,6 +261,33 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
         )}
       </div>
       {cfg.backend === "mock" && <p className="muted">{t("companion.mockHint")}</p>}
+      {cfg.backend === "remote" && (
+        <div className="remote-endpoint" data-testid="remote-endpoint">
+          <h3 className="settings-sub">{t("companion.remote.heading")}</h3>
+          <p className="muted">{t("companion.remote.hint")}</p>
+          <div className="grid2">
+            <label className="field">
+              {t("companion.remote.url")}
+              <input value={remoteUrl} onChange={(e) => setRemoteUrl(e.target.value)} placeholder="https://….trycloudflare.com" spellCheck={false} />
+            </label>
+            <label className="field">
+              {t("companion.remote.token")}
+              <input
+                type="password"
+                autoComplete="off"
+                value={remoteToken}
+                onChange={(e) => setRemoteToken(e.target.value)}
+                placeholder={remote.has_token ? t("companion.remote.tokenSet") : ""}
+              />
+            </label>
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <button onClick={saveRemote} disabled={!remoteDirty || !remoteUrl.trim()}>
+              {t("companion.remote.save")}
+            </button>
+          </div>
+        </div>
+      )}
 
       <details className="advanced">
         <summary>

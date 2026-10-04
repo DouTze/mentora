@@ -63,32 +63,37 @@ def _join_lines(lines: list[str]) -> str:
     return re.sub(r"[ \t]+", " ", out).strip()
 
 
+def pdf_page_paragraphs(page) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """(paragraph text, bbox) of one PyMuPDF page, in reading order. PyMuPDF's text blocks follow the page's layout
+    objects, so a block is a paragraph (or a heading / caption). Hyphenated line breaks are joined; running headers
+    and footers carrying a page number are dropped. The importer and the evidence extractor both use this, so a
+    block's (page, paragraph index) locator points at the same region in both."""
+    import pymupdf
+
+    height = page.rect.height or 1
+    out: list[tuple[str, tuple[float, float, float, float]]] = []
+    blocks = [b for b in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE) if b[6] == 0]
+    for i, (x0, y0, x1, y1, text, *_rest) in enumerate(blocks):
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        if not lines:
+            continue
+        joined = _join_lines(lines)
+        at_edge = y1 < height * 0.09 or y0 > height * 0.91
+        if at_edge and len(joined) <= 80 and PAGE_MARGIN_RE.search(joined) and (i == 0 or i == len(blocks) - 1):
+            continue
+        out.append((joined, (x0, y0, x1, y1)))
+    return out
+
+
 def _pdf_pages_pymupdf(data: bytes) -> list[str]:
-    """One string per page, paragraphs separated by blank lines. PyMuPDF's text blocks follow the page's
-    layout objects, so a block is a paragraph (or a heading / caption), unlike pypdf's flat line stream.
-    Hyphenated line breaks are joined; running headers and footers carrying a page number are dropped."""
+    """One string per page, paragraphs separated by blank lines (see pdf_page_paragraphs)."""
     import pymupdf
 
     try:
         doc = pymupdf.open(stream=data, filetype="pdf")
     except Exception as e:  # noqa: BLE001 — pymupdf raises plain exceptions for broken files
         raise MaterialError("unreadable", f"無法讀取這個 PDF：{e}") from e
-    pages: list[str] = []
-    for page in doc:
-        height = page.rect.height or 1
-        paras: list[str] = []
-        blocks = [b for b in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE) if b[6] == 0]
-        for i, (x0, y0, x1, y1, text, *_rest) in enumerate(blocks):
-            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-            if not lines:
-                continue
-            joined = _join_lines(lines)
-            at_edge = y1 < height * 0.09 or y0 > height * 0.91
-            if at_edge and len(joined) <= 80 and PAGE_MARGIN_RE.search(joined) and (i == 0 or i == len(blocks) - 1):
-                continue
-            paras.append(joined)
-        pages.append("\n\n".join(paras))
-    return pages
+    return ["\n\n".join(t for t, _ in pdf_page_paragraphs(page)) for page in doc]
 
 
 def _pdf_pages_pypdf(data: bytes) -> list[str]:

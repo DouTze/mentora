@@ -8,6 +8,37 @@ def to_json(view: dict) -> str:
     return json.dumps(view, ensure_ascii=False, indent=2)
 
 
+def _workflow_lines(view: dict) -> list[str]:
+    if view.get("workflow_runner") != "langgraph":
+        return []
+    wf = view.get("workflow") or {}
+    lines = [f"- 流程：langgraph {wf.get('workflow_version')}／導讀 {wf.get('reading_workflow_version') or 'reading-graph-v1'}"
+             f"（prompt bundle `{wf.get('prompt_bundle_hash')}`，模型設定 `{wf.get('model_config_hash')}`，revision {view.get('revision')}）"]
+    tc = wf.get("task_contract")
+    if tc:
+        defaults = set(tc.get("defaults") or [])
+        lines.append(f"- 閱讀設定：{'略讀' if tc.get('depth') == 'skim' else '細讀'}"
+                     + ("（預設）" if "depth" in defaults else "")
+                     + (f"；目標：{tc['goal']}" if tc.get("goal") and "goal" not in defaults else "")
+                     + (f"；讀者背景：{tc['reader_background']}" if tc.get("reader_background") else ""))
+    for m in wf.get("migrations") or []:
+        lines.append(f"- 流程升級：{m.get('from')} → {m.get('to')}（{m.get('at')}）：{m.get('note')}")
+    return lines
+
+
+def _check_line(g: dict) -> str:
+    """Which check produced a guide: reading-graph-v2 has a source gate and a body gate; v1 only a review."""
+    warn = "、".join(sorted({w["code"] for w in g.get("warnings") or []}))
+    version = g.get("workflow_version") or "reading-graph-v1"
+    gates = ""
+    if g.get("gate1") or g.get("gate2"):
+        gates = f"；來源核對 {(g.get('gate1') or {}).get('status')}，正文核對 {(g.get('gate2') or {}).get('status')}"
+    else:
+        gates = "；舊版檢查，沒有來源核對"
+    return (f"_檢查：{g['review_status']}（{version}{gates}）" + (f"（提醒：{warn}）" if warn else "")
+            + ("，經過修訂" if g.get("revised") else "") + "_")
+
+
 def to_markdown(view: dict) -> str:
     mc = view["model_config_snapshot"]
     lines = [
@@ -20,6 +51,7 @@ def to_markdown(view: dict) -> str:
         + ("（**模擬**）" if mc.get("simulated") else ""),
         f"- 生成設定：temperature={mc.get('temperature')}, max_tokens={mc.get('max_tokens')}, ctx={mc.get('context_tokens')}",
         f"- 狀態：{view['status']}　建立：{view['created_at']}　更新：{view['updated_at']}",
+        *_workflow_lines(view),
         "",
     ]
     rd = view.get("reading")
@@ -37,10 +69,18 @@ def to_markdown(view: dict) -> str:
                 if g.get("chinese_text"):
                     lines += ["**中文課文**", "", g["chinese_text"], ""]
                 lines += [g["guide"], ""]
+                if g.get("review_status"):
+                    lines += [_check_line(g), ""]
             else:
                 lines += ["_（尚未導讀）_", ""]
             for qa in rd["qa"].get(str(q["index"]), []):
                 lines += [f"**學生問**：{qa['question']}", f"**導師答**：{qa['answer']}", ""]
+    notes = [c.get("markdown") for c in ((rd or {}).get("compacts") or {}).values() if c.get("markdown")]
+    if notes:
+        lines += ["## 已核對的筆記", ""] + [n.strip() + "\n" for n in notes]
+    concepts = view.get("concepts") or []
+    if any(c.get("basis") for c in concepts):
+        lines += ["## 題目依據", ""] + [f"- {c['title']}：依據 {'、'.join(c.get('basis') or [])}" for c in concepts] + [""]
     lines += ["## 互動", ""]
     for t in view["turns"]:
         lines.append(f"### 第 {t['idx']} 輪 · {t.get('phase')} · {t.get('question_id')}")

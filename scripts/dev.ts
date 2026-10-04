@@ -12,10 +12,8 @@ function setup(cmd: string, cwd: string) {
   const r = spawnSync(cmd, { cwd, shell: true, stdio: "inherit" });
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
-if (!existsSync(join(BACKEND, ".venv"))) setup('uv venv && uv pip install -e ".[dev]"', BACKEND);
+if (!existsSync(join(BACKEND, ".venv"))) setup('uv venv && uv pip install -e ".[dev]" -c requirements.lock', BACKEND);
 if (!existsSync(join(FRONTEND, "node_modules"))) setup("bun install", FRONTEND);
-// the pi reading agent is optional (MENTOR_READING_AGENT=pi); install its deps only when it is going to be used
-if (process.env.MENTOR_READING_AGENT === "pi" && !existsSync(join(ROOT, "agent", "node_modules"))) setup("bun install", join(ROOT, "agent"));
 
 // Ollama: reuse one that is already running (desktop app, tool-box, another terminal) and leave it alone on exit;
 // only an instance started here is stopped here.

@@ -19,12 +19,10 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3-vl:4b")  # same model the l
 OPENVINO_MODEL_PATH = os.environ.get("OPENVINO_MODEL_PATH", "./models/qwen3-8b-int4")
 OPENVINO_DEVICE = os.environ.get("OPENVINO_DEVICE", "GPU")
 
-# 導讀 agent：inproc（在後端直接組提示詞呼叫模型）| pi（交給 ../agent 的 pi 閱讀 agent，需 bun 與 ollama）
-READING_AGENT = os.environ.get("MENTOR_READING_AGENT", "inproc")
-PI_AGENT_DIR = Path(os.environ.get("MENTOR_PI_AGENT_DIR", APP_DIR.parent.parent / "agent"))
 READING_PREFETCH = os.environ.get("MENTOR_READING_PREFETCH", "1") != "0"  # 產生目前段落的導讀後，先偷跑下一段
 # 切段：model（由模型依來源單元規則把候選段落組成 quote）| rules（只用規則切法）
 QUOTE_PLANNER = os.environ.get("MENTOR_QUOTE_PLANNER", "model")
+CHECKPOINT_PATH = os.environ.get("MENTOR_CHECKPOINT_PATH", "")   # 預設與業務 DB 同目錄的 checkpoints.sqlite3
 READING_DIR = Path(os.environ.get("MENTOR_READING_DIR", DATA_DIR / "reading"))
 
 GEN_DEFAULTS = {
@@ -32,3 +30,9 @@ GEN_DEFAULTS = {
     "max_tokens": 512,
     "context_tokens": 8192,
 }
+
+# Context budget of the LangGraph workflow (app/llm/context.py). MAX_CONTEXT_TOKENS caps what a call may use even
+# when the model supports more (memory); GRAPH_NUM_CTX is the stable Ollama num_ctx bucket (changing num_ctx between
+# calls reloads the model runner).
+MAX_CONTEXT_TOKENS = int(os.environ.get("MENTOR_MAX_CONTEXT_TOKENS", "32768"))
+GRAPH_NUM_CTX = int(os.environ.get("MENTOR_GRAPH_NUM_CTX", "16384"))

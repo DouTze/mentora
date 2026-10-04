@@ -22,14 +22,21 @@ class ModelJudgement(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    backend: Literal["mock", "ollama", "openvino"] = "mock"
+    backend: Literal["mock", "ollama", "remote", "openvino"] = "mock"
     model: str = ""
-    host: str = ""          # ollama host
+    host: str = ""          # ollama host (local / LAN); "remote" uses the endpoint saved in the settings instead
     model_path: str = ""    # openvino model dir
     device: str = "GPU"     # openvino device
     temperature: float = 0.2
     max_tokens: int = 512
     context_tokens: int = 8192
+
+
+class RemoteEndpointRequest(BaseModel):
+    """The remote model server (Colab or any server behind the same token proxy). An empty token keeps the saved one."""
+
+    url: str = Field(max_length=300)
+    token: str | None = Field(default=None, max_length=300)
 
 
 class CompanionSettings(BaseModel):
@@ -47,6 +54,10 @@ class StartSessionRequest(BaseModel):
     material_id: str | None = None
     start: int | None = None
     end: int | None = None
+    # task contract of a LangGraph reading session (optional; defaults are recorded as defaults)
+    reading_depth: Literal["close", "skim"] | None = None
+    reading_goal: str | None = Field(default=None, max_length=200)
+    reader_background: str | None = Field(default=None, max_length=500)
 
 
 class CategoryRequest(BaseModel):
@@ -124,3 +135,17 @@ class SessionView(BaseModel):
     current_question: QuestionView | None
     turns: list[dict[str, Any]]
     summary: dict[str, Any] | None
+    workflow_runner: str = "legacy"            # which runner owns this session; fixed at creation
+    revision: int = 0                          # business revision (events API expected_revision)
+    workflow: dict[str, Any] | None = None     # langgraph sessions: {waiting, stage, active_command, error, …}
+
+
+class EventRequest(BaseModel):
+    """POST /api/sessions/{sid}/events (langgraph sessions)."""
+
+    command_id: str | None = Field(default=None, max_length=80)
+    type: str
+    expected_revision: int | None = None
+    unit_id: str | None = None
+    question_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)

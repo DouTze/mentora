@@ -1,37 +1,83 @@
 """FastAPI entry point. Run: uvicorn app.main:app --reload"""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from . import export
+from . import config, export
 from .db import Database
 from .llm.registry import Registry
 from .materials import MaterialError, MaterialStore
-from .models import AnswerRequest, AskRequest, CategoryRequest, CompanionSettings, MaterialUpdate, ModelConfig, StartSessionRequest
+from .llm.runtime import BackendPool
+from .llm import remote
+from .models import (AnswerRequest, AskRequest, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
+                     RemoteEndpointRequest, StartSessionRequest)
+from .persistence.repository import Repository
 from .tutor.session import SessionError, TutorService
+from .workflows.commands import CommandError
+from .workflows.learning_graph import WorkflowDeps
+from .workflows.runner import WorkflowRunner
+from .workflows.service import WorkflowService
+
+
+def checkpoint_path(db: Database) -> str:
+    if config.CHECKPOINT_PATH:
+        return config.CHECKPOINT_PATH
+    return ":memory:" if db.path == ":memory:" else str(Path(db.path).with_name("checkpoints.sqlite3"))
 
 
 def create_app(db: Database | None = None, registry: Registry | None = None) -> FastAPI:
     db = db or Database()
     registry = registry or Registry()
+    remote.configure(db)
     saved = db.get_setting("model_config")
     if saved:
         registry.update(ModelConfig.model_validate(saved))
     materials = MaterialStore(db)
     svc = TutorService(db, registry, materials)
+    repo = Repository(db)
+    pool = BackendPool()
+    runner = WorkflowRunner(WorkflowDeps(db=db, repo=repo, pool=pool, svc=svc), checkpoint_path(db))
+    workflow = WorkflowService(svc, repo, pool, runner)
+    svc.workflow = workflow
 
-    app = FastAPI(title="Mentor prototype", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app):
+        # The runner owns LangGraph sessions: recover their pending commands now, stop cleanly on shutdown.
+        await runner.start()
+        try:
+            yield
+        finally:
+            await runner.stop()
+
+    app = FastAPI(title="Mentor prototype", version="0.1.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     app.state.db, app.state.registry, app.state.svc = db, registry, svc
+    app.state.repo, app.state.runner, app.state.workflow = repo, runner, workflow
 
     @app.exception_handler(SessionError)
     async def _session_error(_, e: SessionError):
-        status = {"not_found": 404, "completed": 409, "backend_changed": 409, "reading": 409, "not_reading": 409,
+        status = {"not_found": 404, "completed": 409, "backend_changed": 409, "reading": 409, "not_reading": 409, "use_events": 409,
+                  "legacy_readonly": 409,
                   "model_unavailable": 502, "invalid_model_output": 502}.get(e.code, 400)
         return JSONResponse(status_code=status, content={"code": e.code, "detail": e.detail, "turn": e.turn,
                                                          "retryable": e.code in ("model_unavailable", "invalid_model_output")})
+
+    @app.exception_handler(CommandError)
+    async def _command_error(request, e: CommandError):
+        sid = request.path_params.get("sid")
+        session = None
+        if sid and e.code not in ("not_found",):
+            try:
+                session = svc.view(sid).model_dump()
+            except SessionError:
+                session = None
+        return JSONResponse(status_code=e.status, content={"code": e.code, "detail": e.detail, "retryable": False,
+                                                           "session": session})
 
     @app.exception_handler(MaterialError)
     async def _material_error(_, e: MaterialError):
@@ -105,13 +151,20 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     # -- model settings -----------------------------------------------------
     @app.get("/api/settings")
     async def get_settings():
-        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe()}
+        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe(), "remote": remote.public()}
 
     @app.put("/api/settings")
     async def put_settings(cfg: ModelConfig):
         registry.update(cfg)
         db.set_setting("model_config", cfg.model_dump())
-        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe()}
+        return {"config": registry.cfg.model_dump(), "active": registry.backend.describe(), "remote": remote.public()}
+
+    @app.put("/api/settings/remote")
+    async def put_remote(req: RemoteEndpointRequest):
+        """The remote model server (URL + token of the proxy). The token is stored server-side and never returned."""
+        if req.url.strip() and not req.url.strip().lower().startswith(("http://", "https://")):
+            raise HTTPException(400, "網址必須以 http:// 或 https:// 開頭")
+        return {"remote": remote.save(req.url, req.token)}
 
     @app.get("/api/companions")
     async def get_companions():
@@ -137,7 +190,10 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
         if req.material_id:
             if req.start is None or req.end is None:
                 raise MaterialError("bad_range", "請指定學習範圍的起點與終點。")
-            return await svc.start_from_material(req.material_id, req.start, req.end, req.strategy_id)
+            row = workflow.start_from_material(req.material_id, req.start, req.end, req.strategy_id,
+                                               depth=req.reading_depth, goal=req.reading_goal,
+                                               background=req.reader_background)
+            return svc.view(row["id"])
         return svc.start(req.content_id, req.strategy_id)
 
     @app.get("/api/sessions")
@@ -152,22 +208,26 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     async def answer(sid: str, req: AnswerRequest, debug_invalid: bool = Query(False, include_in_schema=False)):
         return await svc.answer(sid, req.answer, debug_force_invalid=debug_invalid)
 
-    # -- 導讀 (guided reading before the questions) --------------------------
-    @app.post("/api/sessions/{sid}/reading/guide")
-    async def reading_guide(sid: str):
-        return await svc.reading_guide(sid)
+    # -- reading sessions: one asynchronous entry point (guide / ask / next / finish / answer / retry) --
+    @app.post("/api/sessions/{sid}/events")
+    async def post_event(sid: str, req: EventRequest):
+        cmd, created = workflow.submit(sid, req.model_dump())
+        body = {**workflow.command_view(cmd), "session": svc.view(sid).model_dump()}
+        done = cmd["status"] in ("completed", "failed")
+        return JSONResponse(status_code=200 if done else 202, content=body)
 
-    @app.post("/api/sessions/{sid}/reading/ask")
-    async def reading_ask(sid: str, req: AskRequest):
-        return await svc.reading_ask(sid, req.question)
+    @app.get("/api/sessions/{sid}/commands/{cid}")
+    async def get_command(sid: str, cid: str):
+        cmd = repo.get_command(sid, cid)
+        if not cmd:
+            raise HTTPException(404, "找不到這個操作")
+        return workflow.command_view(cmd)
 
-    @app.post("/api/sessions/{sid}/reading/next")
-    async def reading_next(sid: str):
-        return await svc.reading_next(sid)
-
-    @app.post("/api/sessions/{sid}/reading/finish")
-    async def reading_finish(sid: str):
-        return await svc.reading_finish(sid)
+    @app.get("/api/sessions/{sid}/trace")
+    async def get_trace(sid: str):
+        """Developer trace: every model call of a LangGraph session (not shown to students)."""
+        return {"llm_calls": [{k: v for k, v in c.items() if k != "request"} for c in repo.list_llm_calls(sid)],
+                "commands": [workflow.command_view(c) for c in repo.list_commands(sid)]}
 
     @app.post("/api/sessions/{sid}/replay")
     async def replay(sid: str):

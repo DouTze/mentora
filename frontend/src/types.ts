@@ -63,6 +63,9 @@ export interface Quote {
   text: string;
   chars: number;
   part: number;
+  /** LangGraph sessions: stable source-unit id and the source blocks it was rebuilt from */
+  unit_id?: string;
+  block_ids?: string[];
 }
 
 export interface Guide {
@@ -105,9 +108,42 @@ export interface ReadingView {
 }
 
 export type JobStage = "segment" | "guide" | "compact" | "generate";
+/** finer stages of LangGraph sessions (analysis, review, …); unknown ones fall back to `stage` */
+export type DetailStage = JobStage | "analyze" | "context" | "draft" | "review" | "revise" | "ask" | "assess";
 export interface ReadingJob {
   stage: JobStage;
+  detail_stage?: DetailStage | string | null;
   error: ApiError | null;
+}
+
+/** One accepted operation of a LangGraph session (POST /events, GET /commands/{id}). */
+export interface CommandView {
+  command_id: string;
+  type: "start" | "guide" | "ask" | "next" | "finish" | "answer" | "retry";
+  status: "queued" | "running" | "completed" | "failed";
+  stage: string | null;
+  result: { answer?: ReadingQA; message?: TutorMessage; [k: string]: unknown } | null;
+  error: ApiError | null;
+  retryable: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowView {
+  waiting: "student" | "retry" | "answer" | "completed" | null;
+  stage: string | null;
+  active_command: CommandView | null;
+  error: ApiError | null;
+  failed_command_id: string | null;
+  last_failed: string | null;
+  failed_node: string | null;
+  runner_active: boolean;
+  workflow_version?: string | null;
+  reading_workflow_version?: string | null;   // reading-graph-v1 (older sessions) | reading-graph-v2
+  prompt_bundle_hash?: string | null;
+  model_config_hash?: string | null;
+  task_contract?: { depth: "close" | "skim"; goal: string; reader_background: string; defaults: string[] } | null;
+  migrations?: { from: string | null; to: string; at: string; note: string }[];
 }
 
 export interface SessionView {
@@ -129,6 +165,10 @@ export interface SessionView {
   current_question: QuestionView | null;
   turns: Turn[];
   summary: Summary | null;
+  /** "langgraph" sessions take every action through POST /events; older ones keep the original endpoints */
+  workflow_runner?: "legacy" | "langgraph";
+  revision?: number;
+  workflow?: WorkflowView | null;
 }
 
 export interface SessionListItem {
@@ -146,7 +186,7 @@ export interface SessionListItem {
 }
 
 export interface ModelConfig {
-  backend: "mock" | "ollama" | "openvino";
+  backend: "mock" | "ollama" | "remote" | "openvino";
   model: string;
   host: string;
   model_path: string;
@@ -154,6 +194,12 @@ export interface ModelConfig {
   temperature: number;
   max_tokens: number;
   context_tokens: number;
+}
+
+/** The remote model server saved on the backend; the token itself never comes back. */
+export interface RemoteEndpoint {
+  url: string;
+  has_token: boolean;
 }
 
 export interface ActiveBackend {
