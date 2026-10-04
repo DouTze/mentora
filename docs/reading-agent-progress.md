@@ -400,6 +400,16 @@ spike 決策（以實際安裝版本驗證）：
 
 測試：後端 209 passed。
 
+### 移除舊版流程與遠端模型選項（2026-10-04）
+
+使用者決定不再保留舊版流程，執行時間暫不列入考量，統一使用改良後的流程；並要求在 app 裡把遠端 Qwen（Colab 或同一連線機制的伺服器）列為模型選項，方便與夥伴實際測試。
+
+- 移除：`MENTOR_WORKFLOW`、`/reading/{guide,ask,next,finish}` 端點與 `session.py` 的舊版導讀背景工作、後端的 pi 閱讀 agent 介接（`MENTOR_READING_AGENT`；`agent/` 目錄保留未刪）、舊版提示詞 `guide.md`、`segment.md`、評估腳本的 `baseline` 模式、`tests/test_reading.py`。`data/evals/` 內的舊版結果仍可用 `compare` 對照。
+- 舊資料：舊版流程留下的教材學習可以檢視與匯出；已進入出題的仍可作答與重跑（判讀程式與新版流程相同）；還在導讀中的回 `legacy_readonly`，前端顯示唯讀說明。
+- 遠端模型：新增後端類型 `remote`。網址與 token 存在後端設定 `remote_endpoint`，不進 `ModelConfig`；session 只記 `remote` 與模型名稱，每次呼叫才讀取目前網址，所以 Colab 換網址後進行中的學習可以繼續。設定 API 只回傳是否已設 token。選擇這個後端即代表同意外送，不需 `MENTOR_ALLOW_REMOTE_MODEL`（評估腳本仍需要）。
+- 測試：後端 191 passed（移除舊版流程測試，新增遠端設定與舊紀錄唯讀測試）；前端 30 pass、typecheck 通過。
+- r10（遠端 A100，`46aa0e3`）：公開由 r9 的 24/34 降到 11/34，品質關卡擋下 20 段。主因是程式問題：正文稽核的輸出骨架對每個橋梁預填 `"support": "S1"`，模型照抄，44 個先備知識橋梁因此不符依據要求。另有一段寫出「C1［claim］」並把同一句重複四次的正文被公開。已修正（`4342854`）：骨架依橋梁類型給照抄會失敗的佔位文字；正文出現內部編號／標記或同一句重複三次以上時記為重大問題。修正後的 r11 重跑結果另行記錄。
+
 ### 本輪限制與下一步
 
 - 真模型重跑已完成（r9）；接著依 `RUBRIC.md` 為 `r9-compare-*` 盲評包評分（主要正文先評、中文課文另評、未公開草稿另審），以 `scripts/eval_reading.py compare … --scores scores.json` 揭盲；結果同時包含配對分數與誤擋數。這是決定能否切換預設的必要條件。

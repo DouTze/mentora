@@ -5,7 +5,7 @@
 ```
 backend/   Python + FastAPI + SQLite（切段、導讀、教學流程、模型呼叫、紀錄）
 frontend/  Bun + React + TypeScript（學習畫面／學習紀錄／設定視窗）
-agent/     以 pi 為基礎的閱讀 agent（用工具讀段落檔案來導讀、答疑、壓縮筆記；選用）
+agent/     以 pi 為基礎的閱讀 agent（舊版流程使用；舊版流程移除後，目前沒有接上）
 ```
 
 ## 啟動
@@ -52,11 +52,11 @@ cd frontend && bun install && bun run dev
 
 ### 長範圍怎麼讀
 
-模型 context 有限，所以範圍在切段之後再分成**部分**（連續段落合計 ≤ `PART_CHARS` 5,000 字）。學生讀完一個部分，後端就把它壓成一份精簡筆記（`backend/data/reading/<session>/parts/part-NN.md`）；超過 `GEN_TEXT_BUDGET`（12,000 字）的範圍出題時只看這些筆記，不再塞原文。一次學習的上限是 60,000 字（`backend/app/materials.py` 的 `MAX_RANGE_CHARS`），限制的是時間而不是 context。切段與筆記都是獨立檔案，放在 `backend/data/reading/<session>/`（`quotes/`、`guides/`、`parts/`）。掃描型 PDF（沒有文字層）目前會被拒絕。學習紀錄會保留每一輪的題目原文、導讀時的每段導讀與提問。
+範圍切段後再依原書結構分成**閱讀部分**（`backend/app/reading/segmentation.py`）。讀完一個部分，後端從已核對的命題整理出筆記；出題只依據已讀且已核對的命題與筆記。一次學習的上限是 60,000 字（`backend/app/materials.py` 的 `MAX_RANGE_CHARS`），限制的是時間而不是 context。切段、導讀與筆記另外鏡像成 Markdown 檔，放在 `backend/data/reading/<session>/`（`quotes/`、`guides/`、`parts/`）。掃描型 PDF（沒有文字層）目前會被拒絕。學習紀錄會保留每一輪的題目原文、導讀時的每段導讀與提問。
 
-### 新版學習流程（LangGraph，選用）
+### 學習流程
 
-設 `MENTOR_WORKFLOW=langgraph` 後，**之後新建立**的教材學習改由 `backend/app/workflows/` 執行；預設仍是 `legacy`。每個 session 建立時就記下自己的流程（`workflow_runner`），之後改設定不會影響它。新版流程的差異：
+所有教材學習都由 `backend/app/workflows/`（LangGraph）執行。舊版流程（`session.py` 背景工作、`/reading/*` 端點、`MENTOR_WORKFLOW`、`MENTOR_READING_AGENT`）已移除；舊版流程留下的紀錄仍可檢視與匯出，已進入出題的可以繼續作答，還在導讀中的無法繼續，需重新建立學習。流程的重點：
 
 - **切段**：程式先把範圍抽成可追溯的來源區塊（段落、標題、清單項目、整段程式碼、`$$` 公式、跨頁的句子…），模型只回傳區塊編號與理由，正文一律由程式從區塊拼回，不會被模型改寫或漏掉。公式與其引入／where 說明、同一清單、跨頁句子等由程式標示為不可切開；模型的分組不合法時修正一次，仍不合法就退回規則切法。
 - **原書結構**：Markdown 的 `#`–`###` 視為正式小節，一個閱讀部分（part）最多一個第三層小節；完整論證（第一個前提…因此…）、例子與它說明的概念、程式碼與說明、公式與 where 說明不會被切開（太長時拆成相鄰單元，但留在同一部分並帶上前一段當上下文）。PDF 以版面猜到的短標題不當成正式小節。
@@ -74,37 +74,31 @@ cd frontend && bun install && bun run dev
 - **可恢復**：學生的每個操作是一個帶 `command_id` 的命令，先寫進 SQLite 才回應；後端重啟會接續已受理的命令，同一個命令重送只會套用一次。流程位置存在 `backend/data/checkpoints.sqlite3`（LangGraph checkpoint），學習紀錄仍以 `mentor.sqlite3` 為準。
 - **固定設定**：新 session 保存模型設定與所有提示詞的全文（prompt bundle），之後改設定或改提示詞只影響新 session。
 
-一次只能有一個後端程序執行新版流程（`runner_lease`）；第二個程序可以檢視紀錄，但送出操作會回 503。
+一次只能有一個後端程序執行學習流程（`runner_lease`）；第二個程序可以檢視紀錄，但送出操作會回 503。
 
 重啟與回退：
 
 - 重啟：直接重啟後端即可，啟動時會接續未完成的命令；等待學生操作的 session 不會自己前進，失敗的工作等使用者按「重試」。
 - 舊 session：在導讀流程升級（reading-graph-v1 → v2）前建立的 LangGraph session，下一次操作前會自動升級一次並記在匯出的「流程升級」：已公開的導讀保持原樣並標明是舊版檢查，之後的段落使用來源核對與正文核對，原有的閱讀部分不重新切分；用舊版讀過的段落出題時只以原文為依據。
-- 回退：把 `MENTOR_WORKFLOW` 改回 `legacy` 只影響之後的新 session；既有 LangGraph session 仍由新版流程服務。若要退回舊版程式，先停掉後端，成對還原備份的 `mentor.sqlite3` 與 `checkpoints.sqlite3`（備份之後的資料會遺失）。不要把升級過的 `mentor.sqlite3` 直接交給舊版程式：舊版建立 session 時用位置式的 `INSERT`，遇到新增欄位會失敗；升級過的 session 也只能由新版程式繼續。
+- 回退：若要退回舊版程式，先停掉後端，成對還原備份的 `mentor.sqlite3` 與 `checkpoints.sqlite3`（備份之後的資料會遺失）。不要把升級過的 `mentor.sqlite3` 直接交給舊版程式：舊版建立 session 時用位置式的 `INSERT`，遇到新增欄位會失敗。
 - 備份：停掉後端後，一起複製 `backend/data/mentor.sqlite3`、`checkpoints.sqlite3` 與 `reading/`。
-
-### 閱讀 agent
-
-導讀、答疑、壓縮筆記三種任務預設由後端自己組提示詞呼叫模型（`MENTOR_READING_AGENT=inproc`）。設 `MENTOR_READING_AGENT=pi` 則交給 `agent/` 裡以 [pi](https://github.com/earendil-works/pi) 為基礎的閱讀 agent：它拿到的是工作區路徑，用 `read_quote`／`read_guide`／`read_compact` 等工具自己讀需要的檔案，再回 JSON 給後端驗證。需要 `cd agent && bun install`，模型設定需為 ollama。細節見 `agent/README.md`。
 
 ## 測試
 
 ```bash
-cd backend && .venv/bin/python -m pytest     # e2e 流程：切段／導讀／答疑／分部分壓縮／答對／答錯／理由矛盾／輸出不合法／連線中斷／重啟續接／重跑／匯出
+cd backend && .venv/bin/python -m pytest     # e2e 流程：切段／導讀／答疑／筆記／答對／答錯／理由矛盾／輸出不合法／連線中斷／重啟續接／重跑／匯出
                                              # 新版流程：來源完整性、adapter 保真、預算、子流程、命令去重、真子 process 崩潰後恢復
                                              # 閱讀方法：放行漏洞回歸、Gate 1／Gate 2、輸入預算、原書結構、PDF 符號證據、筆記／出題、舊資料相容
 cd frontend && bun test && bun run typecheck  # 畫面測試：以假 fetch 隔離後端
-cd agent && bun run typecheck                 # 閱讀 agent（實際跑需要 Ollama）
 ```
 
 ### 導讀品質評估（選用，需要本機模型）
 
-固定教材集與人工評分規則在 `backend/evals/reading/`（`manifest.json`、`RUBRIC.md`）。評估腳本比較舊版與新版流程，結果寫到 `backend/data/evals/`：
+固定教材集與人工評分規則在 `backend/evals/reading/`（`manifest.json`、`RUBRIC.md`）。評估腳本跑 app 使用的導讀流程，結果寫到 `backend/data/evals/`；舊版流程已移除，`data/evals/` 內保存的舊版結果（例如 `r8-legacy`）仍可用 `compare` 對照：
 
 ```bash
 cd backend
-.venv/bin/python scripts/eval_reading.py baseline  --backend ollama --model qwen3-vl:4b    # 舊版流程
-.venv/bin/python scripts/eval_reading.py candidate --backend ollama --model qwen3-vl:4b    # 新版流程
+.venv/bin/python scripts/eval_reading.py candidate --backend ollama --model qwen3-vl:4b    # 導讀流程
 .venv/bin/python scripts/eval_reading.py compare data/evals/<A> data/evals/<B>              # 指標對照 + 盲評包
 .venv/bin/python scripts/runtime_smoke.py --backend ollama --model qwen3-vl:4b             # LangChain bridge 最小真模型檢查
 .venv/bin/python scripts/r8_report.py legacy=data/evals/<A> graph=data/evals/<B>            # 公開率、未公開原因、延遲、各節點 tokens、估計／實際 tokens
@@ -115,9 +109,9 @@ cd backend
 
 `--stages segment` 只評切段（快）；`--cases` 指定教材。腳本預設只用本機模型，不會下載模型或把教材送到雲端。自動檢查只是信號，品質以 `RUBRIC.md` 的人工盲評為準：盲評包先只呈現兩份主要正文，中文課文另外評分。放行漏洞的回歸 fixtures 在 `backend/evals/reading/regressions/`，自製 PDF fixtures 在 `backend/evals/reading/pdf/`。
 
-### 遠端推論（品質驗收用，選用）
+### 遠端推論（評估腳本，選用）
 
-要驗證 prompt 與流程在 qwen 模型下的運作成果（切段、導讀、關卡、筆記與題目），但本機跑一輪太慢時，可以只把模型呼叫送到 Colab GPU 上的同一個 Ollama 模型。其他步驟（切段規則、關卡、LangGraph、資料庫）仍在本機執行。步驟：
+app 本身要用遠端模型時，見「接真實模型 → 遠端 Qwen」。評估腳本要驗證 prompt 與流程在 qwen 模型下的運作成果（切段、導讀、關卡、筆記與題目），但本機跑一輪太慢時，可以只把模型呼叫送到 Colab GPU 上的同一個 Ollama 模型。其他步驟（切段規則、關卡、LangGraph、資料庫）仍在本機執行。步驟：
 
 1. 在 Colab 上傳 `backend/scripts/colab/mentor_ollama_remote.ipynb`，選 GPU 執行環境，按「全部執行」。斷線時再按一次即可（token 不變，網址會換）。
 2. 評估腳本會自動比對遠端與本機的模型 digest；本機 Ollama 沒啟動時，改讀本機 manifest 檔。
@@ -129,23 +123,23 @@ cd backend
 - 只送自製評估教材。adapter 遇到網際網路上的主機（公開 IP 或公開網域，例如 tunnel 網址）時，必須設定 `MENTOR_ALLOW_REMOTE_MODEL=1` 才會送出請求。
 - proxy token 只從環境變數 `MENTOR_OLLAMA_TOKEN` 讀取，不寫入設定、session 或評估紀錄。proxy 只轉送 `/api/chat`、`/api/show`、`/api/tags`、`/api/version`。
 - `MENTOR_OLLAMA_SEED` 可固定 sampling seed。Colab（CUDA）與本機（Metal）即使 seed 相同，輸出仍可能不同，品質判斷看多次執行的分佈與人工盲評。
-- 不要 `export OLLAMA_HOST`：本機的 `ollama` 指令也讀這個變數。app 改用遠端模型時，只在啟動指令前加上 `OLLAMA_HOST=<網址>`；如果設定頁已存了主機位址，以設定頁為準。
+- 不要 `export OLLAMA_HOST`：本機的 `ollama` 指令也讀這個變數。
 
 ## 結構
 
 | 檔案 | 內容 |
 |---|---|
 | `backend/app/materials.py` | 匯入教材：分類、檔案、文字擷取（PDF→頁、md/txt→行）、範圍取文 |
-| `backend/app/tutor/reading.py` + `prompts/{segment,guide,ask,compact}.md` | 候選段落、模型切段（來源單元規則）、分部分、導讀／答疑／精簡筆記的提示詞與輸出驗證、問答歷史、出題用的導讀紀錄 |
-| `backend/app/tutor/reading_agent.py` | 閱讀 agent 介面：`inproc`（後端直接呼叫模型）與 `pi`（呼叫 `agent/`）；session 工作區檔案 |
-| `backend/app/tutor/generate.py` + `prompts/generate.md` | 導讀完成後把原文（或精簡筆記）＋導讀紀錄交給模型出題，驗證後轉成與內建教材相同的結構 |
-| `agent/` | pi 閱讀 agent：工具、任務提示、Ollama 原生 `/api/chat` 介接 |
+| `backend/app/tutor/reading.py` | 導讀共用的小工具：初始閱讀狀態、中文判斷、節錄、問答歷史 |
+| `backend/app/tutor/reading_agent.py` | session 的 Markdown 鏡像檔（`data/reading/<session>/`） |
+| `backend/app/tutor/generate.py` | 出題結果轉成與內建教材相同的結構 |
+| `agent/` | pi 閱讀 agent（舊版流程使用，目前沒有接上） |
 | `backend/app/content/*.json` | 內建示範教材：概念、解釋、例子、題目、評分依據、提示 |
 | `backend/app/strategies/*.json` | 教學規則參數（提示次數、追問次數、帶入模型的近期輪數） |
 | `backend/app/prompts/assess.md` | 模型提示詞（與規則分開） |
 | `backend/app/tutor/engine.py` | 狀態機：模型判斷 → 規則 → 下一步，純函式 |
-| `backend/app/tutor/session.py` | 組提示詞、驗證結構化輸出、呼叫模型、寫紀錄、重跑 |
-| `backend/app/llm/` | `mock` / `ollama` / `openvino` 三個後端，同一介面 |
+| `backend/app/tutor/session.py` | 內建教材的作答、所有 session 的檢視、重跑 |
+| `backend/app/llm/` | `mock` / `ollama` / `remote`（遠端 Ollama，經 token proxy）/ `openvino` 後端，同一介面 |
 | `backend/app/db.py` | SQLite：sessions（含教材／策略／模型設定快照）、turns、settings；`schema_migrations` 依序升級 |
 | `backend/app/llm/langchain_bridge.py`、`runtime.py`、`tasks.py` | LangChain 接到既有 adapter；不可變模型快照、共用呼叫預算、呼叫紀錄；結構化任務與 schema 約束的工具選擇 |
 | `backend/app/reading/` | 新版流程的來源區塊、切段、導讀契約、唯讀工具、prompt bundle |
@@ -176,6 +170,7 @@ cd backend
 GET  /api/health
 GET  /api/content, /api/content/{id}, /api/strategies
 GET  /api/settings   PUT /api/settings   POST /api/settings/check
+PUT  /api/settings/remote   {"url","token"?}  # 遠端模型伺服器；token 只存在後端、不會回傳，留空沿用
 GET  /api/companions PUT /api/companions   # 伴讀角色與各自的模型設定；PUT 會把 active 角色的設定套用成目前模型
 GET  /api/library                          # 分類 + 教材清單
 POST /api/categories   PATCH|DELETE /api/categories/{id}
@@ -183,9 +178,9 @@ POST /api/materials (multipart: file, category_id)
 GET|PATCH|DELETE /api/materials/{id}       GET /api/materials/{id}/file
 POST /api/sessions   {"material_id","start","end","reading_depth"?,"reading_goal"?,"reader_background"?} 或 {"content_id"}
 GET  /api/sessions   GET /api/sessions/{id}
-POST /api/sessions/{id}/answer   {"answer": "..."}
+POST /api/sessions/{id}/answer   {"answer": "..."}   # 內建教材 session；教材學習改用 events
 POST /api/sessions/{id}/events   {"command_id","type":"guide|ask|next|finish|answer|retry","expected_revision"?,"unit_id"?,"question_id"?,"payload"}
-                                 # 新版流程 session 專用：202 已受理／200 已完成的重送／409 過期或忙碌（附最新 session）
+                                 # 教材學習的所有操作：202 已受理／200 已完成的重送／409 過期或忙碌（附最新 session）
 GET  /api/sessions/{id}/commands/{command_id}   # {status, stage, result, error, retryable}
 GET  /api/sessions/{id}/trace                    # 開發用：每次模型呼叫與命令紀錄
 POST /api/sessions/{id}/replay
@@ -194,6 +189,12 @@ GET  /api/sessions/{id}/export?format=json|md
 
 ## 接真實模型
 
+- **遠端 Qwen（Colab 或其他伺服器）**：讓夥伴不必在自己電腦跑模型也能試用。
+  1. 在 Colab 上傳 `backend/scripts/colab/mentor_ollama_remote.ipynb`，選 GPU，按「全部執行」；最後會印出網址與 token。其他伺服器要跑同一個 token proxy（`backend/scripts/colab/ollama_proxy.py`）在 Ollama 前面。
+  2. 到「設定 → 伴讀」，後端選「遠端 Qwen」、模型填 `qwen3-vl:4b`，在「遠端模型伺服器」填網址與 token，按「儲存連線」，再儲存角色設定、按「檢查連線」。
+  3. Colab 重開後網址會換：只要在設定裡更新網址（token 不變可留空），進行中的學習會接著用新網址。
+  - 選擇這個後端，代表同意把教材內容送到那台伺服器。token 只存在後端的設定裡，不會出現在設定回應、學習紀錄、呼叫紀錄或匯出；學習紀錄只記後端是 `remote` 與模型名稱。
+  - 不在本機的模型，耗時取決於網路與遠端 GPU，不能和本機的耗時比較。
 - **Ollama（已實測，macOS／Ollama 0.34）**：`bun run dev` 會順手啟動 Ollama；到「設定 → 伴讀」挑角色、後端選 Ollama、填模型名稱後儲存，再按「檢查連線」。預設沿用 tool-box 的 `http://127.0.0.1:11434`。
   - `qwen3-vl:8b`：建議。出題 10–25 秒、判讀每次 2–5 秒；會照範圍涵蓋多個主題，提示是引導式問句。
   - `qwen3-vl:4b`：快一倍（出題 5–15 秒），但同一範圍有時只出 1 個概念、提示常直接講出答案。
