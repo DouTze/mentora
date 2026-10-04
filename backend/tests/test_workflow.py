@@ -428,3 +428,41 @@ def test_a_guide_interrupted_under_older_gate_rules_is_rechecked_not_resumed(tmp
     nodes = [n for n, _ in out["calls"]]
     assert nodes.count("understand") == 2                    # the source was verified again under the new rules
     assert out["guide_calls"]["0"] >= len([n for n in nodes if n not in ("segment",) and not n.startswith("segment")])
+
+
+# -- 並行數量: sources of coming units are verified while the reader reads ----------------------------------
+
+LONG = "# 光合作用\n\n" + "\n\n".join(
+    f"## 第 {i} 節\n\n第 {i} 節說明光合作用的第 {i} 個要點：葉綠體在光照下把二氧化碳和水合成葡萄糖並釋放氧氣，"
+    f"這一步需要光、水與二氧化碳同時具備，缺少任何一項都無法進行，因此第 {i} 節特別強調這三個條件。" for i in range(1, 7)) + "\n"
+
+
+def test_parallel_setting_warms_coming_sources_and_their_guides_skip_source_verification(graph_app, monkeypatch):
+    c = graph_app
+    monkeypatch.setattr(config, "READING_PREFETCH", True)
+    cfg = {"backend": "mock", "model": "", "temperature": 0.2, "max_tokens": 512, "context_tokens": 8192, "parallel": 3}
+    assert c.put("/api/settings", json=cfg).status_code == 200
+    runner = c.app_ref.state.runner
+    assert runner.deps.pool.parallel == 3
+    s = start(c, LONG)
+    sid = s["id"]
+    assert s["reading"]["total"] >= 4
+    prefetch_idle(c, sid)
+    warmed = [o for x, outs in runner.warm_log if x == sid for o in outs]
+    assert warmed and set(warmed) == {"verified"}                     # units 2 and 3 (unit 1 is the prefetch's)
+    s, _ = run(c, sid, "next", "n1")
+    prefetch_idle(c, sid)
+    s, _ = run(c, sid, "next", "n2")                                  # now on unit 2, warmed before the reader got there
+    u2 = s["reading"]["quotes"][2]["unit_id"]
+    calls = [x for x in c.get(f"/api/sessions/{sid}/trace").json()["llm_calls"]
+             if x["task"] == "guide" and u2 in (x["operation_key"] or "") and ":warm:" not in x["operation_key"]]
+    assert calls and not any(x["node"] == "understand" for x in calls)  # its source came from the cache
+    assert s["reading"]["guides"]["2"]["review_status"] in ("passed", "passed_with_warnings")
+
+
+def test_parallel_one_never_warms(graph_app, monkeypatch):
+    c = graph_app
+    monkeypatch.setattr(config, "READING_PREFETCH", True)
+    s = start(c, LONG)
+    prefetch_idle(c, s["id"])
+    assert c.app_ref.state.runner.warm_log == []

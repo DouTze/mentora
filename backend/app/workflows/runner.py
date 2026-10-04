@@ -61,6 +61,9 @@ class WorkflowRunner:
         self._tasks: dict[str, asyncio.Task] = {}
         self._prefetch: dict[str, asyncio.Task] = {}
         self.prefetch_log: list[tuple[str, str]] = []   # (session, outcome), for tests / diagnostics
+        self._warm: dict[str, asyncio.Task] = {}
+        self.warm_log: list[tuple[str, list[str]]] = []  # (session, outcome per unit)
+        deps.on_units_ready = self.schedule_warm
         self._beat: asyncio.Task | None = None
 
     # -- lifecycle -----------------------------------------------------------------------
@@ -79,7 +82,7 @@ class WorkflowRunner:
             self.notify(cmd["session_id"])
 
     async def stop(self) -> None:
-        tasks = [t for t in list(self._tasks.values()) + list(self._prefetch.values()) if not t.done()]
+        tasks = [t for t in self._all_tasks() if not t.done()]
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -103,12 +106,36 @@ class WorkflowRunner:
     async def idle(self, timeout: float = 30.0) -> None:
         """Wait until no session task is running (tests / shutdown)."""
         end = time.monotonic() + timeout
-        while any(not t.done() for t in list(self._tasks.values()) + list(self._prefetch.values())):
+        while any(not t.done() for t in self._all_tasks()):
             if time.monotonic() > end:
                 raise TimeoutError("runner still busy")
             await asyncio.sleep(0.01)
 
+    def _all_tasks(self) -> list[asyncio.Task]:
+        return list(self._tasks.values()) + list(self._prefetch.values()) + list(self._warm.values())
+
     # -- scheduling ------------------------------------------------------------------------
+    def schedule_warm(self, session_id: str) -> None:
+        """With 並行數量 > 1, verify the sources of the coming units in the background (parallel - 1 at a time, one
+        slot stays for the reader's own guide). Read-only for the session, so it never waits for or blocks commands;
+        it only shares the model's slots."""
+        slots = self.deps.pool.parallel - 1
+        if not self.active or slots < 1 or not config.READING_PREFETCH:
+            return
+        w = self._warm.get(session_id)
+        if w is None or w.done():
+            self._warm[session_id] = asyncio.create_task(self._run_warm(session_id, slots))
+
+    async def _run_warm(self, session_id: str, slots: int) -> None:
+        upgrade_session(self.deps.db, session_id)
+        try:
+            outcome = await self.graph.warm_sources(session_id, slots)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — warming is an optimisation; the guide verifies on demand otherwise
+            outcome = [f"error: {type(e).__name__}: {e}"]
+        self.warm_log.append((session_id, outcome))
+
     def notify(self, session_id: str) -> None:
         if not self.active:
             return
@@ -125,6 +152,7 @@ class WorkflowRunner:
             self._tasks[session_id] = asyncio.create_task(self._drain(session_id))
 
     async def _drain(self, session_id: str) -> None:
+        self.schedule_warm(session_id)   # e.g. during a "next": the units after the one being guided
         while self.active:
             pending = self.repo.active_commands(session_id)
             if not pending:
@@ -137,6 +165,7 @@ class WorkflowRunner:
             row = self.deps.db.get_session(session_id)
             if row and (row.get("workflow_status") or {}).get("waiting") == "student":
                 self._prefetch[session_id] = asyncio.create_task(self._run_prefetch(session_id))
+                self.schedule_warm(session_id)
 
     async def _run_prefetch(self, session_id: str) -> None:
         upgrade_session(self.deps.db, session_id)

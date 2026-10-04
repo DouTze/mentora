@@ -181,11 +181,20 @@ class BackendPool:
     """One adapter and one inference semaphore per physical model. `seed` lets the app hand over the Registry's
     already-built adapter (an OpenVINO pipeline must not be loaded twice)."""
 
-    def __init__(self, build=None):
+    def __init__(self, build=None, parallel: int = 1):
         from .registry import build_backend
         self._build = build or build_backend
         self._backends: dict[tuple, LLMBackend] = {}
         self._locks: dict[tuple, asyncio.Semaphore] = {}
+        self.parallel = max(1, parallel)
+
+    def set_parallel(self, n: int) -> None:
+        """Requests one physical model may serve at once (the settings' 並行數量). Semaphores are made anew; calls
+        already holding an old one finish under it."""
+        n = max(1, int(n))
+        if n != self.parallel:
+            self.parallel = n
+            self._locks.clear()
 
     def seed(self, snap: ModelSnapshot, backend: LLMBackend) -> None:
         self._backends.setdefault(snap.identity, backend)
@@ -196,7 +205,7 @@ class BackendPool:
         return self._backends[snap.identity]
 
     def semaphore(self, snap: ModelSnapshot) -> asyncio.Semaphore:
-        return self._locks.setdefault(snap.identity, asyncio.Semaphore(1))
+        return self._locks.setdefault(snap.identity, asyncio.Semaphore(self.parallel))
 
 
 class ModelRuntime:

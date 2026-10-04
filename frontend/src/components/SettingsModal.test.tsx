@@ -89,3 +89,27 @@ describe("SettingsModal · 遠端模型", () => {
     expect(token.type).toBe("password");
   });
 });
+
+describe("SettingsModal · 並行數量", () => {
+  test("the parallel setting is saved with the companion's model and clamped to 1–8", async () => {
+    localStorage.setItem("mentor.locale", JSON.stringify("zh-Hant"));
+    const calls = mockFetch({
+      "GET /api/companions": () => ({ json: null }),
+      "GET /api/settings": () => ({ json: { config: cfg, active, remote: { url: "", has_token: false } } }),
+      "POST /api/settings/check": () => ({ json: { active, health: { ok: true, detail: "ok", available_models: [] } } }),
+      "PUT /api/companions": (body) => ({ json: { companions: body, config: (body as any).companions[(body as any).active], active } }),
+    });
+    open("companion");
+    await screen.findByRole("radio", { name: "選擇 小栗" });
+    const input = screen.getByLabelText(/^並行數量/) as HTMLInputElement;
+    expect(input.value).toBe("1");
+    await userEvent.clear(input);
+    await userEvent.type(input, "12");
+    expect(input.value).toBe("8");
+    await userEvent.click(screen.getByRole("button", { name: "儲存變更" }));
+    await waitFor(() => {
+      const body = calls.find((c) => c.key === "PUT /api/companions")?.body as any;
+      expect(body.companions[body.active].parallel).toBe(8);
+    });
+  });
+});

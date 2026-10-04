@@ -326,6 +326,19 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
             {t("companion.contextTokens")}
             <input type="number" min="512" step="512" value={cfg.context_tokens} onChange={(e) => set("context_tokens", Number(e.target.value))} />
           </label>
+          {cfg.backend !== "mock" && (
+            <label className="field">
+              {t("companion.parallel")}
+              <input
+                type="number"
+                min="1"
+                max="8"
+                value={cfg.parallel ?? 1}
+                onChange={(e) => set("parallel", Math.min(8, Math.max(1, Math.round(Number(e.target.value) || 1))))}
+              />
+              <small>{t("companion.parallelHint")}</small>
+            </label>
+          )}
         </div>
       </details>
 

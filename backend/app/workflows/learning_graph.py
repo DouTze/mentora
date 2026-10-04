@@ -33,6 +33,7 @@ Rules this graph keeps:
 - engine.decide keeps every teaching rule; the model only judges."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -94,6 +95,7 @@ class WorkflowDeps:
     repo: Repository
     pool: BackendPool
     svc: Any                      # TutorService (strategies, request builder, reading dir)
+    on_units_ready: Any = None    # called with the session id once its units exist (the runner warms sources then)
 
 
 def model_error(e: Exception) -> dict:
@@ -201,6 +203,8 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
 
         repo.commit(sid, f"{sid}:segment:commit", kind="segmentation", payload=plan.model_dump(), mutate=mutate)
         faults.hit("after_commit:segment")
+        if deps.on_units_ready:
+            deps.on_units_ready(sid)
         fresh = row(sid)["content_snapshot"]
         ws = workspace(sid)
         ws.clear_quotes()
@@ -733,7 +737,29 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             return "written"
         return "failed"
 
+    async def warm_sources(sid: str, slots: int) -> list[str]:
+        """Verify the sources of the units after the next one, concurrently (up to `slots` at a time): Gate 1 does not
+        depend on the reader, and its VerifiedSource is cached, so when the reader gets there only the reader-
+        dependent part of the guide (bridges, body, Gate 2) is left. Read-only for the session; the unit right after
+        the current one is the prefetch's. Returns what happened per unit."""
+        r = row(sid)
+        content, st = r["content_snapshot"], r["state"]
+        rd = st.get("reading") or {}
+        if st.get("phase") != "reading" or rd.get("done") or slots < 1 or (content.get("segmentation") or {}).get("status") != "done":
+            return []
+        first = rd["index"] + 2
+        todo = [i for i in range(first, min(len(content["quotes"]), first + slots)) if str(i) not in rd["guides"]]
+
+        async def one(i: int) -> str:
+            task = guide_task(sid, i, 1, guides=rd["guides"])
+            key = f"{sid}:warm:{task.unit_id}:" + stable_hash([task.source_hash, task.prompt_bundle_hash,
+                                                              task.model_config_hash, gates.GATE_RULES_VERSION])
+            out = await invoke(reading_graph, guide_initial(task, key, "warm", source_only=True), {"configurable": {"thread_id": key}})
+            return {"source_verified": "verified"}.get(out["status"], (out.get("error") or {}).get("code") or out["status"])
+        return list(await asyncio.gather(*(one(i) for i in todo), return_exceptions=False))
+
     compiled.prefetch_next = prefetch_next   # used by the runner between commands
+    compiled.warm_sources = warm_sources
     return compiled
 
 
