@@ -325,12 +325,43 @@ spike 決策（以實際安裝版本驗證）：
 
 評估資料事件：重產盲評包時，我用 shell 變數組出的 `rm -rf` 路徑展開為空值，誤刪整個 `backend/data/evals/`。使用者已從本機 Time Machine 快照（11:18）還原；已核對 P0–P6、R0、R3 smoke、R8 各輪與量測檔都在，且 R8 報告數字與先前回報一致。
 
+### r9 真模型重跑、遠端推論與錯誤分類（2026-10-04）
+
+程式版本：r9 以 commit `1726849` 執行（含上方 5 項審查後修正、稽核合併引用的逐段核對、逐字寫出的命題由程式確認涵蓋）；不含之後才加入的正文 `maxLength` schema。
+
+真模型重跑（本機 M4 Pro，`qwen3-vl:4b`，循序；`data/evals/r9-report.md`）：
+
+| 指標 | legacy | 修改前 graph | final2 | r9 |
+| --- | --- | --- | --- | --- |
+| 公開 | 28/29 | 23/32 | 23/35 | 24/34 |
+| 每段 p50／p95 | 8.9／14.0 秒 | 34.7／76.9 秒 | 31.3／100.6 秒 | 30.3／84.3 秒 |
+| 模型呼叫 | 45 | 143 | 198 | 211 |
+| 邊界符合 gold | 8 | 8 | 11 | 10 |
+| 自動保留率 | 0.845 | 0.649 | 0.649 | 0.66 |
+| 未公開原因 | 模型無法使用 ×1 | 輸出無效 ×2、品質關卡 ×7 | 品質關卡 ×9、符號未確認 ×2、輸出無效 ×1 | 品質關卡 ×6、輸出無效 ×2、符號未確認 ×2 |
+
+- 品質關卡擋下的段落由 9 降為 6；`source_audit` 由 5 次增為 23 次，這是改寫命題必須語意核對的成本。速度仍未達標（p95 約 legacy 的 6 倍）。
+- 重複測試（`r9-graph-rep`，4 份教材）：公開 6/9（r8 重複測試 8/10），自動保留率 0.536（0.643）。p95 241.6 秒來自 `formula-where` 第 2 段：兩次 `verify` 各 63 秒與 40 秒、`body_audit` 共 65 秒。每份教材只跑一兩輪，這個差異可能只是隨機變化，需要多輪才能判斷。
+- 預取（`r9-prefetch-cross-window-argument.json`，假設每段閱讀 20 秒）：等待 p50／p95 由 32.7／50.2 秒降為 29.6／30.2 秒；第一次翻頁 0.2 秒；採用 3 段；背景多 20 次呼叫。後續段落仍要等約 30 秒，因為一段導讀生成 30–50 秒，比閱讀時間長。
+- 正文 `maxLength`：Ollama 會遵守（上限 50 字時輸出正好 50 字），所以正文長度可以在生成時就受限制。
+- 完整 session（`r9-sessions/`，真實 app 讀完教材後產生筆記與題目）：`headings` 4 段全公開、6 條筆記全核對通過、6 題都有依據；`early-quiz` 18 條筆記擋下 3 條（例如原文「紫光偏折最多、紅光偏折最少」被寫成「紫光折射率大於紅光」，程式與核對都指出），未涵蓋命題 `U1.C2` 有記錄；`formula-where` 第 1 段重試後仍被擋，提前結束並只用已讀內容出 2 題。人工抽查表在 `r9-sessions/spotcheck.md`，**尚未人工檢查**。
+- 盲評包：`r9-compare-legacy`（legacy 對 r9，28 組配對＋6 份未公開草稿）、`r9-compare-graph`（修改前 graph 對 r9，22 組配對＋6 份未公開草稿）。r8 的盲評包保留。**尚未人工評分**。
+
+遠端推論（品質驗收用）：
+
+- Ollama adapter 新增：token 驗證標頭（`MENTOR_OLLAMA_TOKEN`，只從環境變數讀取）、外送防護（主機是公開 IP 或公開網域時，必須設定 `MENTOR_ALLOW_REMOTE_MODEL=1`；本機、區網與 Docker 服務名稱不受影響）、可選 seed（`MENTOR_OLLAMA_SEED`）、模型 digest 查詢。
+- 評估腳本記錄 `provenance`（主機、遠端與本機 digest、seed、平行數）並分類：`local-acceptance`、`local-parallel`、`remote-quality`（digest 與本機相同，品質可驗收）、`remote-unverified`（不可驗收）、`mock`。本機 Ollama 未啟動時，以本機 manifest 檔的 SHA-256 比對（已確認等於 `/api/tags` 的 digest）。耗時只認本機循序執行。新增 `--jobs N` 平行跑多份教材；mock 下平行與循序結果一致。
+- `backend/scripts/colab/`：token 驗證 proxy（只轉送 4 個端點，模型生成期間送空白避免 tunnel 約 100 秒逾時）與「全部執行」即可完成設定的 notebook。第一版 notebook 讀到 tunnel 網址後不再讀取 `cloudflared` 輸出，pipe 塞滿後 tunnel 卡住並回 530；已改為寫入紀錄檔。
+- 校準（`r9-remote-a100`，Colab A100，6 份平行，digest 與本機相同）：公開 24/34、邊界 10、來源完整性 14、品質關卡 6、符號未確認 2，都和本機 r9 相同；自動保留率 0.68（本機 0.66）。整輪 421 秒（本機 1392 秒）。結論：遠端可用來驗證 prompt 與流程的品質；比較修改前後時，同一份教材應多跑幾輪看分佈。
+
+錯誤分類修正：Ollama 因模型重複輸出而中止生成（`prediction aborted, token repeat limit reached`）原本被歸為「模型無法使用」。現在 adapter 丟出 `DegenerateOutput`（`LLMError` 的子類別，舊版流程行為不變），`run_structured` 把它當成輸出無效，以一次附上「不要重複」提醒的重試處理，仍失敗才記為 `invalid_output`。遠端校準中的 2 次 `model_unavailable` 就是這種情況。
+
 ### 本輪限制與下一步
 
-- 用修正後的程式重跑真模型評估，再依 `RUBRIC.md` 為盲評包評分（主要正文先評、中文課文另評、未公開草稿另審），以 `scripts/eval_reading.py compare … --scores scores.json` 揭盲；結果同時包含配對分數與誤擋數。這是決定能否切換預設的必要條件。
+- 真模型重跑已完成（r9）；接著依 `RUBRIC.md` 為 `r9-compare-*` 盲評包評分（主要正文先評、中文課文另評、未公開草稿另審），以 `scripts/eval_reading.py compare … --scores scores.json` 揭盲；結果同時包含配對分數與誤擋數。這是決定能否切換預設的必要條件。
 - 速度：可在不削弱關卡的前提下嘗試（皆需以同一驗收集重測）：
-  - 正文稽核只送「程式無法確認」的命題，或以分批方式稽核；
-  - 為正文 JSON 設 `maxLength`，限制退化重複；
+  - 正文稽核以分批方式稽核（「逐字寫出的命題不送稽核」已完成）；
+  - 正文 `maxLength` 已加入，尚未以真模型重跑量測效果；
   - 讓預取在讀者閱讀時先跑完 Gate 1（VerifiedSource 可跨 session 重用）。
 - 稽核引用：小模型常合併兩句後引用，造成「引用的句子不在主要正文」；可改成要求逐句片段，或允許引用多個片段再由程式逐一展開。
 - 橋梁正確性仍只靠同一個 4b 模型核對：實測有一個核准橋梁把折射率寫成 v/c（應為 c/v），稽核沒有指出。
@@ -352,7 +383,7 @@ spike 決策（以實際安裝版本驗證）：
 
 未提交：使用者原有的 `frontend/src/assets/companions/*.webp`、`STYLE.md`，以及 `docs/reading-agent-langgraph-plan.md`、`docs/claude-code-reading-agent-handoff.md`（本文件開頭連到規劃文件，該檔仍未納入版控）。
 
-R0–R8 的改動在 `feat/reading-method-alignment` 上，**全部未提交**（本輪沒有提交授權）。建議的拆分（依 CONTRIBUTING.MD，各自可測）：
+R0–R8 的改動之後經使用者授權，已在 `feat/reading-method-alignment` 上提交（`d5984a7` 起，見 `git log master..HEAD`）；未合併、未推送、未升版。以下是當時建議的拆分，保留供參考。建議的拆分（依 CONTRIBUTING.MD，各自可測）：
 
 1. `test(backend)`：放行漏洞 regression fixtures 與 R0 基線腳本
 2. `fix(backend)`：正文與中文課文分開驗收、移除相似度與標籤降級、嚴格審稿 schema（R1）
