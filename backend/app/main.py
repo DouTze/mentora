@@ -181,7 +181,9 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
             if req.start is None or req.end is None:
                 raise MaterialError("bad_range", "請指定學習範圍的起點與終點。")
             if config.WORKFLOW == "langgraph":
-                row = workflow.start_from_material(req.material_id, req.start, req.end, req.strategy_id)
+                row = workflow.start_from_material(req.material_id, req.start, req.end, req.strategy_id,
+                                                   depth=req.reading_depth, goal=req.reading_goal,
+                                                   background=req.reader_background)
                 return svc.view(row["id"])
             return await svc.start_from_material(req.material_id, req.start, req.end, req.strategy_id)
         return svc.start(req.content_id, req.strategy_id)

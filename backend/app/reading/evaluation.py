@@ -26,12 +26,22 @@ async def run_case(case: dict, cfg, counter, stages: list[str], tmp: Path, *, ev
 
     t0 = time.perf_counter()
     _, blocks = extract_blocks(case["id"], unit, 1, len(units), units)
+    pdf_path = None
+    if case.get("kind") == "pdf":   # R5: layout / font evidence from the original file, as the session does
+        from .pdf_evidence import attach_evidence
+        pdf_path = str(ev.EVAL_DIR / case["source"])
+        blocks = attach_evidence(pdf_path, blocks)
     deps = PlannerDeps(make_ctx=make_ctx if "segment" in stages else None, prompts=bundle["prompts"],
                        prompt_version=bundle["hash"], material_title=case["id"])
     plan = await plan_units(blocks, deps, window_chars=case.get("window_chars") or 5000)
     by_id = {b.block_id: b for b in blocks}
     quotes = to_quotes(unit, plan, by_id)
     parts, _ = plan_parts(quotes)
+    if unit == "page":
+        from .gates import symbol_like
+        from .pdf_evidence import unit_symbol_evidence
+        for q in quotes:
+            q["symbol_evidence"] = unit_symbol_evidence([by_id[b] for b in q["block_ids"]], pdf_path, symbol_like(q["text"]))
     r["segment_ms"] = int((time.perf_counter() - t0) * 1000)
     r["fallback_notes"] = plan.warnings
     r["planner"] = plan.planner
@@ -48,6 +58,8 @@ async def run_case(case: dict, cfg, counter, stages: list[str], tmp: Path, *, ev
         upto = case["flow"]["read_units"] - 1
         r["quiz_scope"] = ev.check_quiz_scope(case, "\n\n".join(q["text"] for q in quotes[:upto + 1]))
     r["calls"] += counter.take()
-    r["llm_trace"] = [{"node": x.node, "purpose": x.purpose, "error_kind": x.error_kind, "latency_ms": x.latency_ms}
-                      for x in sink.records]
+    r["llm_trace"] = [{"node": x.node, "purpose": x.purpose, "error_kind": x.error_kind, "latency_ms": x.latency_ms,
+                       "operation_key": x.operation_key, "usage": x.usage,
+                       "estimated_input": (x.request.get("context_budget") or {}).get("estimated_input"),
+                       "raw": (x.raw or "")[:6000], "error": x.error} for x in sink.records]
     return r

@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from .base import LLMBackend, LLMError, LLMResult
+from .base import Capabilities, LLMBackend, LLMError, LLMResult
 
 
 # Ollama 0.35 (qwen3-vl 2b/4b/8b) ignores think:false: the reasoning lands in `thinking`, content stays empty and the
@@ -27,6 +27,23 @@ class OllamaBackend(LLMBackend):
         self.host = host.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self._caps: Capabilities | None = None
+
+    async def capabilities(self) -> Capabilities:
+        """From /api/show: the model's trained context length and its declared capabilities (e.g. "vision").
+        num_ctx is honoured per call. If the server cannot be asked, nothing is assumed (limit unknown, no vision)."""
+        if self._caps is None:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.post(f"{self.host}/api/show", json={"model": self.model})
+                    r.raise_for_status()
+                    d = r.json()
+            except httpx.HTTPError:
+                return Capabilities(context_limit=None, honors_context_tokens=True, vision=False, source="ollama:unreachable")
+            ctx = next((v for k, v in (d.get("model_info") or {}).items() if k.endswith(".context_length")), None)
+            self._caps = Capabilities(context_limit=int(ctx) if ctx else None, honors_context_tokens=True,
+                                      vision="vision" in (d.get("capabilities") or []), source="ollama:/api/show")
+        return self._caps
 
     async def generate(self, messages, *, temperature, max_tokens, context_tokens, meta=None) -> LLMResult:
         if needs_think_prefill(self.model) and not (messages and messages[-1].get("role") == "assistant"):

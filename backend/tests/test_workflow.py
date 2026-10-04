@@ -93,12 +93,14 @@ def test_full_flow_through_events_api(graph_app):
     rp = c.post(f"/api/sessions/{s['id']}/replay").json()   # replay = a new record with current settings
     assert rp["replayed_answers"] == k and rp["error"] is None and rp["session"]["workflow_runner"] == "legacy"
     trace = c.get(f"/api/sessions/{s['id']}/trace").json()
-    assert {x["node"] for x in trace["llm_calls"]} >= {"analyze", "draft", "review", "ask.answer", "generate", "assess"}
+    assert {x["node"] for x in trace["llm_calls"]} >= {"understand", "plan_bridges", "draft", "body_audit", "ask.answer", "quiz_generate", "quiz_audit", "assess"}
     # every task stayed inside its budget
-    by_op = {}
-    for x in trace["llm_calls"]:
-        by_op[x["operation_key"].rsplit(":", 2)[0]] = by_op.get(x["operation_key"].rsplit(":", 2)[0], 0) + 1
-    assert max(by_op.values()) <= 8
+    from app.llm.runtime import BUDGETS
+    by_op: dict = {}
+    for x in trace["llm_calls"]:   # a guide attempt's nodes share one budget (op prefix up to the workflow version)
+        key = x["operation_key"].split(":reading-graph-v2")[0] if x["task"] == "guide" else x["operation_key"]
+        by_op[(x["task"], key)] = by_op.get((x["task"], key), 0) + 1
+    assert all(n <= BUDGETS[task]["max_calls"] for (task, _), n in by_op.items()), by_op
 
 
 def test_legacy_endpoints_refuse_graph_sessions_and_legacy_sessions_stay_legacy(graph_app, monkeypatch):
@@ -187,7 +189,7 @@ def test_guide_failure_waits_for_retry_and_retry_resumes(graph_app, monkeypatch)
     s, cmd = run(c, s["id"], "retry", "r1", payload={"target_command_id": f"start-{s['id']}"})
     assert cmd["status"] == "completed" and "0" in s["reading"]["guides"] and s["workflow"]["waiting"] == "student"
     trace = c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"]
-    assert [x["node"] for x in trace].count("analyze") == 1   # resumed at the failed node
+    assert [x["node"] for x in trace].count("understand") == 1   # resumed at the failed node
 
 
 def test_failed_ask_keeps_reading_open_and_can_be_retried(graph_app, monkeypatch):
@@ -278,7 +280,9 @@ def test_restart_during_next_advances_exactly_once(tmp_path, fault):
     out = proc(tmp_path, WAIT)
     assert out["index"] == 1 and out["read"] == [0] and out["guides"] == ["0", "1"]
     assert out["commands"]["n1"] == "completed" and out["waiting"] == "student"
-    assert out["revision"] == before["revision"] + 2      # one read commit + one guide commit, never twice
+    # one read commit + one compact commit (unit 0 ends its section, so its part is compacted) + one guide commit,
+    # never twice
+    assert out["revision"] == before["revision"] + 3
 
 
 def test_restart_before_completion_does_not_resume_the_event_again(tmp_path):
@@ -303,7 +307,7 @@ def test_restart_after_quiz_commit_and_after_assess_commit(tmp_path):
     proc(tmp_path, [{"op": "event", "type": "finish", "command_id": "f1"}, {"op": "wait"}], fault="after_commit:generate")
     out = proc(tmp_path, WAIT)
     assert out["phase"] == "diagnostic" and out["commands"]["f1"] == "completed"
-    assert [n for n, _ in out["calls"]].count("generate") == 1
+    assert [n for n, _ in out["calls"]].count("quiz_generate") == 1
     proc(tmp_path, [{"op": "event", "type": "answer", "command_id": "a1", "payload": {"answer": "因為有第三個因素同時影響兩者"}},
                     {"op": "wait"}], fault="after_commit:assess")
     out = proc(tmp_path, WAIT)
@@ -343,7 +347,8 @@ def test_prefetched_guide_is_adopted_without_model_calls(graph_app, monkeypatch)
     s, cmd = run(c, s["id"], "next", "n1")
     trace = c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"]
     assert cmd["status"] == "completed" and s["reading"]["guides"]["1"]["prefetched"] is True
-    assert not [x for x in trace[before:] if x["command_id"] == "n1"]          # the next guide cost nothing
+    # the next guide cost nothing (the part that ended with unit 0 is compacted on this command, as before)
+    assert not [x for x in trace[before:] if x["command_id"] == "n1" and x["node"] not in ("notes", "notes_audit", "notes_revise")]
     assert s["state"]["reading"]["read"] == [0] and s["reading"]["index"] == 1  # prefetch never moved progress
 
 
@@ -372,7 +377,7 @@ def test_a_command_cancels_a_running_prefetch_and_still_completes(graph_app, mon
     real = MockBackend.generate
 
     async def slow(self, messages, **kw):
-        if (kw.get("meta") or {}).get("step") == "analyze":
+        if (kw.get("meta") or {}).get("step") == "understand":
             await asyncio.sleep(0.3)
         return await real(self, messages, **kw)
 
@@ -382,3 +387,25 @@ def test_a_command_cancels_a_running_prefetch_and_still_completes(graph_app, mon
     prefetch_idle(c, s["id"])
     assert cmd["status"] == "completed" and len(s["reading"]["qa"]["0"]) == 1
     assert (s["id"], "cancelled") in c.app_ref.state.runner.prefetch_log
+
+
+def test_next_during_a_prefetch_waits_for_it_and_adopts_the_guide(graph_app, monkeypatch):
+    """R8: at a normal reading pace the reader presses next while the next guide is still being prefetched. The
+    prefetch is kept, finishes, and its guide is adopted — the work is not thrown away and redone."""
+    import asyncio
+    c = graph_app
+    monkeypatch.setattr(config, "READING_PREFETCH", True)
+    real = MockBackend.generate
+
+    async def slow(self, messages, **kw):
+        if (kw.get("meta") or {}).get("step") == "draft":
+            await asyncio.sleep(0.3)
+        return await real(self, messages, **kw)
+
+    monkeypatch.setattr(MockBackend, "generate", slow)
+    s = start(c)
+    s, cmd = run(c, s["id"], "next", "n1")   # arrives while unit 1 is being prefetched
+    prefetch_idle(c, s["id"])
+    log = c.app_ref.state.runner.prefetch_log
+    assert cmd["status"] == "completed" and s["reading"]["guides"]["1"].get("prefetched") is True
+    assert (s["id"], "cancelled") not in log and (s["id"], "written") in log

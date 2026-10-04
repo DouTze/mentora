@@ -23,7 +23,7 @@ import re
 
 from .schemas import Locator, SourceBlock
 
-EXTRACTION_VERSION = "blocks-v1"
+EXTRACTION_VERSION = "blocks-v2"   # v2: heading levels and structure confidence
 MAX_BLOCK_CHARS = 700
 TARGET_PIECE_CHARS = 350
 HARD_MAX_BLOCK_CHARS = 8000
@@ -159,7 +159,8 @@ def _line_blocks(units: list[str], start: int) -> list[dict]:
         h = HEADING_RE.match(raw)
         if h:
             flush(no - 1)
-            out.append({"kind": "heading", "text": h.group(2).strip(), "start": no, "end": no, "char_end": len(raw)})
+            out.append({"kind": "heading", "text": h.group(2).strip(), "start": no, "end": no, "char_end": len(raw),
+                        "level": len(h.group(1)), "confidence": "high"})
             i += 1
             continue
         s = raw.strip()
@@ -197,7 +198,9 @@ def _page_blocks(units: list[str], start: int) -> list[dict]:
                     "formula" if s.startswith("$$") and s.endswith("$$") else
                     "list_item" if LIST_RE.match(p) else "paragraph")
             out.append({"kind": kind, "text": p, "start": no, "end": no, "para": k, "paras": len(paras),
-                        "char_start": a, "char_end": b, "last_on_page": k == len(paras)})
+                        "char_start": a, "char_end": b, "last_on_page": k == len(paras),
+                        # a short line is a heading guess: its level is unknown and it never defines a section
+                        **({"level": None, "confidence": "low"} if kind == "heading" else {})})
     for x, y in zip(out, out[1:]):   # a sentence broken by the page end continues on the next page
         if x.get("last_on_page") and y["start"] == x["start"] + 1 and y.get("para") == 1 \
                 and x["kind"] not in ("heading", "formula") and y["kind"] != "heading" and not ends_sentence(x["text"]):
@@ -219,7 +222,7 @@ def extract_blocks(material_id: str, unit: str, start: int, end: int, units: lis
                           locator=Locator(unit=unit, start=r["start"], end=r["end"], para=r.get("para"),
                                           paras=r.get("paras"), char_start=a, char_end=b),
                           text_hash=th, extraction_version=EXTRACTION_VERSION, parent_block_id=parent, piece=piece,
-                          continues=continues)
+                          continues=continues, heading_level=r.get("level"), structure_confidence=r.get("confidence"))
         blocks.append(blk)
         return blk
 

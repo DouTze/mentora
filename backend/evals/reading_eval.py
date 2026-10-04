@@ -248,7 +248,7 @@ def check_guides(case: dict, rep: SegReport, segments: list[dict], guides: list[
     """Per gold unit: which must_keep items the guide text (guide + chinese_text) covers, forbidden hits,
     narration phrases, missing chinese_text for non-Chinese source. guides[i] belongs to segments[i]."""
     out: dict[str, Any] = {"units": {}, "kept": 0, "total_keep": 0, "forbidden_hits": 0, "narration_hits": 0,
-                           "missing_guides": 0, "missing_chinese_text": 0}
+                           "missing_guides": 0, "missing_chinese_text": 0, "kept_guide_only": 0}
     case_forbidden = case.get("forbidden", [])
     for u in case.get("units", []):
         idx = gold_unit_segments(rep, u["id"]) if u["id"] in rep.gold_spans else []
@@ -263,13 +263,16 @@ def check_guides(case: dict, rep: SegReport, segments: list[dict], guides: list[
         kept, lost = [], []
         for item in u.get("must_keep", []):
             (kept if any(_has(bn, grp) for grp in item["any"]) else lost).append(item["text"])
+        gn = norm("\n".join(g.get("guide") or "" for g in gs))   # the 主要正文 alone (it must not rely on the 中文課文)
+        kept_guide = [item["text"] for item in u.get("must_keep", []) if any(_has(gn, grp) for grp in item["any"])]
         forbidden = [f["text"] for f in case_forbidden + u.get("forbidden", []) if any(norm(x) in bn for x in f["any"])]
         exact = [x for x in u.get("forbidden_exact", []) if any((g.get("guide") or "").strip() == x for g in gs)]
         narration = [p for p in NARRATION if p in body]
         no_zh = [i for i in idx if not is_chinese(segments[i]["text"]) and not (guides[i] or {}).get("chinese_text")]
         out["units"][u["id"]] = {"segments": idx, "kept": kept, "lost": lost, "forbidden": forbidden + exact,
-                                 "narration": narration, "missing_chinese_text": bool(no_zh)}
+                                 "narration": narration, "missing_chinese_text": bool(no_zh), "kept_guide_only": kept_guide}
         out["kept"] += len(kept)
+        out["kept_guide_only"] += len(kept_guide)
         out["total_keep"] += len(kept) + len(lost)
         out["forbidden_hits"] += len(forbidden) + len(exact)
         out["narration_hits"] += len(narration)
@@ -333,6 +336,7 @@ def summarize(results: list[dict]) -> dict:
     tk = sum(r["guides_check"]["total_keep"] for r in guide)
     if tk:
         s["keep_ratio"] = round(sum(r["guides_check"]["kept"] for r in guide) / tk, 3)
+        s["keep_ratio_guide_only"] = round(sum(r["guides_check"].get("kept_guide_only", 0) for r in guide) / tk, 3)
     for key in ("forbidden_hits", "narration_hits", "missing_guides", "missing_chinese_text"):
         s[key] = sum(r["guides_check"][key] for r in guide)
     calls_by_task: dict[str, int] = {}
@@ -384,12 +388,21 @@ def markdown_report(run: dict) -> str:
 
 # -- blind review -----------------------------------------------------------------
 
+GUIDE_FIELDS = {"faithfulness": None, "completeness": None, "clarity": None, "wrong_formula": False,
+                "fabricated_claim": False, "missing_key_condition": False, "supplement_incorrect": False,
+                "supplement_unnecessary": False, "note": ""}
+CN_FIELDS = {"faithfulness": None, "completeness": None, "wrong_formula": False, "fabricated_claim": False,
+             "missing_key_condition": False, "note": ""}
+
+
 def blind_packet(a: dict, b: dict, seed: int = 7) -> tuple[str, dict, dict]:
-    """Pair the guides of two runs per gold unit in random A/B order. Returns (markdown packet, key, score template).
-    Reviewers score each side 1–5 on faithfulness / completeness / clarity and flag major errors (RUBRIC.md)."""
+    """Pair the outputs of two runs per gold unit in random A/B order. Returns (markdown packet, key, score template).
+    The 主要正文 is scored on its own first (it must teach the unit without the 中文課文); the 中文課文, when there
+    is one, is shown afterwards and scored separately. Scores follow RUBRIC.md."""
     rng = random.Random(seed)
     by_id = {r["id"]: r for r in b["results"]}
-    lines = ["# 導讀盲評包", "", "每一題比較兩份導讀（X／Y 順序隨機）。依 evals/reading/RUBRIC.md 評分，填入 scores.json。", ""]
+    lines = ["# 導讀盲評包", "", "每一題比較兩份導讀（X／Y 順序隨機）。先只讀兩份**主要正文**評分（不要先看中文課文），"
+             "再看各自的中文課文另外評分。依 evals/reading/RUBRIC.md 評分，填入 scores.json。", ""]
     key: dict[str, dict] = {}
     template: dict[str, dict] = {}
     for ra in a["results"]:
@@ -404,28 +417,43 @@ def blind_packet(a: dict, b: dict, seed: int = 7) -> tuple[str, dict, dict]:
             flip = rng.random() < 0.5
             x, y = (gb, ga) if flip else (ga, gb)
             key[item] = {"X": b["mode"] if flip else a["mode"], "Y": a["mode"] if flip else b["mode"]}
-            template[item] = {side: {"faithfulness": None, "completeness": None, "clarity": None,
-                                     "wrong_formula": False, "fabricated_claim": False, "missing_key_condition": False,
-                                     "note": ""} for side in ("X", "Y")}
+            has_cn = bool(x.get("chinese_text") or y.get("chinese_text"))
+            template[item] = {side: {"guide": dict(GUIDE_FIELDS), **({"chinese_text": dict(CN_FIELDS)} if has_cn else {})}
+                              for side in ("X", "Y")}
             lines += [f"## {item}", "", "**原文**", "", "```text", ra["unit_source"][uid], "```", ""]
             for side, g in (("X", x), ("Y", y)):
-                lines += [f"### {side}", ""]
-                if g.get("chinese_text"):
-                    lines += ["**中文課文**", "", g["chinese_text"], ""]
-                lines += [g.get("guide") or "", ""]
+                lines += [f"### {side}：主要正文", "", g.get("guide") or "", ""]
+            if has_cn:
+                for side, g in (("X", x), ("Y", y)):
+                    lines += [f"### {side}：中文課文（另評）", "", g.get("chinese_text") or "（沒有）", ""]
     return "\n".join(lines) + "\n", key, template
 
 
 def score_blind(key: dict, scores: dict) -> dict:
-    """Average human rubric scores per pipeline; counts of major errors (must be 0 to pass)."""
-    agg: dict[str, dict[str, list]] = {}
+    """Average human rubric scores per pipeline, the 主要正文 and the 中文課文 separately; counts of major errors
+    (must be 0 to pass). Accepts the older flat score shape (one block per side) as 主要正文 scores."""
+    majors = ("wrong_formula", "fabricated_claim", "missing_key_condition")
+    agg: dict[str, dict[str, dict[str, list]]] = {}
     for item, sides in scores.items():
         for side, sc in sides.items():
             mode = key[item][side]
-            a = agg.setdefault(mode, {"faithfulness": [], "completeness": [], "clarity": [], "major": []})
-            for dim in ("faithfulness", "completeness", "clarity"):
-                if sc.get(dim) is not None:
-                    a[dim].append(sc[dim])
-            a["major"].append(int(bool(sc.get("wrong_formula") or sc.get("fabricated_claim") or sc.get("missing_key_condition"))))
-    return {mode: {**{dim: round(statistics.mean(v), 2) if v else None for dim, v in a.items() if dim != "major"},
-                   "major_errors": sum(a["major"]), "n": len(a["major"])} for mode, a in agg.items()}
+            parts = sc if "guide" in sc else {"guide": sc}
+            for part, vals in parts.items():
+                a = agg.setdefault(mode, {}).setdefault(part, {"faithfulness": [], "completeness": [], "clarity": [],
+                                                              "major": [], "supplement_issues": []})
+                for dim in ("faithfulness", "completeness", "clarity"):
+                    if vals.get(dim) is not None:
+                        a[dim].append(vals[dim])
+                a["major"].append(int(any(vals.get(m) for m in majors)))
+                a["supplement_issues"].append(int(bool(vals.get("supplement_incorrect") or vals.get("supplement_unnecessary"))))
+    out = {}
+    for mode, parts in agg.items():
+        out[mode] = {}
+        for part, a in parts.items():
+            out[mode][part] = {**{dim: round(statistics.mean(v), 2) if v else None for dim, v in a.items()
+                                  if dim in ("faithfulness", "completeness", "clarity")},
+                               "major_errors": sum(a["major"]), "supplement_issues": sum(a["supplement_issues"]),
+                               "n": len(a["major"])}
+        g = out[mode].get("guide", {})   # flat aliases of the 主要正文 scores (the acceptance gate)
+        out[mode].update({k: g.get(k) for k in ("faithfulness", "completeness", "clarity", "major_errors", "n")})
+    return out

@@ -91,7 +91,8 @@ async def test_ollama_connection_error_is_not_retried_by_any_layer(monkeypatch):
     calls = []
 
     def handler(request):
-        calls.append(1)
+        if request.url.path == "/api/chat":   # the capability probe (/api/show) is not a model call
+            calls.append(1)
         raise httpx.ConnectError("refused")
 
     real = httpx.AsyncClient
@@ -191,11 +192,19 @@ async def test_one_format_fix_with_concrete_feedback_then_success():
 
 async def test_format_fix_is_spent_once_per_task_not_per_call():
     b = Scripted(["nope", '{"answer": "a"}', "still nope"])
-    ctx = ctx_for(b)
-    await run_structured(ctx, MSGS, Out, task="guide", node="analyze", prompt_version="v1")
+    ctx = ctx_for(b, task="ask")   # one format fix for the whole task
+    await run_structured(ctx, MSGS, Out, task="ask", node="ask.context", prompt_version="v1")
+    with pytest.raises(TaskError) as e:
+        await run_structured(ctx, MSGS, Out, task="ask", node="ask.answer", prompt_version="v1")
+    assert e.value.kind == "invalid_output" and len(b.requests) == 3 and ctx.budget.calls == 3
+
+
+async def test_one_call_site_never_spends_two_format_fixes():
+    b = Scripted(["nope", "still nope", '{"answer": "a"}'])
+    ctx = ctx_for(b, task="guide")   # the guide task has two fixes, but one node gets one
     with pytest.raises(TaskError) as e:
         await run_structured(ctx, MSGS, Out, task="guide", node="draft", prompt_version="v1")
-    assert e.value.kind == "invalid_output" and len(b.requests) == 3 and ctx.budget.calls == 3
+    assert e.value.kind == "invalid_output" and len(b.requests) == 2 and ctx.budget.format_fixes == 1
 
 
 async def test_call_budget_is_a_hard_cap():
@@ -211,6 +220,7 @@ async def test_call_budget_is_a_hard_cap():
 def test_budget_round_trips_as_plain_data():
     b = CallBudget.for_task("guide")
     b.charge_call()
+    b.charge("revision")
     b.charge("revision")
     assert CallBudget.from_dict(json.loads(json.dumps(b.to_dict()))) == b
     assert not b.can("revision")

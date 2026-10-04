@@ -36,3 +36,9 @@ GEN_DEFAULTS = {
     "max_tokens": 512,
     "context_tokens": 8192,
 }
+
+# Context budget of the LangGraph workflow (app/llm/context.py). MAX_CONTEXT_TOKENS caps what a call may use even
+# when the model supports more (memory); GRAPH_NUM_CTX is the stable Ollama num_ctx bucket (changing num_ctx between
+# calls reloads the model runner).
+MAX_CONTEXT_TOKENS = int(os.environ.get("MENTOR_MAX_CONTEXT_TOKENS", "32768"))
+GRAPH_NUM_CTX = int(os.environ.get("MENTOR_GRAPH_NUM_CTX", "16384"))

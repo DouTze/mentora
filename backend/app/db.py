@@ -164,6 +164,11 @@ ALTER TABLE turns ADD COLUMN operation_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS turns_operation ON turns(operation_key) WHERE operation_key IS NOT NULL;
 ALTER TABLE sessions ADD COLUMN workflow_status TEXT;     -- where the graph waits: {waiting, stage, error, …}
 """),
+    (5, "source structure and evidence (R4/R5)", """
+ALTER TABLE source_blocks ADD COLUMN heading_level INTEGER;          -- NULL: body block, or unknown (blocks-v1 rows)
+ALTER TABLE source_blocks ADD COLUMN structure_confidence TEXT;      -- high (markup) | low (layout guess) | NULL
+ALTER TABLE source_blocks ADD COLUMN meta TEXT;                      -- JSON extraction evidence (fonts, bbox, renders)
+"""),
 ]
 
 SESSION_COLUMNS = ("id", "created_at", "updated_at", "status", "content_snapshot", "strategy_snapshot", "model_config",

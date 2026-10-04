@@ -1,29 +1,40 @@
-"""Guided-reading subgraph (plan §5.1): analyze → context → draft → validate → review → (revise → validate →
-review) → accept | fail.
+"""Guided-reading subgraph v2 (R3): source first, then teaching.
 
 ```mermaid
-flowchart LR
-    A[analyze] --> C[context] --> D[draft] --> V{validate}
-    V -->|ok| R[review]
-    V -->|major, can revise| X[revise]
-    V -->|major, no budget| F[fail]
-    R -->|pass| OK[accept]
-    R -->|major, can revise| X
-    R -->|"missing" claims after revision| Y[verify: extract the covering sentence]
-    Y -->|all withdrawn| OK
-    Y -->|still missing| F
-    R -->|other major again| F
-    X --> V
+flowchart TD
+    P[prepare: program context + verified-source cache] -->|cache hit| B
+    P -->|PDF symbols| SY[symbols: rendered regions read by the session's vision model] --> U
+    P --> U[understand: claims + 中文課文]
+    U -->|refers elsewhere| C[context: read-only tools] --> U
+    U --> G1{gate1: anchors, full-text coverage, formulas, notation}
+    G1 -->|audit needed| SA[source_audit] --> G1
+    G1 -->|fixable| SR[revise_source] --> G1
+    G1 -->|pass| B[plan_bridges: learning goal + approved bridges]
+    B --> D[draft: 主要正文]
+    D --> G2{gate2: body-only program checks}
+    G2 --> BA[body_audit: every claim / bridge, full source] --> J{judge}
+    G2 -->|program fact| BR
+    J -->|pass| OK[accept]
+    J -->|fixable| BR[revise_body] --> G2
+    J -->|checkable claims| V[verify] --> J2{judge}
+    J2 --> OK & BR
+    G1 & J & J2 -->|evidence missing / budget / still failing| H[hold: draft kept, not published]
 ```
 
-Every model call is its own node, so a checkpoint (durability="sync") follows each one. A node also stores its
-state update as a `step` artifact under its operation key before returning, so a re-run after a crash between the
-model reply and the checkpoint reuses the reply instead of calling again; the task's call count is rebuilt from the
-llm_calls trace, so a restart never refills the budget. A connection failure raises (the graph stops at that node;
-an explicit retry resumes there); invalid output after the allowed fix, an exhausted budget or an unresolved major
-issue end in `fail`, which keeps the draft but never publishes it."""
+- Gate 1 must pass before any teaching text is written; Gate 2 must pass before the guide is published. The 中文課文
+  is fixed by Gate 1 and never answers for the 主要正文.
+- Every prompt is a ContextPacket: required items (the unit's source, the claims and bridges under check, the
+  supplements the understanding used) are never cut; draft, audit, revision and re-check see the same source
+  version and the same supplements. A request that cannot fit stops with `context_overflow`.
+- A VerifiedSource is cached under everything it depends on (source text and blocks, context, symbol evidence,
+  prompts, model, versions) and reused by later sessions when it holds no session data; bridges and the guide
+  depend on the reader and are never shared.
+- Every model call is its own node; its state update is stored as a `step` artifact under the operation key and the
+  node's round, so a re-run after a crash reuses the reply; the call count is rebuilt from the trace, so a restart
+  never refills the budget. One source revision, one body revision, one re-check per draft version."""
 from __future__ import annotations
 
+import json
 import operator
 from dataclasses import dataclass
 from typing import Annotated, Any, Callable, TypedDict
@@ -31,9 +42,14 @@ from typing import Annotated, Any, Callable, TypedDict
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
-from ..llm.runtime import CallBudget, ModelRuntime, TraceSink
-from ..llm.tasks import TaskContext, TaskError, ToolDispatcher, run_structured, select_context
+from ..llm.context import ContextItem, ContextOverflow, Packet
+from ..llm.runtime import CallBudget, ModelRuntime, TraceSink, stable_hash
+from ..llm.tasks import TaskContext, TaskError, ToolCallRequest, ToolDispatcher, run_structured, select_context
 from ..reading import agent as ra
+from ..reading import gates
+from ..reading import pdf_evidence
+from ..reading.contracts import (CONTRACT_VERSION, BodyAudit, BodyDraft, BridgePlan, GateCheck, GateResult,
+                                 SourceAudit, SourceClaim, SourceUnderstanding, SymbolTranscription, VerifiedSource)
 from ..reading.prompts import render
 from ..reading.tools import ReadingScope, build_tools, tools_text
 
@@ -51,11 +67,23 @@ class GuideState(TypedDict, total=False):
     op: str                      # operation key prefix of this attempt (session:command:guide:unit:attempt:version)
     command_id: str | None
     budget: dict
-    plan: dict | None
+    rounds: dict                 # model node → times it has run (part of its step-cache key)
     supplements: list[dict]
-    draft: dict | None
+    symbol_evidence: dict | None # R5: the unit's symbol evidence, confirmed by the symbols node when possible
+    context_status: str          # not_needed | provided | outside_range | missing
+    model_context_done: bool
+    understanding: dict | None
+    gate1: dict | None           # GateResult of the current understanding
+    audited: bool                # the current understanding went through source_audit
+    source_revisions: int
+    verified: dict | None        # VerifiedSource
+    bridges: dict | None         # BridgePlan
+    draft: dict | None           # BodyDraft
+    body_revisions: int
+    verified_for: int | None     # body revision count a focused re-check already ran on
+    gate2: dict | None
+    audit: dict | None
     findings: list[dict]
-    revised: bool
     decision: str | None
     status: str                  # running | accepted | failed
     error: dict | None
@@ -71,13 +99,56 @@ class ReadingDeps:
     sink: TraceSink
     repo: Any = None                                    # Repository; None = no step cache (eval / unit tests)
     on_stage: Callable[[str, str | None, str], None] | None = None   # (session id, command id, stage) progress hook
+    vsrc_cache: dict | None = None                      # in-memory verified-source cache when there is no repo
+    render_region: Callable | None = None               # (pdf_path, page, bbox) → PNG bytes; default: pdf_evidence
+    evidence_dir: Any = None                            # where rendered regions are kept (Path); None = not kept
 
 
 def initial_state(task: ra.ReadingTaskInput, op: str, command_id: str | None = None) -> GuideState:
-    return {"task": task.model_dump(), "op": op, "command_id": command_id,
-            "budget": CallBudget.for_task("guide").to_dict(), "plan": None, "supplements": [], "draft": None,
-            "findings": [], "revised": False, "decision": None, "status": "running", "error": None, "artifact": None,
-            "history": []}
+    return {"task": task.model_dump(), "op": op, "command_id": command_id, "budget": CallBudget.for_task("guide").to_dict(),
+            "rounds": {}, "supplements": [], "symbol_evidence": task.symbol_evidence, "context_status": "not_needed",
+            "model_context_done": False,
+            "understanding": None, "gate1": None, "audited": False, "source_revisions": 0, "verified": None,
+            "bridges": None, "draft": None, "body_revisions": 0, "verified_for": None, "gate2": None, "audit": None,
+            "findings": [], "decision": None, "status": "running", "error": None, "artifact": None, "history": []}
+
+
+SOURCE_PROMPTS = ("reading_understand", "reading_source_audit", "reading_source_revise")
+
+
+def understanding_tokens(t: ra.ReadingTaskInput) -> int:
+    """Output reserved for claims (+ the 中文課文 of a non-Chinese source): about three times the source, 2048–4096."""
+    from ..llm.context import estimate_tokens
+    return max(2048, min(4096, 3 * estimate_tokens(t.text) + 512))
+
+
+def template(lists: dict[str, list[str]], item: dict, rest: dict) -> str:
+    """An output skeleton naming every id the model must report on (small models follow a filled-in shape)."""
+    return json.dumps({**{k: [{"id": i, **item[k]} for i in ids] for k, ids in lists.items()}, **rest}, ensure_ascii=False)
+MAX_SOURCE_REVISIONS = 1
+MAX_BODY_REVISIONS = 1
+
+
+def claims_text(claims: list[dict], with_quote: bool = True) -> str:
+    lines = []
+    for c in claims:
+        extra = [f"條件：{'；'.join(c['conditions'])}" if c.get("conditions") else "",
+                 f"例外：{'；'.join(c['exceptions'])}" if c.get("exceptions") else "",
+                 f"力度：{c['strength']}" if c.get("strength") else "",
+                 f"公式：{'；'.join(c['formulas'])}" if c.get("formulas") else ""]
+        extra = "；".join(x for x in extra if x)
+        lines.append(f"- {c['id']}［{c.get('function', 'claim')}］{c['statement']}" + (f"（{extra}）" if extra else "")
+                     + (f"\n  原文（{'、'.join(c.get('sentences') or [])}）：「{c.get('source_text') or c.get('quote') or ''}」"
+                        if with_quote else ""))
+    return "\n".join(lines) or "（無）"
+
+
+def bridges_text(plan: dict | None) -> str:
+    bs = (plan or {}).get("bridges") or []
+    if not bs:
+        return "（沒有核准的橋梁：原文以外不要加入任何內容）"
+    return "\n".join(f"- {b['id']}［{'補充說明' if b['boundary'] == 'supplement' else '融入正文'}｜依據 {b['basis']}｜服務 "
+                     f"{'、'.join(b['targets'])}］{b['content']}" for b in bs)
 
 
 def build_reading_graph(deps: ReadingDeps, checkpointer=None):
@@ -91,7 +162,8 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
 
     def model_node(name: str, fn):
         async def node(state: GuideState) -> dict:
-            key = f"{state['op']}:{name}:{'r' if state.get('revised') else 'a'}"
+            rounds = dict(state.get("rounds") or {})
+            key = f"{state['op']}:{name}:{rounds.get(name, 0)}"
             if deps.repo is not None:
                 cached = deps.repo.get_artifact(key)
                 if cached:
@@ -104,9 +176,11 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             except TaskError as e:
                 if e.kind == "unavailable":
                     raise ReadingUnavailable(e.detail) from e
-                code = "budget_exhausted" if e.kind == "budget" else ("review_invalid" if name == "review" else "invalid_model_output")
+                code = {"budget": "budget_exhausted", "context_overflow": "context_overflow"}.get(
+                    e.kind, "review_invalid" if name in ("source_audit", "body_audit") else "invalid_model_output")
                 update = {"status": "failed", "error": {"code": code, "detail": f"{name}: {e.detail}"}}
             update["budget"] = ctx.budget.to_dict()
+            update["rounds"] = {**rounds, name: rounds.get(name, 0) + 1}
             if deps.repo is not None:
                 deps.repo.put_artifact(key, kind="step", status="cached", payload=update,
                                        session_id=state["task"]["session_id"], unit_id=state["task"]["unit_id"])
@@ -117,155 +191,464 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
     def prompts(state) -> dict[str, str]:
         return deps.prompts_for(state["task"]["session_id"])
 
-    async def analyze(state, ctx):
-        t = ra.ReadingTaskInput.model_validate(state["task"])
-        msg = render(prompts(state)["reading_analyze"], ra.task_fields(t))
-        plan, _ = await run_structured(ctx, [HumanMessage(content=msg)], ra.TeachingPlan, task="guide", node="analyze",
-                                       prompt_version=t.prompt_bundle_hash, meta={"step": "analyze", "quote_text": t.text},
-                                       source_ids=t.block_ids, min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
-        return {"plan": plan.model_dump()}
+    def task(state) -> ra.ReadingTaskInput:
+        return ra.ReadingTaskInput.model_validate(state["task"])
 
-    async def context(state, ctx):
-        t = ra.ReadingTaskInput.model_validate(state["task"])
-        plan = ra.TeachingPlan.model_validate(state["plan"])
-        if not ra.needs_context(t, plan):
-            return {"supplements": []}
-        tools = build_tools(deps.scope_for(t.session_id, t.index))
-        fields = {**ra.task_fields(t), "needs_context": "\n".join(f"- {x}" for x in plan.needs_context) or "（原文以指涉語開頭）",
-                  "tools": tools_text(tools), "max_calls": str(ctx.budget.max_tools_per_round)}
-        msg = render(prompts(state)["reading_context"], fields)
-        results, _ = await select_context(ctx, [HumanMessage(content=msg)], ToolDispatcher(tools, max_chars=3000),
-                                          task="guide", node="context", prompt_version=t.prompt_bundle_hash,
-                                          meta={"quote_text": t.text}, source_ids=t.block_ids)
-        return {"supplements": [{"tool": r.tool, "args": r.args, "ok": r.ok, "content": r.content, "note": r.note}
-                                for r in results]}
+    def can(budget: CallBudget, cost: int) -> bool:
+        return budget.calls + cost <= budget.max_calls
 
+    # -- packets ------------------------------------------------------------------------------
     def supplements_text(state) -> str:
         ok = [s for s in state.get("supplements") or [] if s["ok"]]
-        return "\n\n".join(s["content"] for s in ok) or "（無）"
+        text = "\n\n".join(s["content"] + ("" if s.get("complete", True) else f"\n（部分結果；{s.get('note')}）") for s in ok)
+        if state.get("context_status") == "outside_range":
+            text += ("\n\n" if text else "") + "（這一段指涉的前文不在本次學習範圍內，無法提供）"
+        return text or "（無）"
+
+    def supplement_ids(state) -> list[str]:
+        return sorted({u for s in state.get("supplements") or [] if s["ok"] for u in s.get("source_ids") or []})
+
+    def items_for(state, t: ra.ReadingTaskInput, keys: tuple[str, ...]) -> list[ContextItem]:
+        """The context items of one prompt. Required: the source, claims, bridges and the supplements the
+        understanding relied on; optional (dropped first when the call does not fit): what the reader read and
+        asked before, the 中文課文 as a reading aid."""
+        relied = state.get("context_status") == "provided"
+        learning = t.learning
+        verified = state.get("verified") or {}
+        bridges = (state.get("bridges") or {}).get("bridges") or []
+        make = {
+            "symbol_evidence": lambda: ContextItem(key="symbol_evidence", text=symbol_text(state.get("symbol_evidence")),
+                                                   version=(state.get("symbol_evidence") or {}).get("version")),
+            "sentences": lambda: ContextItem(key="sentences", text=gates.numbered_source(t.text),
+                                             source_ids=t.block_ids, version=t.source_hash),
+            "quote_text": lambda: ContextItem(key="quote_text", text=t.text + (
+                "\n\n（注意：這一段含有圖，但圖片內容沒有被抽取出來，只能依文字說明。）" if t.has_figure else ""),
+                source_ids=t.block_ids, version=t.source_hash),
+            "supplements": lambda: ContextItem(key="supplements", text=supplements_text(state), required=relied, priority=3,
+                                               source_ids=supplement_ids(state),
+                                               complete=all(s.get("complete", True) for s in state.get("supplements") or [])),
+            "claims": lambda: ContextItem(key="claims", text=claims_text(verified.get("claims") or []),
+                                          source_ids=[c["id"] for c in verified.get("claims") or []], version=verified.get("key")),
+            "bridges": lambda: ContextItem(key="bridges", text=bridges_text(state.get("bridges")),
+                                           source_ids=[b["id"] for b in bridges]),
+            "chinese_text": lambda: ContextItem(key="chinese_text", text=verified.get("chinese_text") or "（原文是中文，無）",
+                                                required=False, priority=4, version=verified.get("key")),
+            "prev_points": lambda: ContextItem(key="prev_points", text="\n".join(f"- {p}" for p in t.prev_points) or "（這是第一段）",
+                                               required=False, priority=2),
+            "qa_context": lambda: ContextItem(key="qa_context", text=ra.qa_text(t.qa_context), required=False, priority=1),
+            "read_claims": lambda: ContextItem(key="read_claims", text="\n".join(
+                f"  - [{x['unit_id']}] {x['statement']}" for x in learning.read_claims) or "  （尚未讀過其他段落）",
+                required=False, priority=2, source_ids=[f"{x['unit_id']}:{x['claim_id']}" for x in learning.read_claims]),
+            "open_questions": lambda: ContextItem(key="open_questions", text="\n".join(
+                f"  - [{x['unit_id']}] {x['question']}" for x in learning.open_questions) or "  （無）",
+                required=False, priority=1),
+        }
+        return [make[k]() for k in keys]
+
+    def symbol_text(ev: dict | None) -> str:
+        if not ev or ev.get("status") != "confirmed":
+            return "（這一段沒有需要另外取證的符號；公式照原文的 LaTeX 寫）"
+        tr = ev.get("transcription") or {"formulas": [], "symbols": []}
+        lines = ["依原書版面的視覺取證（以此為準，不要依文字層或常識改寫）："]
+        lines += [f"- 公式：${f}$" for f in tr["formulas"]]
+        lines += [f"- {x['symbol']}：{x['latex']}（{x['style']}{'' if x['script'] == 'none' else '，' + x['script']}）"
+                  for x in tr["symbols"]]
+        return "\n".join(lines)
+
+    def fixed_fields(t: ra.ReadingTaskInput) -> dict[str, str]:
+        f = ra.task_fields(t)
+        return {k: f[k] for k in ("material_title", "range_label", "position", "quote_label", "heading", "unit_id")} | {
+            "chinese_text_rule": ra.understanding_cn_rule(t.text),
+            "depth": "略讀（skim）" if t.learning.depth == "skim" else "細讀（close）",
+            "goal": t.learning.goal or "（未指定）",
+            "background": t.learning.background or "（讀者沒有提供）"}
+
+    async def prompt_for(ctx: TaskContext, state, node: str, template: str, keys: tuple[str, ...], extra: dict[str, str],
+                         max_tokens: int):
+        t = task(state)
+        limits = await ctx.runtime.limits(ra.GUIDE_CONTEXT_TOKENS)
+        try:
+            return Packet(node, prompts(state)[template], items_for(state, t, keys), {**fixed_fields(t), **extra}).build(
+                ctx.runtime.max_tokens(max_tokens), limits)
+        except ContextOverflow as e:
+            raise TaskError("context_overflow", e.detail) from e
+
+    # -- verified-source cache ----------------------------------------------------------------
+    def vsrc_key(state) -> tuple[str, bool]:
+        t = task(state)
+        shareable = all(s.get("tool") in ("read_source_units", "read_neighbor_units") for s in state.get("supplements") or [])
+        p = prompts(state)
+        key = "vsrc:" + stable_hash([t.text, t.block_ids, t.source_kind, t.symbol_evidence,
+                                     [s["content"] for s in state.get("supplements") or [] if s["ok"]],
+                                     {k: p.get(k) for k in SOURCE_PROMPTS}, t.model_config_hash,
+                                     ra.READING_WORKFLOW_VERSION, CONTRACT_VERSION,
+                                     None if shareable else t.session_id], 24)
+        return key, shareable
+
+    def vsrc_get(key: str) -> dict | None:
+        if deps.repo is not None:
+            a = deps.repo.get_artifact(key)
+            return a["payload"] if a else None
+        return (deps.vsrc_cache or {}).get(key)
+
+    def vsrc_put(key: str, v: dict, t: ra.ReadingTaskInput, shareable: bool) -> None:
+        if deps.repo is not None:
+            deps.repo.put_artifact(key, kind="verified_source", status="accepted", payload=v,
+                                   session_id=None if shareable else t.session_id, unit_id=t.unit_id,
+                                   source_hash=t.source_hash, prompt_version=t.prompt_bundle_hash,
+                                   model_config_hash=t.model_config_hash, workflow_version=ra.READING_WORKFLOW_VERSION)
+        elif deps.vsrc_cache is not None:
+            deps.vsrc_cache[key] = v
+
+    # -- nodes ------------------------------------------------------------------------------------
+    async def prepare(state: GuideState) -> dict:
+        """Program-side context: a unit that opens by pointing back ("在這兩個條件下…") gets its previous unit,
+        read through the same read-only tool and recorded the same way; no model call is needed for that."""
+        t = task(state)
+        sups, status = [], "not_needed"
+        if ra.REFERS_BACK_RE.match(t.text) or t.depends_on_prev:
+            if t.index == 0:
+                status = "outside_range"
+            else:
+                d = ToolDispatcher(build_tools(deps.scope_for(t.session_id, t.index)))
+                res = await d.run([ToolCallRequest(tool="read_neighbor_units",
+                                                   args={"unit_id": t.unit_id, "before": 1, "after": 0})], 1)
+                sups += [{**r.as_dict(), "by": "program"} for r in res]
+                status = "provided" if any(r.ok for r in res) else "missing"
+        key, _ = vsrc_key({**state, "supplements": sups})
+        cached = vsrc_get(key)
+        return {"supplements": sups, "context_status": status, "verified": cached,
+                "gate1": cached["gate1"] if cached else None}
+
+    def needs_symbols(state) -> bool:
+        t = task(state)
+        ev = state.get("symbol_evidence")
+        if t.source_kind != "pdf":
+            return False
+        return (ev or {}).get("status") in ("needs_visual", "unavailable") or (ev is None and gates.symbol_like(t.text))
+
+    async def symbols(state, ctx):
+        """Read the unit's rendered PDF regions with the session's own model, if it can take images. Missing
+        evidence or a text-only model ends here (no understanding is written that could not pass Gate 1)."""
+        t = task(state)
+        ev = dict(state.get("symbol_evidence") or {"status": "unavailable", "regions": [],
+                                                   "reason": "這一段有數學符號，但沒有原始 PDF 的版面證據，無法確認符號的字型"})
+        caps = await ctx.runtime.backend.capabilities()
+        if ev["status"] == "unavailable" or not caps.vision:
+            reason = ev.get("reason") if ev["status"] == "unavailable" else \
+                f"{ev.get('reason')}；目前的模型（{ctx.runtime.backend.name} {ctx.runtime.backend.model}）不支援影像輸入，無法看圖核對"
+            return {"symbol_evidence": {**ev, "status": "unverified", "reason": reason},
+                    "status": "failed", "error": {"code": "notation_unverified", "detail": reason + "（位置：" + "、".join(
+                        f"第 {r['page']} 頁" for r in ev.get("regions", [])) + "）"}}
+        render = deps.render_region or pdf_evidence.render_region
+        import base64
+        parts: list = [{"type": "text", "text": ""}]
+        renders = []
+        for r in ev["regions"][:4]:
+            png = render(ev["pdf_path"], r["page"], r["bbox"])
+            renders.append({**r, "png": pdf_evidence.png_hash(png)})
+            if deps.evidence_dir is not None:
+                from pathlib import Path
+                Path(deps.evidence_dir).mkdir(parents=True, exist_ok=True)
+                (Path(deps.evidence_dir) / f"{renders[-1]['png']}.png").write_bytes(png)
+            parts.append({"type": "image", "base64": base64.b64encode(png).decode(), "mime_type": "image/png"})
+        clues = ev.get("clues") or {}
+        extra = {"clues": "\n".join(f"- {k}：{v}" for k, v in clues.items() if v) or "（無）"}
+        limits = await ctx.runtime.limits(ra.GUIDE_CONTEXT_TOKENS)
+        msg, rec = Packet("symbols", prompts(state)["reading_symbols"], items_for(state, t, ("quote_text",)),
+                          {**fixed_fields(t), **extra}).build(ctx.runtime.max_tokens(1024), limits)
+        parts[0]["text"] = msg
+        tr, _ = await run_structured(ctx, [HumanMessage(content=parts)], SymbolTranscription, task="guide", node="symbols",
+                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                     meta={"step": "symbols", "quote_text": t.text, "regions": ev["regions"]},
+                                     min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        problems = gates.transcription_against_clues(tr, clues)
+        if problems:
+            reason = "PDF 符號的視覺判讀與字型線索不一致：" + "；".join(problems)
+            return {"symbol_evidence": {**ev, "status": "unverified", "reason": reason, "transcription": tr.model_dump(),
+                                        "renders": renders},
+                    "status": "failed", "error": {"code": "notation_unverified", "detail": reason}}
+        summary = "；".join(f"{x.symbol}={x.latex}" for x in tr.symbols)[:200]
+        return {"symbol_evidence": {**ev, "status": "confirmed", "transcription": tr.model_dump(), "renders": renders,
+                                    "summary": summary, "model": f"{ctx.runtime.backend.name}:{ctx.runtime.backend.model}"}}
+
+    async def understand(state, ctx):
+        t = task(state)
+        out_tokens = understanding_tokens(t)
+        msg, rec = await prompt_for(ctx, state, "understand", "reading_understand",
+                                    ("sentences", "symbol_evidence", "supplements"), {}, out_tokens)
+        u, _ = await run_structured(ctx, [HumanMessage(content=msg)], SourceUnderstanding, task="guide", node="understand",
+                                    prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                    json_schema=gates.understanding_schema(t.text),
+                                    meta={"step": "understand", "quote_text": t.text,
+                                          "segments": gates.source_segments(t.text)},
+                                    min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        return {"understanding": gates.with_chinese_text(t.text, u).model_dump(), "audited": False, "gate1": None}
+
+    def wants_model_context(state) -> bool:
+        u = state.get("understanding") or {}
+        return (not state.get("model_context_done") and state.get("context_status") != "provided"
+                and any(ra.CONTEXT_HINT_RE.search(x) for x in u.get("needs_context") or []))
+
+    async def context(state, ctx):
+        t = task(state)
+        u = state["understanding"]
+        tools = build_tools(deps.scope_for(t.session_id, t.index))
+        fields = {**ra.task_fields(t), "needs_context": "\n".join(f"- {x}" for x in u.get("needs_context") or []),
+                  "tools": tools_text(tools), "max_calls": str(ctx.budget.max_tools_per_round)}
+        msg = render(prompts(state)["reading_context"], fields)
+        results, _ = await select_context(ctx, [HumanMessage(content=msg)], ToolDispatcher(tools), task="guide",
+                                          node="context", prompt_version=t.prompt_bundle_hash,
+                                          meta={"quote_text": t.text}, source_ids=t.block_ids)
+        got = [r for r in results if r.ok]
+        failed = [r for r in results if not r.ok and r.note.startswith(("工具拒絕", "未提供"))]
+        status = "provided" if got else ("missing" if failed else state.get("context_status"))
+        upd = {"supplements": (state.get("supplements") or []) + [{**r.as_dict(), "by": "model"} for r in results],
+               "model_context_done": True, "context_status": status}
+        if got:   # the understanding was made without this context: it is redone with it (same budget)
+            upd["understanding"] = None
+        return upd
+
+    def gate1(state: GuideState) -> dict:
+        t = task(state)
+        u = SourceUnderstanding.model_validate(state["understanding"])
+        if state.get("audited") and state.get("gate1"):   # the audit already merged into this understanding's checks
+            checks = [GateCheck.model_validate(c) for c in state["gate1"]["checks"]]
+        else:
+            checks = gates.gate1_program(t.text, u, source_kind=t.source_kind, symbol_evidence=state.get("symbol_evidence"))
+            if state.get("context_status") == "missing":
+                checks.append(GateCheck(id="context", kind="context", status="unverified", fixable=False,
+                                        detail="這一段需要的前後文讀取失敗，無法確認指涉"))
+        budget = CallBudget.from_dict(state["budget"])
+        decision = gates.gate1_decide(checks, audited=state.get("audited", False),
+                                      need_audit=gates.needs_source_audit(t.text, checks), can_audit=can(budget, 1),
+                                      can_revise=state.get("source_revisions", 0) < MAX_SOURCE_REVISIONS and can(budget, 2))
+        result = GateResult.of("gate1", checks)
+        upd: dict = {"gate1": result.model_dump(), "decision": decision}
+        if decision == "pass":
+            key, shareable = vsrc_key(state)
+            v = VerifiedSource(key=key, unit_id=t.unit_id, source_hash=t.source_hash, chinese_text=u.chinese_text,
+                               claims=gates.resolve_claims(t.text, u.claims, u.translations), gate1=result, supplement_ids=supplement_ids(state), shareable=shareable,
+                               limits=u.limits).model_dump()
+            vsrc_put(key, v, t, shareable)
+            upd["verified"] = v
+        return upd
+
+    async def source_audit(state, ctx):
+        t = task(state)
+        u = SourceUnderstanding.model_validate(state["understanding"])
+        checks = [GateCheck.model_validate(c) for c in state["gate1"]["checks"]]
+        sentences, claims = gates.audit_items(t.text, u, checks)
+        ids = {"sentences": [sid for sid, _ in sentences], "claims": [c.id for c in claims]}
+        tr = {x.id: x.zh for x in u.translations}
+        extra = {"chinese_text": u.chinese_text or "（原文是中文，無）",
+                 "audit_sentences": "\n".join(f"- {sid}：{s}\n  譯文：{tr.get(sid, '（缺）')}" for sid, s in sentences) or "（無）",
+                 "claims": claims_text([c.model_dump() for c in claims]),
+                 "output_template": template(ids, {"sentences": {"verdict": "faithful", "note": ""},
+                                                   "claims": {"verdict": "faithful", "note": ""}}, {})}
+        msg, rec = await prompt_for(ctx, state, "source_audit", "reading_source_audit", ("quote_text",), extra, 2048)
+        a, _ = await run_structured(ctx, [HumanMessage(content=msg)], SourceAudit, task="guide", node="source_audit",
+                                    prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                    check=gates.audit_check(sentences, claims),
+                                    json_schema=gates.exact_ids_schema(SourceAudit, ids),
+                                    meta={"step": "source_audit", "quote_text": t.text, "sentences": sentences,
+                                          "claim_ids": [c.id for c in claims]},
+                                    min_max_tokens=2048, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        merged = gates.gate1_apply_audit(t.text, u, checks, a, sentences)
+        return {"gate1": GateResult.of("gate1", merged).model_dump(), "audited": True}
+
+    async def revise_source(state, ctx):
+        t = task(state)
+        ctx.budget.charge("revision")
+        failing = [c for c in state["gate1"]["checks"] if c["status"] in ("fail", "unverified")]
+        extra = {"issues": "\n".join(f"- [{c['kind']}] {c['detail']}" for c in failing),
+                 "understanding_json": json.dumps(state["understanding"], ensure_ascii=False)}
+        out_tokens = understanding_tokens(t)
+        msg, rec = await prompt_for(ctx, state, "revise_source", "reading_source_revise",
+                                    ("sentences", "symbol_evidence", "supplements"), extra, out_tokens)
+        u, _ = await run_structured(ctx, [HumanMessage(content=msg)], SourceUnderstanding, task="guide",
+                                    node="revise_source", prompt_version=t.prompt_bundle_hash, packet=rec,
+                                    source_ids=t.block_ids, purpose="revision", json_schema=gates.understanding_schema(t.text),
+                                    meta={"step": "revise_source", "quote_text": t.text,
+                                          "segments": gates.source_segments(t.text)},
+                                    min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        return {"understanding": gates.with_chinese_text(t.text, u).model_dump(), "audited": False, "gate1": None,
+                "source_revisions": state.get("source_revisions", 0) + 1,
+                "history": [{"stage": "source", "understanding": state["understanding"], "gate1": state["gate1"]}]}
+
+    async def plan_bridges(state, ctx):
+        t = task(state)
+        v = state["verified"]
+        msg, rec = await prompt_for(ctx, state, "plan_bridges", "reading_bridges",
+                                    ("quote_text", "claims", "read_claims", "open_questions"), {}, 1024)
+        claim_ids = {c["id"] for c in v["claims"]}
+        b, _ = await run_structured(ctx, [HumanMessage(content=msg)], BridgePlan, task="guide", node="plan_bridges",
+                                    prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                    check=gates.bridge_check(claim_ids, bool(t.learning.read_claims)),
+                                    meta={"step": "plan_bridges", "quote_text": t.text, "claim_ids": sorted(claim_ids)},
+                                    min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        return {"bridges": b.model_dump()}
 
     async def draft(state, ctx):
-        t = ra.ReadingTaskInput.model_validate(state["task"])
-        fields = {**ra.task_fields(t), "teaching_plan": ra.plan_text(state.get("plan")), "supplements": supplements_text(state)}
-        msg = render(prompts(state)["reading_draft"], fields)
-        d, _ = await run_structured(ctx, [HumanMessage(content=msg)], ra.GuideDraft, task="guide", node="draft",
-                                    prompt_version=t.prompt_bundle_hash, meta={"step": "draft", "quote_text": t.text},
-                                    source_ids=t.block_ids, min_max_tokens=ra.GUIDE_MAX_TOKENS,
-                                    min_context_tokens=ra.SUPPLEMENT_CONTEXT_TOKENS if state.get("supplements") else ra.GUIDE_CONTEXT_TOKENS)
+        t = task(state)
+        msg, rec = await prompt_for(ctx, state, "draft", "reading_body",
+                                    ("quote_text", "claims", "bridges", "chinese_text", "supplements", "prev_points", "qa_context"),
+                                    {}, ra.GUIDE_MAX_TOKENS)
+        d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", node="draft",
+                                    prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                    meta={"step": "draft", "quote_text": t.text, "claims": state["verified"]["claims"]},
+                                    min_max_tokens=ra.GUIDE_MAX_TOKENS, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         return {"draft": d.model_dump()}
 
-    def validate(state: GuideState) -> dict:
-        t = ra.ReadingTaskInput.model_validate(state["task"])
-        fs = ra.validate_draft(t, ra.GuideDraft.model_validate(state["draft"]))
-        budget = CallBudget.from_dict(state["budget"])
-        # a revision needs its own call plus a re-review
-        can_revise = budget.can("revision") and budget.calls + 2 <= budget.max_calls
-        decision = ra.decide(fs, revised=state.get("revised", False), can_revise=can_revise)
-        return {"findings": [f.model_dump() for f in fs], "decision": "review" if decision == "pass" else decision}
+    def claims_of(state) -> list[SourceClaim]:
+        return [SourceClaim.model_validate(c) for c in state["verified"]["claims"]]
 
-    async def review(state, ctx):
-        t = ra.ReadingTaskInput.model_validate(state["task"])
+    def gate2(state: GuideState) -> dict:
+        """Program checks of the 主要正文 alone; a confirmed program fact goes straight to revision."""
+        t = task(state)
         d = state["draft"]
-        fields = {**ra.task_fields(t), "teaching_plan": ra.plan_text(state.get("plan")),
-                  "chinese_text": d.get("chinese_text") or "（原文是中文，無）", "guide": d["guide"],
-                  "supplement_notes": "\n".join(f"- {x}" for x in d.get("supplement_notes") or []) or "（無）"}
-        msg = render(prompts(state)["reading_review"], fields)
-        r, _ = await run_structured(ctx, [HumanMessage(content=msg)], ra.ReviewResult, task="guide", node="review",
-                                    prompt_version=t.prompt_bundle_hash,
-                                    meta={"step": "review", "quote_text": t.text, "draft": d["guide"]},
-                                    # issues quote source and draft; 1024 tokens truncated the JSON on qwen3-vl:4b
-                                    source_ids=t.block_ids, min_max_tokens=ra.GUIDE_MAX_TOKENS,
-                                    min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
-        program = [ra.Finding.model_validate(f) for f in state.get("findings") or []]
-        fs = program + ra.review_findings(r, d)
-        can_revise = ctx.budget.can("revision") and ctx.budget.calls + 2 <= ctx.budget.max_calls
-        decision = ra.decide(fs, revised=state.get("revised", False), can_revise=can_revise)
-        # after the one revision, "missing" claims that still block are checked by extraction (one call)
-        if decision == "fail" and ra.to_verify(fs) and ctx.budget.calls < ctx.budget.max_calls:
-            decision = "verify"
+        fs = gates.gate2_program(t.text, d["guide"], claims_of(state), BridgePlan.model_validate(state.get("bridges") or {}),
+                                 d.get("bridges_used") or [], t)
+        confirmed = [f for f in fs if f.severity == "major" and f.status == "confirmed"]
+        budget = CallBudget.from_dict(state["budget"])
+        decision = "audit"
+        if confirmed:
+            decision = "revise" if state.get("body_revisions", 0) < MAX_BODY_REVISIONS and can(budget, 2) else "fail"
         return {"findings": [f.model_dump() for f in fs], "decision": decision}
 
+    def judged(state, budget: CallBudget, fs: list[ra.Finding], *, allow_verify: bool) -> str:
+        revs = state.get("body_revisions", 0)
+        return ra.decide(fs, revised=revs >= MAX_BODY_REVISIONS, can_revise=can(budget, 2),
+                         can_verify=allow_verify and can(budget, 1) and state.get("verified_for") != revs)
+
+    async def body_audit(state, ctx):
+        t = task(state)
+        d = state["draft"]
+        claims = claims_of(state)
+        bridges = BridgePlan.model_validate(state.get("bridges") or {})
+        ids = {"claims": [c.id for c in claims], "bridges": [b.id for b in bridges.bridges]}
+        out = template(ids, {"claims": {"verdict": "covered", "guide_quote": "…", "note": ""},
+                             "bridges": {"verdict": "ok", "guide_quote": "…", "note": ""}},
+                       {"additions": [], "uncovered_source": [], "coherence": "pass", "coherence_note": ""})
+        msg, rec = await prompt_for(ctx, state, "body_audit", "reading_body_audit",
+                                    ("quote_text", "supplements", "claims", "bridges"),
+                                    {"guide": d["guide"], "output_template": out}, ra.GUIDE_MAX_TOKENS)
+        a, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyAudit, task="guide", node="body_audit",
+                                    prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                    check=gates.body_audit_check(claims, bridges),
+                                    json_schema=gates.exact_ids_schema(BodyAudit, ids),
+                                    meta={"step": "body_audit", "quote_text": t.text, "guide": d["guide"],
+                                          "claims": state["verified"]["claims"], "bridge_ids": [b.id for b in bridges.bridges]},
+                                    min_max_tokens=ra.GUIDE_MAX_TOKENS, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        program = [ra.Finding.model_validate(f) for f in state.get("findings") or [] if f["origin"] == "program"]
+        fs = program + gates.coverage_findings(t.text, d["guide"], claims, bridges, a)
+        return {"findings": [f.model_dump() for f in fs], "audit": a.model_dump(),
+                "decision": judged(state, ctx.budget, fs, allow_verify=True)}
+
     async def verify(state, ctx):
-        t = ra.ReadingTaskInput.model_validate(state["task"])
+        t = task(state)
         d = state["draft"]
         fs = [ra.Finding.model_validate(f) for f in state["findings"]]
         idx = ra.to_verify(fs)
-        claims = "\n".join(f"{k + 1}. {fs[i].source_excerpt or fs[i].detail}" for k, i in enumerate(idx))
-        fields = {**ra.task_fields(t), "chinese_text": d.get("chinese_text") or "（原文是中文，無）", "guide": d["guide"],
-                  "claims": claims}
-        msg = render(prompts(state)["reading_verify"], fields)
+        extra = {"chinese_text": "（這項核對只看主要正文）", "guide": d["guide"], "claims": ra.verify_items_text(fs, idx)}
+        out_tokens = min(4096, 512 + 320 * len(idx))
+        msg, rec = await prompt_for(ctx, state, "verify", "reading_verify", ("quote_text",), extra, out_tokens)
         v, _ = await run_structured(ctx, [HumanMessage(content=msg)], ra.VerifyResult, task="guide", node="verify",
-                                    prompt_version=t.prompt_bundle_hash, meta={"step": "verify", "quote_text": t.text},
-                                    source_ids=t.block_ids, min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS,
-                                    allow_fix=False)
-        fs = ra.apply_verify(fs, idx, v, d)
-        return {"findings": [f.model_dump() for f in fs],
-                "decision": ra.decide(fs, revised=True, can_revise=False)}
+                                    prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                    meta={"step": "verify", "quote_text": t.text}, allow_fix=False,
+                                    min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        fs = ra.apply_verify(fs, idx, v, d, t.text)
+        return {"findings": [f.model_dump() for f in fs], "verified_for": state.get("body_revisions", 0),
+                "decision": judged(state, ctx.budget, fs, allow_verify=False)}
 
-    async def revise(state, ctx):
-        t = ra.ReadingTaskInput.model_validate(state["task"])
+    async def revise_body(state, ctx):
+        t = task(state)
         ctx.budget.charge("revision")
         majors = [ra.Finding.model_validate(f) for f in state["findings"] if f["severity"] == "major"]
-        fields = {**ra.task_fields(t), "issues": ra.findings_text(majors), "draft_json": ra.draft_json(state["draft"])}
-        msg = render(prompts(state)["reading_revise"], fields)
-        d, _ = await run_structured(ctx, [HumanMessage(content=msg)], ra.GuideDraft, task="guide", node="revise",
-                                    prompt_version=t.prompt_bundle_hash,
-                                    meta={"step": "revise", "quote_text": t.text, "issues": [f.code for f in majors]},
-                                    source_ids=t.block_ids, min_max_tokens=ra.GUIDE_MAX_TOKENS,
-                                    min_context_tokens=ra.GUIDE_CONTEXT_TOKENS, purpose="revision")
-        new = d.model_dump()
-        if not (new.get("chinese_text") or "").strip() and (state["draft"].get("chinese_text") or "").strip():
-            new["chinese_text"] = state["draft"]["chinese_text"]   # a revision fixes the issues, it does not drop the 中文課文
-        return {"draft": new, "revised": True,
-                "history": [{"draft": state["draft"], "findings": state["findings"]}]}
+        extra = {"issues": ra.findings_text(majors), "draft_json": json.dumps(state["draft"], ensure_ascii=False)}
+        msg, rec = await prompt_for(ctx, state, "revise_body", "reading_body_revise",
+                                    ("quote_text", "claims", "bridges", "supplements"), extra, ra.GUIDE_MAX_TOKENS)
+        d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", node="revise_body",
+                                    prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                    purpose="revision", meta={"step": "revise_body", "quote_text": t.text,
+                                                              "claims": state["verified"]["claims"],
+                                                              "issues": [f.code for f in majors]},
+                                    min_max_tokens=ra.GUIDE_MAX_TOKENS, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        return {"draft": d.model_dump(), "body_revisions": state.get("body_revisions", 0) + 1,
+                "history": [{"stage": "body", "draft": state["draft"], "findings": state["findings"]}]}
 
     def accept(state: GuideState) -> dict:
-        t = state["task"]
-        d = state["draft"]
-        minors = [f for f in state.get("findings") or [] if f["severity"] == "minor"]
+        t, v, d = state["task"], state["verified"], state["draft"]
+        fs = [ra.Finding.model_validate(f) for f in state.get("findings") or []]
+        bridges = BridgePlan.model_validate(state.get("bridges") or {})
+        g2 = gates.gate2_result(claims_of(state), bridges, fs)
+        minors = [f.model_dump() for f in fs if f.severity == "minor"]
         b = state["budget"]
-        refs = list(t["block_ids"]) + sorted({u for s in state.get("supplements") or [] if s["ok"]
-                                               for u in (s["args"].get("unit_ids") or [s["args"].get("unit_id")]) if u})
-        return {"status": "accepted", "artifact": {
-            **{k: d.get(k) for k in ("chinese_text", "guide", "key_points", "check", "supplement_notes", "limits")},
-            "unit_id": t["unit_id"], "source_refs": refs,
+        return {"status": "accepted", "gate2": g2.model_dump(), "artifact": {
+            "chinese_text": v.get("chinese_text"), "guide": d["guide"], "key_points": d.get("key_points") or [],
+            "check": d.get("check") or "", "limits": sorted(set((d.get("limits") or []) + (v.get("limits") or []))),
+            "supplement_notes": [x.content for x in bridges.bridges if x.boundary == "supplement"],
+            "source_claims": v["claims"], "verified_source_key": v["key"], "gate1": v["gate1"], "gate2": g2.model_dump(),
+            "coverage": (state.get("audit") or {}).get("claims"),
+            "bridges": bridges.model_dump(), "bridges_used": d.get("bridges_used") or [],
+            "unit_id": t["unit_id"], "source_refs": list(t["block_ids"]) + supplement_ids(state),
+            "context_status": state.get("context_status"),
             "review_status": "passed_with_warnings" if minors else "passed", "warnings": minors,
-            "revised": state.get("revised", False), "prompt_version": t["prompt_bundle_hash"],
-            "model_config_hash": t["model_config_hash"], "workflow_version": ra.READING_WORKFLOW_VERSION,
+            "revised": state.get("body_revisions", 0) > 0 or state.get("source_revisions", 0) > 0,
+            "prompt_version": t["prompt_bundle_hash"], "model_config_hash": t["model_config_hash"],
+            "workflow_version": ra.READING_WORKFLOW_VERSION, "contract_version": CONTRACT_VERSION,
+            "learning_hash": task(state).learning.hash,
             "calls": b["calls"], "attempt": t["attempt"], "agent": "langgraph"}}
 
-    def fail(state: GuideState) -> dict:
+    def hold(state: GuideState) -> dict:
+        """Not published: the understanding / draft and the reasons stay in the state (and in a rejected artifact)."""
         if state.get("status") == "failed" and state.get("error"):
             return {}
+        if state.get("verified") is None:
+            failing = [c for c in (state.get("gate1") or {}).get("checks") or [] if c["status"] in ("fail", "unverified")]
+            kinds = {c["kind"] for c in failing}
+            code = ("notation_unverified" if kinds == {"notation"} else "context_missing" if kinds == {"context"}
+                    else "source_unverified")
+            return {"status": "failed", "error": {"code": code, "detail": "來源理解沒有通過檢查：" +
+                                                  "；".join(c["detail"] for c in failing)[:400]}}
         majors = [f for f in state.get("findings") or [] if f["severity"] == "major"]
         return {"status": "failed", "error": {"code": "quality_check_failed",
-                                              "detail": "導讀草稿沒有通過檢查：" + "；".join(f["detail"] for f in majors)[:400]}}
+                                              "detail": "導讀正文沒有通過檢查：" + "；".join(f["detail"] for f in majors)[:400]}}
 
     g = StateGraph(GuideState)
-    g.add_node("analyze", model_node("analyze", analyze))
-    g.add_node("context", model_node("context", context))
-    g.add_node("draft", model_node("draft", draft))
-    g.add_node("validate", validate)
-    g.add_node("review", model_node("review", review))
-    g.add_node("revise", model_node("revise", revise))
-    g.add_node("verify", model_node("verify", verify))
-    g.add_node("accept", accept)
-    g.add_node("fail", fail)
+    g.add_node("prepare", prepare)
+    for name, fn in (("symbols", symbols), ("understand", understand), ("context", context), ("source_audit", source_audit),
+                     ("revise_source", revise_source), ("plan_bridges", plan_bridges), ("draft", draft),
+                     ("body_audit", body_audit), ("verify", verify), ("revise_body", revise_body)):
+        g.add_node(name, model_node(name, fn))
+    for name, fn in (("gate1", gate1), ("gate2", gate2), ("accept", accept), ("hold", hold)):
+        g.add_node(name, fn)
 
-    def ok_or_fail(nxt: str):
-        return lambda s: "fail" if s.get("status") == "failed" else nxt
+    def failed_or(route):
+        return lambda s: "hold" if s.get("status") == "failed" else route(s)
 
-    g.add_edge(START, "analyze")
-    g.add_conditional_edges("analyze", ok_or_fail("context"), ["context", "fail"])
-    g.add_conditional_edges("context", ok_or_fail("draft"), ["draft", "fail"])
-    g.add_conditional_edges("draft", ok_or_fail("validate"), ["validate", "fail"])
-    g.add_conditional_edges("validate", lambda s: s["decision"], {"review": "review", "revise": "revise", "fail": "fail"})
-    g.add_conditional_edges("review", lambda s: "fail" if s.get("status") == "failed" else
-                            {"pass": "accept", "revise": "revise", "fail": "fail", "verify": "verify"}[s["decision"]],
-                            ["accept", "revise", "fail", "verify"])
-    g.add_conditional_edges("verify", lambda s: "accept" if s.get("status") != "failed" and s["decision"] == "pass" else "fail",
-                            ["accept", "fail"])
-    g.add_conditional_edges("revise", ok_or_fail("validate"), ["validate", "fail"])
+    judge = {"pass": "accept", "revise": "revise_body", "verify": "verify", "fail": "hold"}
+    g.add_edge(START, "prepare")
+    g.add_conditional_edges("prepare", lambda s: "plan_bridges" if s.get("verified") else
+                            "symbols" if needs_symbols(s) else "understand", ["plan_bridges", "symbols", "understand"])
+    g.add_conditional_edges("symbols", failed_or(lambda s: "understand"), ["understand", "hold"])
+    g.add_conditional_edges("understand", failed_or(lambda s: "context" if wants_model_context(s) else "gate1"),
+                            ["context", "gate1", "hold"])
+    g.add_conditional_edges("context", failed_or(lambda s: "understand" if s.get("understanding") is None else "gate1"),
+                            ["understand", "gate1", "hold"])
+    g.add_conditional_edges("gate1", lambda s: {"pass": "plan_bridges", "audit": "source_audit", "revise": "revise_source",
+                                                "hold": "hold"}[s["decision"]],
+                            ["plan_bridges", "source_audit", "revise_source", "hold"])
+    g.add_conditional_edges("source_audit", failed_or(lambda s: "gate1"), ["gate1", "hold"])
+    g.add_conditional_edges("revise_source", failed_or(lambda s: "gate1"), ["gate1", "hold"])
+    g.add_conditional_edges("plan_bridges", failed_or(lambda s: "draft"), ["draft", "hold"])
+    g.add_conditional_edges("draft", failed_or(lambda s: "gate2"), ["gate2", "hold"])
+    g.add_conditional_edges("gate2", lambda s: {"audit": "body_audit", "revise": "revise_body", "fail": "hold"}[s["decision"]],
+                            ["body_audit", "revise_body", "hold"])
+    g.add_conditional_edges("body_audit", failed_or(lambda s: judge[s["decision"]]), ["accept", "revise_body", "verify", "hold"])
+    g.add_conditional_edges("verify", failed_or(lambda s: judge.get(s["decision"], "hold") if s["decision"] != "verify" else "hold"),
+                            ["accept", "revise_body", "hold"])
+    g.add_conditional_edges("revise_body", failed_or(lambda s: "gate2"), ["gate2", "hold"])
     g.add_edge("accept", END)
-    g.add_edge("fail", END)
+    g.add_edge("hold", END)
     return g.compile(checkpointer=checkpointer)

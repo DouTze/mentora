@@ -8,25 +8,30 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from ..llm.runtime import stable_hash
 from ..tutor.reading import is_chinese
+from .contracts import LearningSnapshot
+from .markers import parity
 
-READING_WORKFLOW_VERSION = "reading-graph-v1"
+READING_WORKFLOW_VERSION = "reading-graph-v2"
 GUIDE_MAX_TOKENS = 2048
 GUIDE_CONTEXT_TOKENS = 8192
 SUPPLEMENT_CONTEXT_TOKENS = 12288
 
 MAJOR = {"wrong_formula", "missing_condition", "unsupported_claim", "missing_key_claim", "meaning_changed",
-         "followed_injection", "broken_math", "missing_chinese_text", "empty_guide"}
-MINOR = {"narration", "unclear", "verbose", "formula_paraphrased", "short_guide", "review_unverified", "supplement_flagged"}
+         "followed_injection", "broken_math", "missing_chinese_text", "empty_guide", "formula_not_verbatim",
+         "depends_on_chinese_text", "redirect_to_source", "process_leak", "review_failed_check",
+         "coverage_unconfirmed", "bridge_missing", "bridge_incorrect", "unapproved_supplement", "incoherent",
+         "context_missing"}
+MINOR = {"narration", "unclear", "verbose", "formula_paraphrased", "short_guide", "review_withdrawn", "formula_rewritten",
+         "bridge_questioned", "review_citation_invalid", "context_outside_range"}
 MISSING_CODES = {"missing_condition", "missing_key_claim"}
 DRAFT_CODES = {"unsupported_claim", "meaning_changed", "wrong_formula", "followed_injection"}
-COVERED = 0.8   # share of the cited source's character bigrams already present in the draft
-REDIRECT_RE = re.compile(r"請參考原文|回去看原文|原文有更詳細|詳見原文|請見原文|如上所述|前面的對照已經說明")
 # a unit that points at earlier text within its first words ("在這兩個條件下", "上述方法", "These results")
 REFERS_BACK_RE = re.compile(r"^\W{0,2}.{0,6}?(這兩|這三|這些|這個|這種|此一|上述|前述|以上|它們|同樣地|另一方面|第二個|these|this|such|the above|similarly)", re.I)
 
@@ -48,6 +53,10 @@ class ReadingTaskInput(BaseModel):
     model_config_hash: str
     prompt_bundle_hash: str
     attempt: int = 1
+    learning: LearningSnapshot = Field(default_factory=LearningSnapshot)
+    source_kind: str = "md"                      # md | txt | pdf (decides what counts as symbol evidence)
+    depends_on_prev: bool = False                # a protected relation (argument, example …) continues from the previous unit
+    symbol_evidence: dict | None = None          # R5: page / region / font evidence of this unit, if any
 
     @property
     def source_hash(self) -> str:
@@ -55,7 +64,9 @@ class ReadingTaskInput(BaseModel):
 
     @property
     def context_hash(self) -> str:
-        return stable_hash([self.prev_points, [(q.get("question"), q.get("answer")) for q in self.qa_context]])
+        """Everything about the reader the guide depends on (the verified source does not depend on it)."""
+        return stable_hash([self.prev_points, [(q.get("question"), q.get("answer")) for q in self.qa_context],
+                            self.learning.hash])
 
 
 class TeachingPlan(BaseModel):
@@ -80,55 +91,84 @@ class GuideDraft(BaseModel):
 
 IssueCode = Literal["wrong_formula", "missing_condition", "unsupported_claim", "missing_key_claim", "meaning_changed",
                     "followed_injection", "narration", "unclear", "verbose"]
+Target = Literal["guide", "chinese_text"]
+
+# What every review must explicitly report on (R1). A review without a result for each expected check is not a
+# review: it goes back once as a format error and otherwise ends as `review_invalid` (never as "no issues").
+GUIDE_CHECKS = {
+    "guide_coverage": "主要正文本身涵蓋原文所有定義、主張、例子、推理與結論（不看中文課文）",
+    "guide_conditions": "主要正文保留原文的條件、例外、否定、量詞與命題力度（不看中文課文）",
+    "guide_formulas": "主要正文的公式與符號和原文一致（不看中文課文）",
+    "guide_additions": "主要正文新增的內容（含「補充說明」）正確、有依據且必要",
+}
+CHINESE_TEXT_CHECK = {"chinese_text": "中文課文忠實、完整，沒有增刪或改變命題力度"}
+
+
+def expected_checks(has_chinese_text: bool) -> dict[str, str]:
+    return {**GUIDE_CHECKS, **(CHINESE_TEXT_CHECK if has_chinese_text else {})}
 
 
 class ReviewIssue(BaseModel):
     code: IssueCode
+    target: Target
     severity: Literal["major", "minor"] = "minor"
     source_excerpt: str = ""
     draft_excerpt: str = ""
     suggested_fix: str = ""
 
 
+class ReviewCheck(BaseModel):
+    check: str
+    result: Literal["pass", "fail"]
+    evidence: str = ""
+
+
 class ReviewResult(BaseModel):
-    issues: list[ReviewIssue] = Field(default_factory=list)
+    checks: list[ReviewCheck] = Field(min_length=1)
+    issues: list[ReviewIssue]
+
+
+def review_check(expected: dict[str, str]):
+    """Program check for run_structured: each expected check reported exactly once (else one format fix)."""
+    from ..llm.tasks import OutputInvalid
+
+    def check(r: ReviewResult) -> None:
+        got = [c.check for c in r.checks]
+        missing = [k for k in expected if k not in got]
+        extra = sorted({k for k in got if k not in expected})
+        dup = sorted({k for k in got if got.count(k) > 1})
+        if missing or extra or dup:
+            raise OutputInvalid("checks 必須對下列每一項各回報一次 pass 或 fail："
+                                + "、".join(expected) + (f"；缺少 {missing}" if missing else "")
+                                + (f"；不存在的項目 {extra}" if extra else "") + (f"；重複 {dup}" if dup else ""))
+    return check
 
 
 class VerifyCheck(BaseModel):
     item: int
-    covered: bool = False
-    draft_quote: str = ""
+    verdict: Literal["problem", "no_problem"]
+    guide_quote: str = ""
+    reason: str = ""
 
 
 class VerifyResult(BaseModel):
-    checks: list[VerifyCheck] = Field(default_factory=list)
-
-
-def to_verify(findings: list["Finding"]) -> list[int]:
-    """Indices of review findings the extraction check can settle: blocking "missing" claims from the reviewer."""
-    return [i for i, f in enumerate(findings) if f.origin == "review" and f.severity == "major" and f.code in MISSING_CODES]
-
-
-def apply_verify(findings: list["Finding"], idx: list[int], v: VerifyResult, draft: GuideDraft | dict) -> list["Finding"]:
-    """A "missing" claim is withdrawn only when the model copies a sentence that really is in the draft."""
-    d = draft.model_dump() if isinstance(draft, BaseModel) else draft
-    body = (d.get("guide") or "") + "\n" + (d.get("chinese_text") or "")
-    out = list(findings)
-    for c in v.checks:
-        k = c.item - 1
-        if 0 <= k < len(idx) and c.covered and len(c.draft_quote.strip()) >= 6 and coverage(c.draft_quote, body) >= 0.9:
-            f = out[idx[k]]
-            out[idx[k]] = f.model_copy(update={"code": "review_unverified", "severity": "minor",
-                                                "detail": f.detail + f"（核對：草稿已寫到「{c.draft_quote[:60]}」）"})
-    return out
+    checks: list[VerifyCheck] = Field(min_length=1)
 
 
 class Finding(BaseModel):
-    """A validation or review finding with the severity the program assigned."""
+    """A validation or review finding with the severity the program assigned.
+
+    status: confirmed = the evidence stands (program fact, or a reviewer claim whose citations check out);
+    unconfirmed = a major claim the program could not tie to the texts (invalid citation, a formula that is not
+    verbatim but may be an equivalent rewrite, a strength marker that looks lost). Unconfirmed majors still block
+    publication until a focused re-check (verify) or a revision settles them."""
     code: str
     severity: Literal["major", "minor"]
     detail: str
-    origin: Literal["program", "review"]
+    origin: Literal["program", "review", "verify"]
+    target: Literal["guide", "chinese_text", "source"] = "guide"
+    status: Literal["confirmed", "unconfirmed"] = "confirmed"
+    item: str = ""                 # the claim / bridge id the finding is about (Gate 2), if any
     source_excerpt: str = ""
     draft_excerpt: str = ""
     suggested_fix: str = ""
@@ -138,94 +178,228 @@ def severity_of(code: str) -> Literal["major", "minor"]:
     return "major" if code in MAJOR else "minor"
 
 
-def _bigrams(text: str) -> set[str]:
-    t = re.sub(r"[\s，。、；：！？,.;:!?「」『』（）()\"'*`$]+", "", text or "").lower()
-    return {t[i:i + 2] for i in range(len(t) - 1)}
+def norm_text(text: str) -> str:
+    """Whitespace- and width-insensitive form used to locate a quotation (not to judge meaning)."""
+    t = unicodedata.normalize("NFKC", text or "")
+    return re.sub(r"[\s*_`>]+", "", t)
 
 
-def coverage(excerpt: str, draft: str) -> float:
-    """Share of the excerpt's character bigrams that also occur in the draft (1.0 = all there)."""
-    b = _bigrams(excerpt)
-    return len(b & _bigrams(draft)) / len(b) if b else 0.0
+def contains_quote(haystack: str, quote: str, min_chars: int = 2) -> bool:
+    q = norm_text(quote).strip("….。，,;；:：「」\"'")
+    return len(q) >= min_chars and q in norm_text(haystack)
 
 
-def _in_supplement(excerpt: str, guide: str) -> bool:
-    for para in re.split(r"\n\s*\n", guide or ""):
-        if para.lstrip("*_ ").startswith("補充說明") and coverage(excerpt, para) >= COVERED:
-            return True
-    return False
+def expand_quote(text: str, fragment: str, min_chars: int = 6) -> str:
+    """The whole sentence(s) of `text` that contain the quoted fragment ("" if the fragment is not there). An
+    auditor may quote a short locating fragment; strength markers and formulas are checked on the full sentence."""
+    if not contains_quote(text, fragment, min_chars):
+        return ""
+    from .gates import source_segments
+    q = norm_text(fragment).strip("….。，,;；:：「」\"'")
+    sents = [x for _, x in source_segments(text)]
+    for n in range(1, len(sents) + 1):
+        for i in range(len(sents) - n + 1):
+            joined = " ".join(sents[i:i + n])
+            if q in norm_text(joined):
+                return joined
+    return fragment
 
 
-def review_findings(r: ReviewResult, draft: GuideDraft | dict | None = None) -> list[Finding]:
-    """Review issues with the severity the program assigns. A small reviewer often cites the whole paragraph as
-    "missing" while the draft repeats it, or quotes draft text that is not there; such claims are checked against
-    the texts and kept as `review_unverified` reminders instead of blocking publication. A flagged passage inside a
-    labelled 補充說明 paragraph becomes `supplement_flagged` (recorded, shown to reviewers, not blocking)."""
-    d = draft.model_dump() if isinstance(draft, BaseModel) else (draft or {})
-    body = (d.get("guide") or "") + "\n" + (d.get("chinese_text") or "")
+def target_text(d: dict, target: str) -> str:
+    return (d.get("chinese_text") or "") if target == "chinese_text" else (d.get("guide") or "")
+
+
+VERIFIABLE = MISSING_CODES | {"meaning_changed", "wrong_formula", "formula_not_verbatim", "unsupported_claim",
+                              "followed_injection", "review_failed_check", "coverage_unconfirmed"}
+
+
+def review_findings(r: ReviewResult, draft: GuideDraft | dict, source: str) -> list[Finding]:
+    """Review issues with the severity the program assigns. Each issue names the field it is about; its citations
+    are looked up only in the source and in *that* field, so text in the 中文課文 never answers a claim about the
+    主要正文. A citation that is not where the reviewer says makes the issue `unconfirmed` (it still blocks, and is
+    re-checked) — neither "the draft is fine" nor "the draft is wrong" follows from an invalid citation."""
+    d = draft.model_dump() if isinstance(draft, BaseModel) else draft
     out = []
     for i in r.issues:
-        code, note = i.code, ""
-        if draft is not None:
-            if i.code in MISSING_CODES and (not i.source_excerpt.strip() or coverage(i.source_excerpt, body) >= COVERED):
-                code, note = "review_unverified", f"（檢查稱 {i.code}，但引用的原文內容已在草稿中）"
-            elif i.code in DRAFT_CODES and i.draft_excerpt.strip() and coverage(i.draft_excerpt, body) < COVERED:
-                code, note = "review_unverified", f"（檢查稱 {i.code}，但引用的草稿片段不在草稿中）"
-            elif i.code == "unsupported_claim" and _in_supplement(i.draft_excerpt, d.get("guide") or ""):
-                code, note = "supplement_flagged", "（標示為補充說明的內容被檢查指出）"
-        out.append(Finding(code=code, severity=severity_of(code), detail=(i.suggested_fix or i.code) + note,
-                           origin="review", source_excerpt=i.source_excerpt, draft_excerpt=i.draft_excerpt,
-                           suggested_fix=i.suggested_fix))
+        field = target_text(d, i.target)
+        notes = []
+        if i.source_excerpt.strip() and not contains_quote(source, i.source_excerpt):
+            notes.append("引用的原文不在原文中")
+        if not i.source_excerpt.strip() and not i.draft_excerpt.strip():
+            notes.append("沒有引用任何原文或草稿")
+        elif i.code in MISSING_CODES and not i.source_excerpt.strip():
+            notes.append("沒有指出漏掉的原文")
+        if i.code in DRAFT_CODES and i.draft_excerpt.strip() and not contains_quote(field, i.draft_excerpt):
+            notes.append("引用的草稿片段不在" + ("中文課文" if i.target == "chinese_text" else "主要正文"))
+        sev = severity_of(i.code)
+        out.append(Finding(code=i.code, severity=sev, detail=(i.suggested_fix or i.code) + (f"（{'；'.join(notes)}）" if notes else ""),
+                           origin="review", target=i.target, status="unconfirmed" if notes and sev == "major" else "confirmed",
+                           source_excerpt=i.source_excerpt, draft_excerpt=i.draft_excerpt, suggested_fix=i.suggested_fix))
+    flagged = {f.target for f in out if f.severity == "major"}
+    for c in r.checks:   # a failed check must not disappear because the reviewer listed no issue for it
+        target = "chinese_text" if c.check == "chinese_text" else "guide"
+        if c.result == "fail" and target not in flagged:
+            out.append(Finding(code="review_failed_check", severity="major", origin="review", target=target,
+                               detail=f"檢查項目 {c.check} 未通過：{c.evidence or '（未說明）'}", suggested_fix=c.evidence))
+    return out
+
+
+def to_verify(findings: list[Finding]) -> list[int]:
+    """Blocking findings a focused re-check may settle: reviewer claims, unconfirmed program flags."""
+    return [k for k, f in enumerate(findings) if f.severity == "major" and f.code in VERIFIABLE
+            and (f.origin == "review" or f.status == "unconfirmed")]
+
+
+def verify_items_text(findings: list[Finding], idx: list[int]) -> str:
+    lines = []
+    for k, i in enumerate(idx, 1):
+        f = findings[i]
+        where = "中文課文" if f.target == "chinese_text" else "主要正文"
+        lines.append(f"{k}. [{f.code}｜{where}] {f.detail}" + (f"（原文：{f.source_excerpt}）" if f.source_excerpt else "")
+                     + (f"（被指出的片段：{f.draft_excerpt}）" if f.draft_excerpt else ""))
+    return "\n".join(lines)
+
+
+def apply_verify(findings: list[Finding], idx: list[int], v: VerifyResult, draft: GuideDraft | dict, source: str) -> list[Finding]:
+    """A blocking finding is withdrawn only with evidence the program can check:
+    - "missing" / strength / formula claims: the re-check copies the passage of the *same field* that covers it,
+      the passage is really there, keeps every strength marker of the cited source (markers.parity) and every
+      formula of the cited source;
+    - a claim about a draft passage that is not in the draft (phantom citation): the re-check finds no problem.
+    A reviewer's well-cited "unsupported" or "meaning changed" claim is not withdrawn by a re-check alone; it needs
+    a revision. Everything else stays as it was (a re-check saying "problem" confirms it)."""
+    d = draft.model_dump() if isinstance(draft, BaseModel) else draft
+    out = list(findings)
+    for c in v.checks:
+        k = c.item - 1
+        if not 0 <= k < len(idx):
+            continue
+        f = out[idx[k]]
+        if c.verdict == "problem":
+            out[idx[k]] = f.model_copy(update={"status": "confirmed", "detail": f.detail + (f"（核對：{c.reason[:80]}）" if c.reason else "")})
+            continue
+        field = target_text(d, f.target)
+        src = f.source_excerpt if f.source_excerpt and contains_quote(source, f.source_excerpt) else ""
+        phantom = f.code in DRAFT_CODES and f.draft_excerpt and not contains_quote(field, f.draft_excerpt)
+        why = ""
+        if phantom:
+            ok = True
+        elif f.code in ("unsupported_claim", "followed_injection", "meaning_changed") and f.status == "confirmed":
+            ok, why = False, "有效引用的新增／改義問題需經修訂處理"
+        elif f.code == "formula_not_verbatim":   # the guide's own (rewritten) formula must be quoted from the guide
+            ok = contains_quote(field, c.guide_quote, 3) and "$" in c.guide_quote
+            why = "" if ok else "沒有從主要正文複製出改寫後的公式"
+        else:
+            full = expand_quote(field, c.guide_quote, 6)
+            quoted = bool(full)
+            lost = parity(src, full) if src and quoted else []
+            dmath, imath = source_formulas(src)
+            qn = _norm_math(full)
+            missing_math = [m for m in dmath + imath if _norm_math(m) not in qn]
+            ok = quoted and not lost and not missing_math and bool(src)
+            why = ("引用的句子不在" + ("中文課文" if f.target == "chinese_text" else "主要正文") if not quoted else
+                   "；".join(lost) if lost else f"缺少公式 {missing_math}" if missing_math else "沒有可核對的原文依據" if not ok else "")
+        if ok:
+            out[idx[k]] = f.model_copy(update={"code": "review_withdrawn" if f.origin == "review" else "formula_rewritten",
+                                                "severity": "minor", "status": "confirmed",
+                                                "detail": f.detail + f"（核對撤回：{(c.guide_quote or c.reason)[:60]}）"})
+        else:
+            out[idx[k]] = f.model_copy(update={"status": "confirmed", "detail": f.detail + f"（核對未能撤回：{why}）"})
     return out
 
 
 # -- program validation -------------------------------------------------------------
 
 def _norm_math(s: str) -> str:
-    return re.sub(r"\s+", "", s)
+    """Cosmetic KaTeX differences only: spacing commands, \\left/\\right, \\dfrac/\\tfrac, braces around one token."""
+    t = re.sub(r"\\[,;:!]|\\(?:left|right|displaystyle)\b|\s+", "", s or "")
+    t = re.sub(r"\\[dt]frac", r"\\frac", t)
+    return re.sub(r"([_^])\{(\\?[A-Za-z0-9])\}", r"\1\2", t)
 
 
 def source_formulas(text: str) -> tuple[list[str], list[str]]:
-    display = re.findall(r"\$\$(.+?)\$\$", text, re.S)
-    rest = re.sub(r"\$\$.+?\$\$", " ", text, flags=re.S)
+    display = re.findall(r"\$\$(.+?)\$\$", text or "", re.S)
+    rest = re.sub(r"\$\$.+?\$\$", " ", text or "", flags=re.S)
     inline = re.findall(r"(?<!\$)\$([^$\n]+?)\$(?!\$)", rest)
     return [_norm_math(d) for d in display if d.strip()], [_norm_math(i) for i in inline if i.strip()]
 
 
-def validate_draft(task: ReadingTaskInput, d: GuideDraft) -> list[Finding]:
-    out: list[Finding] = []
-    body = (d.guide or "") + "\n" + (d.chinese_text or "")
-    bn = _norm_math(body)
-    if not d.guide.strip() or len(d.guide.strip()) < 10:
-        out.append(Finding(code="empty_guide", severity="major", detail="主要正文是空的", origin="program"))
-    if not is_chinese(task.text) and not (d.chinese_text or "").strip():
-        out.append(Finding(code="missing_chinese_text", severity="major",
-                           detail="原文不是中文，chinese_text 必須是忠實的中文課文", origin="program"))
-    display, inline = source_formulas(task.text)
+def _is_real_math(f: str) -> bool:
+    return any(ch in f for ch in "\\=^_<>+-*/") or len(f) > 3
+
+
+DEPENDS_ON_CN_RE = re.compile(r"如上所述|前面的對照|上面的中文課文|中文課文(?:已經|中)|對照已經說明|上述譯文")
+REDIRECT_RE = re.compile(r"請參考原文|回去看原文|原文有更詳細|詳見原文|請見原文|請對照原文")
+PROCESS_RE = re.compile(r"本次修訂|這次修訂|根據你的要求|依照(?:你的|使用者的)?要求|為了回應|依指示|這裡補上剛才|修正後的版本|以下為修正|審稿")
+
+
+def _check_formulas(src: str, field_text: str, target: str, origin_code: str) -> list[Finding]:
+    out = []
+    fn = _norm_math(field_text)
+    display, inline = source_formulas(src)
+    where = "中文課文" if target == "chinese_text" else "主要正文"
+    # only a guide that writes math at all can hold an equivalent rewrite worth re-checking
+    maybe_rewritten = target == "guide" and "$" in field_text
+    code = origin_code if maybe_rewritten else "wrong_formula"
     for f in display:
-        if f not in bn:
-            out.append(Finding(code="wrong_formula", severity="major", detail=f"獨立公式沒有原樣保留：$${f}$$",
-                               origin="program", source_excerpt=f))
+        if f not in fn:
+            out.append(Finding(code=code, severity="major", status="unconfirmed" if maybe_rewritten else "confirmed",
+                               target=target, origin="program", source_excerpt=f"$${f}$$",
+                               detail=f"{where}沒有原樣保留獨立公式：$${f}$$"))
     for f in inline:
-        if f not in bn:
-            real = "\\" in f or "=" in f or "^" in f or "_" in f
-            out.append(Finding(code="wrong_formula" if real else "formula_paraphrased", severity="major" if real else "minor",
-                               detail=f"行內公式沒有原樣保留：${f}$", origin="program", source_excerpt=f))
-    if (d.guide.count("$") - 2 * d.guide.count("$$")) % 2 or d.guide.count("$$") % 2:
-        out.append(Finding(code="broken_math", severity="major", detail="正文的 $ 數量不成對，公式會無法顯示", origin="program"))
-    m = REDIRECT_RE.search(body)
-    if m:
-        out.append(Finding(code="narration", severity="minor", detail=f"不可要求學生回看原文：「{m.group(0)}」", origin="program"))
-    if len(d.guide) < min(80, len(task.text) * 0.3):
-        out.append(Finding(code="short_guide", severity="minor", detail="正文明顯短於原文，可能漏掉內容", origin="program"))
+        if f not in fn:
+            real = _is_real_math(f)
+            out.append(Finding(code=code if real else "formula_paraphrased", severity="major" if real else "minor",
+                               status="unconfirmed" if real and maybe_rewritten else "confirmed", target=target,
+                               origin="program", source_excerpt=f"${f}$", detail=f"{where}沒有原樣保留行內公式：${f}$"))
     return out
 
 
-def decide(findings: list[Finding], *, revised: bool, can_revise: bool) -> Literal["pass", "revise", "fail"]:
+def validate_draft(task: ReadingTaskInput, d: GuideDraft) -> list[Finding]:
+    """Program checks, field by field. The 主要正文 must stand on its own: its formulas are looked up in the
+    guide only, never in the 中文課文. A formula that is not verbatim (after cosmetic KaTeX normalisation) is an
+    *unconfirmed* major finding — an equivalent rewrite can be accepted only through a checked re-check."""
+    out: list[Finding] = []
+    guide = d.guide or ""
+    if len(guide.strip()) < 10:
+        out.append(Finding(code="empty_guide", severity="major", detail="主要正文是空的", origin="program"))
+    out += _check_formulas(task.text, guide, "guide", "formula_not_verbatim")
+    if (guide.count("$") - 2 * guide.count("$$")) % 2 or guide.count("$$") % 2:
+        out.append(Finding(code="broken_math", severity="major", detail="正文的 $ 數量不成對，公式會無法顯示", origin="program"))
+    for rx, code, what in ((DEPENDS_ON_CN_RE, "depends_on_chinese_text", "主要正文不可依賴中文課文"),
+                           (REDIRECT_RE, "redirect_to_source", "主要正文不可要求學生回看原文"),
+                           (PROCESS_RE, "process_leak", "主要正文不可敘述產製或修訂過程")):
+        m = rx.search(guide)
+        if m:
+            out.append(Finding(code=code, severity="major", detail=f"{what}：「{m.group(0)}」", origin="program",
+                               draft_excerpt=m.group(0)))
+    if len(guide) < min(80, len(task.text) * 0.3):
+        out.append(Finding(code="short_guide", severity="minor", detail="正文明顯短於原文，可能漏掉內容", origin="program"))
+    if not is_chinese(task.text):
+        cn = d.chinese_text or ""
+        if not cn.strip():
+            out.append(Finding(code="missing_chinese_text", severity="major", target="chinese_text", origin="program",
+                               detail="原文不是中文，chinese_text 必須是忠實的中文課文"))
+        else:
+            out += _check_formulas(task.text, cn, "chinese_text", "wrong_formula")
+    return out
+
+
+def decide(findings: list[Finding], *, revised: bool, can_revise: bool, can_verify: bool = False) -> Literal["pass", "revise", "verify", "fail"]:
+    """pass: no blocking finding. Confirmed blocking findings are revised once; after that, what a focused re-check
+    can settle goes to verify, the rest fails. Only-unconfirmed findings go to verify first (cheaper than a rewrite)."""
     majors = [f for f in findings if f.severity == "major"]
     if not majors:
         return "pass"
-    return "revise" if (not revised and can_revise) else "fail"
+    confirmed = [f for f in majors if f.status == "confirmed"]
+    verifiable = set(to_verify(findings))
+    if not confirmed and can_verify and verifiable:
+        return "verify"
+    if not revised and can_revise:
+        return "revise"
+    if can_verify and verifiable and all(findings.index(f) in verifiable for f in majors):
+        return "verify"
+    return "fail"
 
 
 CONTEXT_HINT_RE = re.compile(r"前文|前一段|前面|上一段|上述|前述|後文|下一段|指的是|指涉|this refers|previous|earlier")
@@ -267,9 +441,17 @@ def task_fields(t: ReadingTaskInput) -> dict[str, str]:
             "qa_context": qa_text(t.qa_context), "chinese_text_rule": chinese_text_rule({"text": t.text})}
 
 
+def understanding_cn_rule(text: str) -> str:
+    if is_chinese(text):
+        return "這一段原文已經是中文：translations 給空陣列（原文本身就是中文課文）。"
+    return ('這一段原文不是中文：translations **必填**——每一句（S 編號）各一項 {"id":"S1","zh":"…"}，把那一句忠實翻成'
+            "自然的繁體中文，不增不減，保留條件、例外、否定、量詞與命題力度；公式照抄原文的 LaTeX（反斜線完整保留）。")
+
+
 def findings_text(fs: list[Finding]) -> str:
     return "\n".join(f"- [{f.code}] {f.detail}" + (f"（原文：{f.source_excerpt}）" if f.source_excerpt else "")
-                     + (f"（草稿：{f.draft_excerpt}）" if f.draft_excerpt else "") for f in fs)
+                     + (f"（草稿：{f.draft_excerpt}）" if f.draft_excerpt else "")
+                     + (f"→ 修正：{f.suggested_fix}" if f.suggested_fix and f.suggested_fix not in f.detail else "") for f in fs)
 
 
 def draft_json(d: GuideDraft | dict) -> str:

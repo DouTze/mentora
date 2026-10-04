@@ -6,6 +6,8 @@ from .. import config
 from ..llm.runtime import BackendPool, ModelSnapshot
 from ..persistence.repository import Repository
 from ..reading.agent import READING_WORKFLOW_VERSION
+from ..reading.contracts import CONTRACT_VERSION, TaskContract
+from ..reading.pdf_evidence import attach_evidence
 from ..reading.prompts import load_bundle
 from ..reading.segmentation import rules_groups, plan_parts, to_quotes, SEGMENTATION_VERSION
 from ..reading.schemas import SegmentationPlan, SourceUnit
@@ -16,7 +18,12 @@ from .commands import CommandError, new_command_id, payload_hash, validate
 from .learning_graph import STATE_SCHEMA_VERSION, WORKFLOW_VERSION
 
 LEGACY_STAGE = {"segment": "segment", "analyze": "guide", "context": "guide", "draft": "guide", "review": "guide",
-                "revise": "guide", "guide": "guide", "compact": "compact", "generate": "generate"}
+                "revise": "guide", "guide": "guide", "compact": "compact", "generate": "generate",
+                # reading-graph-v2 stages (R3–R6)
+                "symbols": "guide", "understand": "guide", "source_audit": "guide", "revise_source": "guide",
+                "plan_bridges": "guide", "body_audit": "guide", "verify": "guide", "revise_body": "guide",
+                "notes": "compact", "notes_audit": "compact", "notes_revise": "compact",
+                "quiz_generate": "generate", "quiz_audit": "generate"}
 
 
 class WorkflowService:
@@ -25,7 +32,8 @@ class WorkflowService:
         self.db = svc.db
 
     # -- sessions ---------------------------------------------------------------------------
-    def start_from_material(self, material_id: str, start: int, end: int, strategy_id: str) -> dict:
+    def start_from_material(self, material_id: str, start: int, end: int, strategy_id: str, *, depth: str | None = None,
+                            goal: str | None = None, background: str | None = None) -> dict:
         from ..tutor.session import SessionError
         strategy = self.svc.strategies.get(strategy_id)
         if not strategy:
@@ -36,6 +44,10 @@ class WorkflowService:
             snap, blocks = extract_blocks(material_id, material["unit"], start, end, units)
         except SourceError as e:
             raise SessionError(e.code, e.detail) from e
+        if material.get("kind") == "pdf":   # R5: page / bbox / font evidence from the original file
+            pdf_path, _ = self.svc.materials.file_path(material_id)
+            if pdf_path.exists():
+                blocks = attach_evidence(pdf_path, blocks)
         self.repo.save_snapshot(material_id, snap, blocks)
         # until the planner commits, the rule plan stands in (same as the legacy candidate paragraphs)
         groups = rules_groups(blocks)
@@ -51,7 +63,12 @@ class WorkflowService:
         msnap = ModelSnapshot.from_config(model)
         self.pool.seed(msnap, self.svc.registry.backend)   # one adapter (one OpenVINO pipeline) per physical model
         bundle = load_bundle()
-        meta = {"runner": "langgraph", "workflow_version": WORKFLOW_VERSION, "state_schema_version": STATE_SCHEMA_VERSION,
+        contract = TaskContract(scope={"material_id": material_id, "unit": material["unit"], "start": start, "end": end},
+                                source_version=f"{snap['snapshot_id']}@{snap['extraction_version']}",
+                                defaults=[k for k, v in (("depth", depth), ("goal", goal), ("reader_background", background)) if not v])
+        contract = contract.model_copy(update={k: v for k, v in (("depth", depth), ("goal", goal),
+                                                                 ("reader_background", (background or "").strip())) if v})
+        meta = {"task_contract": contract.model_dump(), "contract_version": CONTRACT_VERSION,"runner": "langgraph", "workflow_version": WORKFLOW_VERSION, "state_schema_version": STATE_SCHEMA_VERSION,
                 "reading_workflow_version": READING_WORKFLOW_VERSION, "prompt_bundle": bundle,
                 "model_snapshot": {k: v for k, v in model.items() if k in ModelSnapshot.__dataclass_fields__},
                 "model_config_hash": msnap.config_hash, "snapshot_id": snap["snapshot_id"], "planner": planner,
@@ -114,7 +131,11 @@ class WorkflowService:
                 "failed_node": None if active else ws.get("failed_node"),
                 "runner_active": bool(self.runner and self.runner.active),
                 "workflow_version": m.get("workflow_version"), "prompt_bundle_hash": (m.get("prompt_bundle") or {}).get("hash"),
-                "model_config_hash": m.get("model_config_hash")}
+                "model_config_hash": m.get("model_config_hash"),
+                "reading_workflow_version": m.get("reading_workflow_version"),
+                "task_contract": {k: (m.get("task_contract") or {}).get(k) for k in ("depth", "goal", "reader_background", "defaults")}
+                if m.get("task_contract") else None,
+                "migrations": [{k: x.get(k) for k in ("from", "to", "at", "note")} for x in m.get("migrations") or []]}
 
     def job_view(self, wf: dict) -> dict | None:
         """The legacy `reading.job` shape, so the existing page keeps working while a command runs."""

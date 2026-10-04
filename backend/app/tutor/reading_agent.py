@@ -68,9 +68,11 @@ class ReadingWorkspace:
         lines += [g["guide"], ""]
         if g.get("key_points"):
             lines += ["**重點**"] + [f"- {p}" for p in g["key_points"]] + [""]
+        (self.dir / "guides").mkdir(parents=True, exist_ok=True)   # the mirror may be missing (data moved / restored)
         (self.dir / "guides" / f"{q['index'] + 1:02d}.md").write_text("\n".join(lines), encoding="utf-8")
 
     def write_compact(self, part: dict, markdown: str) -> None:
+        (self.dir / "parts").mkdir(parents=True, exist_ok=True)
         (self.dir / "parts" / f"part-{part['index'] + 1:02d}.md").write_text(markdown, encoding="utf-8")
 
 

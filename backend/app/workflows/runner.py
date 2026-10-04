@@ -24,7 +24,9 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 from .. import config
-from . import faults, invoke
+from . import faults
+from . import invoke
+from .migrations import upgrade_session
 from .learning_graph import WorkflowDeps, build_learning_graph, initial_input, thread_config
 
 log = logging.getLogger("mentor.runner")
@@ -112,7 +114,12 @@ class WorkflowRunner:
             return
         p = self._prefetch.get(session_id)
         if p and not p.done():
-            p.cancel()   # interactive work first; an inference already running in the model is not pre-empted
+            # a "next" needs exactly the guide being prefetched: let it finish and be adopted (cancelling it wastes the
+            # calls already made — R8 measured every prefetch cancelled at a 20 s reading pace). Anything else
+            # (a question, finish, an answer) changes what the next guide depends on: interactive work first.
+            pending = self.repo.active_commands(session_id)
+            if not (pending and all(c["type"] == "next" for c in pending)):
+                p.cancel()   # an inference already running in the model is not pre-empted
         t = self._tasks.get(session_id)
         if t is None or t.done():
             self._tasks[session_id] = asyncio.create_task(self._drain(session_id))
@@ -122,6 +129,9 @@ class WorkflowRunner:
             pending = self.repo.active_commands(session_id)
             if not pending:
                 break
+            p = self._prefetch.get(session_id)
+            if p and not p.done():
+                await asyncio.wait({p})   # a kept prefetch (see notify) finishes first; its guide is then adopted
             await self._execute(pending[0])
         if self.active and config.READING_PREFETCH:
             row = self.deps.db.get_session(session_id)
@@ -129,6 +139,7 @@ class WorkflowRunner:
                 self._prefetch[session_id] = asyncio.create_task(self._run_prefetch(session_id))
 
     async def _run_prefetch(self, session_id: str) -> None:
+        upgrade_session(self.deps.db, session_id)
         try:
             outcome = await self.graph.prefetch_next(session_id)
         except asyncio.CancelledError:
@@ -165,6 +176,7 @@ class WorkflowRunner:
 
     async def _run(self, cmd: dict) -> None:
         sid, cid = cmd["session_id"], cmd["command_id"]
+        upgrade_session(self.deps.db, sid)   # R7: a session from an older reading workflow is upgraded once, recorded
         cfg = thread_config(sid)
         snap = await self.graph.aget_state(cfg)
         v = snap.values or {}

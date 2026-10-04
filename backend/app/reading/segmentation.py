@@ -1,4 +1,11 @@
-"""Source units from source blocks (plan §4.2).
+"""Source units from source blocks (plan §4.2; R4).
+
+Four levels that are no longer mixed:
+- SourceBlock: the smallest traceable piece of extracted text (source.py);
+- SourceUnit: a complete reading / teaching unit (a whole argument, a formula with its introduction and `where`, a
+  list, an example with what it illustrates, code with its explanation, a figure with its caption);
+- ReadingPart: the reading product, at most one formal third-level section (markdown `#`–`###`) or one topic;
+- model batch (planning window): what one model call sees — a computing boundary only, never a semantic one.
 
     blocks → program marks protected relations (glue) and forced boundaries
            → planning windows (owned blocks + read-only neighbours), never cut through a glued pair
@@ -23,13 +30,21 @@ from ..llm.tasks import TaskContext, TaskError, run_structured
 from .schemas import PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, WindowPlan
 from pydantic import BaseModel
 
-SEGMENTATION_VERSION = "units-v1"
+SEGMENTATION_VERSION = "units-v2"   # v2: argument / example / enumeration relations, section-bounded parts
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
 CONTEXT_BLOCKS = 2
 CONTEXT_PREVIEW = 300
 PART_CHARS = 5000
+ARGUMENT_MAX_CHARS = 1600   # a soft relation (argument, example, enumeration) merges units up to this size
+SECTION_LEVEL = 3           # markdown heading depth mapped to the book's formal third-level section (Ch n.m.k)
+CONCLUSION_RE = re.compile(r"^\s*(因此|所以|於是|由此可知|由此可見|由此|綜上|總之|故|therefore|thus|hence|consequently|as a result)", re.I)
+ENUM_NEXT_RE = re.compile(r"^\s*(第[二三四五六七八九十]個?|其次|再者|另一個前提|second(ly)?|third(ly)?|next)", re.I)
+ENUM_FIRST_RE = re.compile(r"第一|首先|一方面|\bfirst(ly)?\b", re.I)
+EXAMPLE_RE = re.compile(r"^\s*(例如|舉例來說|舉例而言|比方說|譬如|以.{1,12}為例|for example|for instance|e\.g\.)", re.I)
+CODE_EXPLAIN_RE = re.compile(r"^\s*(這段程式|上面的程式|上述程式|這個程式|這段程式碼|上面這段|the code above|this code|in this code|here,? )", re.I)
+TABLE_EXPLAIN_RE = re.compile(r"^\s*(上表|此表|這張表|表中|the table above|this table)", re.I)
 TOKEN_METHOD = "heuristic-cjk1.0-other0.3"
 WHERE_RE = re.compile(r"^\s*(其中|式中|這裡的?|此處|where\b|here\b|with\b)", re.I)
 CONNECTIVE_RE = re.compile(r"^\s*(因此|所以|於是|由此|然而|但是|不過|此外|另外|同理|換句話說|也就是說|therefore|thus|hence|however|so\b|consequently)", re.I)
@@ -47,8 +62,10 @@ def estimate_tokens(text: str) -> int:
 
 # -- protected relations ------------------------------------------------------------
 
-def glue_reason(a: SourceBlock, b: SourceBlock) -> str | None:
-    """Why a and the following b must be in the same unit (None: they may be split)."""
+def glue_reason(a: SourceBlock, b: SourceBlock, enum_open: bool = False) -> str | None:
+    """Why a and the following b must be in the same unit (None: they may be split). Hard relations always hold;
+    soft ones ("軟：…" — argument, example, enumeration, code / table explanation) hold while the merged unit stays
+    under ARGUMENT_MAX_CHARS (see glue_plan)."""
     if b.kind == "heading":
         return None
     if a.kind == "heading":
@@ -65,9 +82,43 @@ def glue_reason(a: SourceBlock, b: SourceBlock) -> str | None:
         return "同一清單"
     if a.kind == "figure":
         return "圖與說明文字"
-    if a.parent_block_id and a.parent_block_id == b.parent_block_id and not ends_safely(a.text):
-        return "同一段落"
+    if a.parent_block_id and a.parent_block_id == b.parent_block_id:
+        # a sentence end is a safe place to cut a long paragraph for computing, not a semantic boundary
+        return "同一段落" if not ends_safely(a.text) else "軟：同一段落的後續句子"
+    if b.kind in ("paragraph", "list_item"):
+        if CONCLUSION_RE.match(b.text) and a.kind in ("paragraph", "list_item", "formula"):
+            return "軟：論證的結論承接前提"
+        if ENUM_NEXT_RE.match(b.text) and (enum_open or ENUM_FIRST_RE.search(a.text) or ENUM_NEXT_RE.match(a.text)):
+            return "軟：同一組列舉的前提或步驟"
+        if EXAMPLE_RE.match(b.text) and a.kind in ("paragraph", "list_item", "formula"):
+            return "軟：例子與它說明的內容"
+        if a.kind == "code" and CODE_EXPLAIN_RE.match(b.text):
+            return "軟：程式碼與其說明"
+        if a.kind == "table" and TABLE_EXPLAIN_RE.match(b.text):
+            return "軟：表格與其說明"
     return None
+
+
+def glue_plan(blocks: list[SourceBlock]) -> tuple[list[str | None], list[dict]]:
+    """(glues, relations). A soft relation that would grow its chain beyond ARGUMENT_MAX_CHARS is not enforced as
+    one unit; it is kept as a relation (the units stay in the same Part and the later one gets the earlier one as
+    program context)."""
+    raw, enum_open = [], False
+    for a, b in zip(blocks, blocks[1:]):
+        enum_open = (enum_open or bool(ENUM_FIRST_RE.search(a.text))) and a.kind != "heading"
+        raw.append(glue_reason(a, b, enum_open))
+    out: list[str | None] = []
+    relations: list[dict] = []
+    chain = len(blocks[0].text) if blocks else 0
+    for i, g in enumerate(raw):
+        nxt = len(blocks[i + 1].text)
+        if g and g.startswith("軟：") and chain + nxt > ARGUMENT_MAX_CHARS:
+            relations.append({"from": blocks[i].block_id, "to": blocks[i + 1].block_id, "reason": g[2:],
+                              "note": f"合併後超過 {ARGUMENT_MAX_CHARS} 字，分成相鄰單元並保持在同一部分"})
+            g = None
+        out.append(g)
+        chain = chain + nxt if g else nxt
+    return out, relations
 
 
 def ends_safely(text: str) -> bool:
@@ -77,7 +128,7 @@ def ends_safely(text: str) -> bool:
 
 def glues(blocks: list[SourceBlock]) -> list[str | None]:
     """glues[i] = reason blocks[i] and blocks[i+1] must stay together, else None."""
-    return [glue_reason(a, b) for a, b in zip(blocks, blocks[1:])]
+    return glue_plan(blocks)[0]
 
 
 def forced_break(blocks: list[SourceBlock], i: int) -> bool:
@@ -276,8 +327,10 @@ async def check_seam(blocks: list[SourceBlock], left: list[int], right: list[int
     cut, so the rule only escalates when the right side opens with a connective (因此／然而…); merged size is
     capped by MAX_UNIT_CHARS × 2. Returns (merge, reason, model calls)."""
     first = next((blocks[i] for i in right if blocks[i].kind != "heading"), None)
-    if blocks[right[0]].kind == "heading" or first is None or not CONNECTIVE_RE.match(first.text):
-        return False, "規則：接縫處沒有承接語", 0
+    from .agent import REFERS_BACK_RE
+    if blocks[right[0]].kind == "heading" or first is None or not (CONNECTIVE_RE.match(first.text)
+                                                                     or REFERS_BACK_RE.match(first.text)):
+        return False, "規則：接縫處沒有承接語或指涉語", 0
     if body_chars([blocks[i] for i in left + right]) > MAX_UNIT_CHARS * 2 or deps.make_ctx is None:
         return False, "規則：合併後過長或未啟用模型", 0
     ctx: TaskContext = deps.make_ctx("seam", f"{blocks[left[0]].block_id}|{blocks[right[0]].block_id}")
@@ -345,7 +398,7 @@ async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_cha
                         context_refs=[], segmentation_version=SEGMENTATION_VERSION)
              for k, g in enumerate(all_groups)]
     return SegmentationPlan(units=units, warnings=warnings, planner=planners.pop() if len(planners) == 1 else "mixed",
-                            windows=infos)
+                            windows=infos, relations=glue_plan(blocks)[1])
 
 
 # -- units → legacy quote / part shapes ---------------------------------------------------
@@ -379,9 +432,24 @@ def unit_text(blocks: list[SourceBlock]) -> str:
     return "\n\n".join(b.text for b in blocks if b.kind != "heading")
 
 
+def section_paths(blocks: list[SourceBlock]) -> dict[str, list[str]]:
+    """block id → the path of formal sections (markdown headings of depth ≤ SECTION_LEVEL) it belongs to. A heading
+    guessed from layout (PDF, structure_confidence low) never defines a section; deeper headings stay inside it."""
+    stack: list[tuple[int, str]] = []
+    out: dict[str, list[str]] = {}
+    for b in blocks:
+        if b.kind == "heading" and b.structure_confidence == "high" and b.heading_level and b.heading_level <= SECTION_LEVEL:
+            stack = [x for x in stack if x[0] < b.heading_level] + [(b.heading_level, b.text)]
+        out[b.block_id] = [t for _, t in stack]
+    return out
+
+
 def to_quotes(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock]) -> list[dict]:
     quotes = []
     pending_heading: str | None = None
+    ordered = sorted(by_id.values(), key=lambda b: b.ordinal)
+    paths = section_paths(ordered)
+    related = {r["to"] for r in plan.relations}
     for u in plan.units:
         bs = [by_id[i] for i in u.block_ids]
         heads = [b.text for b in bs if b.kind == "heading"]
@@ -391,25 +459,52 @@ def to_quotes(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock]) 
             continue
         heading = " › ".join(filter(None, [pending_heading, *heads])) or None
         pending_heading = None
+        body = [b for b in bs if b.kind != "heading"]
         quotes.append({"id": f"quote-{len(quotes) + 1:02d}", "index": len(quotes), "label": _label(unit, bs),
                        "heading": heading, "excerpt": excerpt(text), "text": text, "chars": len(text), "part": 0,
                        "unit_id": u.unit_id, "block_ids": u.block_ids, "boundary_reason": u.boundary_reason,
-                       "has_figure": any(b.kind == "figure" for b in bs)})
+                       "has_figure": any(b.kind == "figure" or (b.meta.get("pdf") or {}).get("caption") for b in bs),
+                       "section": paths.get(body[0].block_id, []),
+                       "structure_confidence": "low" if any(b.structure_confidence == "low" for b in ordered) else "high",
+                       "depends_on_prev": body[0].block_id in related})
     if pending_heading and quotes:
         quotes[-1]["heading"] = " › ".join(filter(None, [quotes[-1]["heading"], pending_heading]))
     return quotes
 
 
 def plan_parts(quotes: list[dict], part_chars: int = PART_CHARS) -> tuple[list[dict], list[ReadingPart]]:
-    """Legacy part dicts (quote_from/quote_to/chars/label) + ReadingPart contracts with token estimates."""
-    from ..tutor.reading import plan_parts as legacy_plan_parts
-    parts = legacy_plan_parts(quotes, part_chars)
+    """Reading parts (legacy dict shape: index / quote_from / quote_to / chars / label, plus part_id, section, token
+    estimate and boundary reason) and ReadingPart contracts. A part never spans two formal sections; within a
+    section it closes at ~part_chars between complete units, never before a unit that depends on the previous one
+    (a protected relation kept across units). Sets quote['part'] in place."""
+    parts: list[dict] = []
+    cur: dict | None = None
+    for q in quotes:
+        section = q.get("section") or []
+        reason = ""
+        if cur is None:
+            reason = "範圍開頭"
+        elif section != cur["section"]:
+            reason = "新的小節：" + " › ".join(section[len([1 for a, b in zip(section, cur["section"]) if a == b]):] or section)
+        elif cur["chars"] + q["chars"] > part_chars and not q.get("depends_on_prev"):
+            reason = f"同一小節內超過約 {part_chars} 字，在完整單元之間分開"
+        if reason:
+            cur = {"index": len(parts), "quote_from": q["index"], "quote_to": q["index"], "chars": 0, "section": section,
+                   "boundary_reason": reason, "structure_confidence": q.get("structure_confidence", "high")}
+            parts.append(cur)
+        cur["quote_to"] = q["index"]
+        cur["chars"] += q["chars"]
+        q["part"] = cur["index"]
     contracts = []
     for p in parts:
         qs = quotes[p["quote_from"]:p["quote_to"] + 1]
+        a, b = qs[0]["label"], qs[-1]["label"]
+        p["label"] = a if a == b else f"{a} 至 {b}"
         p["part_id"] = f"part-{p['index'] + 1:02d}"
         p["estimated_tokens"] = sum(estimate_tokens(q["text"]) for q in qs)
         p["estimation_method"] = TOKEN_METHOD
         contracts.append(ReadingPart(part_id=p["part_id"], index=p["index"], unit_ids=[q["unit_id"] for q in qs],
-                                     estimated_tokens=p["estimated_tokens"], estimation_method=TOKEN_METHOD))
+                                     estimated_tokens=p["estimated_tokens"], estimation_method=TOKEN_METHOD,
+                                     section_path=p["section"], boundary_reason=p["boundary_reason"],
+                                     structure_confidence=p["structure_confidence"]))
     return parts, contracts

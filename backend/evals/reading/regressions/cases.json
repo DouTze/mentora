@@ -1,0 +1,117 @@
+{
+ "schema_version": 1,
+ "description": "Release-gate regressions reproduced in the 2026-10-04 review (docs/reading-method-alignment-plan.md §已重現的案例) plus the acceptance-matrix cases that need scripted model outputs. Model outputs are scripted by role (`review` is the v1 reviewer output; `body_audit`, when present, the v2 Gate 2 audit — otherwise the test's auditor is adversarial), so the same case runs against any graph version; `expect` is the contract, never the observed behaviour of one version.",
+ "cases": [
+  {
+   "id": "cross-field-condition",
+   "matrix": "公式／條件只有中文課文保留",
+   "source": "Only if $x > 0$, use the formula $$y=1/x$$.",
+   "chinese_text": "只有在 $x > 0$ 時，才使用公式 $$y=1/x$$。",
+   "guide": "這個公式描述倒數關係：輸出 y 是輸入 x 的倒數，x 越大，y 就越小，兩者朝相反方向變化。",
+   "review": {
+    "issues": [
+     {
+      "code": "missing_condition",
+      "severity": "major",
+      "source_excerpt": "$x > 0$",
+      "draft_excerpt": "",
+      "suggested_fix": "正文要寫出 x > 0 的條件與公式"
+     }
+    ]
+   },
+   "expect": {
+    "published": false
+   }
+  },
+  {
+   "id": "negation-reversal",
+   "matrix": "獨立與不獨立，高文字重疊不撤銷語意問題",
+   "source": "當觀測樣本彼此獨立且都服從相同分布時，樣本平均值才具有所述的統計性質。",
+   "chinese_text": null,
+   "guide": "當觀測樣本並不彼此獨立且都服從相同分布時，樣本平均值才具有所述的統計性質。這個條件說明了樣本平均值什麼時候可以信賴。",
+   "review": {
+    "issues": [
+     {
+      "code": "missing_condition",
+      "severity": "major",
+      "source_excerpt": "彼此獨立",
+      "draft_excerpt": "並不彼此獨立",
+      "suggested_fix": "原文要求樣本彼此獨立，草稿寫成並不彼此獨立"
+     }
+    ]
+   },
+   "expect": {
+    "published": false
+   }
+  },
+  {
+   "id": "empty-review",
+   "matrix": "模型回傳空 review",
+   "source": "若要使用均值定理，函數必須在閉區間上連續，並在開區間內可微。",
+   "chinese_text": null,
+   "guide": "均值定理是微積分的重要定理，用來連結平均變化率與瞬間變化率，之後的章節會常常用到。",
+   "review": {},
+   "expect": {
+    "published": false
+   },
+   "body_audit": {}
+  },
+  {
+   "id": "supplement-label",
+   "matrix": "錯誤新增內容標為補充說明",
+   "source": "若要使用均值定理，函數必須在閉區間上連續，並在開區間內可微。",
+   "chinese_text": null,
+   "guide": "要使用均值定理，函數必須在閉區間上連續，並且在開區間內可微。\n\n補充說明：只要函數在閉區間上連續，就一定可以使用均值定理。",
+   "review": {
+    "issues": [
+     {
+      "code": "unsupported_claim",
+      "severity": "major",
+      "source_excerpt": "並在開區間內可微",
+      "draft_excerpt": "只要函數在閉區間上連續，就一定可以使用均值定理",
+      "suggested_fix": "這句與原文條件矛盾"
+     }
+    ]
+   },
+   "expect": {
+    "published": false
+   }
+  },
+  {
+   "id": "faithful-paraphrase",
+   "matrix": "合法改寫可通過（避免靠拒絕全部案例達標）",
+   "source": "若要使用均值定理，函數必須在閉區間上連續，並在開區間內可微。",
+   "chinese_text": null,
+   "guide": "要使用均值定理，函數必須同時滿足兩個條件：在閉區間上連續，並且在開區間內可微。少了任何一個，定理就不能直接套用。",
+   "review": {
+    "issues": []
+   },
+   "expect": {
+    "published": true
+   }
+  }
+ ],
+ "structure_cases": [
+  {
+   "id": "two-third-level-sections",
+   "matrix": "不同第三層小節不可在同一 Part",
+   "kind": "md",
+   "lines": [
+    "# 第 1 章",
+    "",
+    "## 1.1 機率",
+    "",
+    "### 1.1.1 樣本空間",
+    "",
+    "樣本空間是所有可能結果的集合，我們用 $\\Omega$ 表示，其中每個元素都是一個基本結果。",
+    "",
+    "### 1.1.2 事件",
+    "",
+    "事件是樣本空間的子集合；當實驗結果落在這個子集合時，我們說事件發生了。"
+   ],
+   "expect": {
+    "parts": 2
+   }
+  }
+ ]
+}

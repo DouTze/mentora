@@ -35,6 +35,9 @@ class SourceBlock(BaseModel):
     parent_block_id: str | None = None   # set on pieces cut from an oversize block
     piece: int | None = None             # 1-based piece number under parent_block_id
     continues: bool = False              # text continues in the next block (page break mid-sentence, cut piece)
+    heading_level: int | None = None     # markdown heading depth (1 = #); None for body blocks / unknown (PDF)
+    structure_confidence: Literal["high", "low"] | None = None   # headings: from markup (high) or a layout guess (low)
+    meta: dict[str, Any] = Field(default_factory=dict)            # extraction evidence (R5: fonts, bbox, render refs)
 
 
 class SourceUnit(BaseModel):
@@ -48,11 +51,16 @@ class SourceUnit(BaseModel):
 
 
 class ReadingPart(BaseModel):
+    """A reading / review product: at most one formal third-level section of the book (or one independent topic
+    when the source has no such structure). Not a model batch: model windows are planned separately."""
     part_id: str
     index: int
     unit_ids: list[str]
     estimated_tokens: int
     estimation_method: str
+    section_path: list[str] = Field(default_factory=list)
+    boundary_reason: str = ""
+    structure_confidence: Literal["high", "low"] = "high"
 
 
 class SegmentationPlan(BaseModel):
@@ -60,7 +68,8 @@ class SegmentationPlan(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     planning_window_id: str | None = None
     planner: str = "rules"                      # model | rules | mixed
-    windows: list[dict[str, Any]] = Field(default_factory=list)   # per window: owned/context ids, planner, notes
+    windows: list[dict[str, Any]] = Field(default_factory=list)   # model batches: owned/context ids, planner, notes
+    relations: list[dict[str, Any]] = Field(default_factory=list) # protected relations kept across units (size cap)
 
 
 # -- what the model returns for one planning window (local labels, never text) --------------------

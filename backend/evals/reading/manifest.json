@@ -1515,6 +1515,67 @@
    ]
   },
   {
+   "id": "pdf-symbols",
+   "source": "pdf/symbols.pdf",
+   "kind": "pdf",
+   "tags": [
+    "en",
+    "pdf",
+    "symbols",
+    "lost-glyphs"
+   ],
+   "note": "Self-made PDF (pdf/make_fixtures.py): bold vector w, Symbol-font glyphs lost in the text layer, x² flattened to x2.",
+   "units": [
+    {
+     "id": "u1",
+     "start": "The weight vector",
+     "must_keep": [
+      {
+       "kind": "formula",
+       "text": "粗體向量 w 的更新式",
+       "any": [
+        [
+         "\\mathbf{w}",
+         "\\eta",
+         "\\nabla"
+        ]
+       ]
+      },
+      {
+       "kind": "formula",
+       "text": "x 的平方是上標",
+       "any": [
+        [
+         "x^{2}"
+        ],
+        [
+         "x^2"
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "id": "u2",
+     "start": "This paragraph explains",
+     "must_keep": [
+      {
+       "kind": "claim",
+       "text": "只用文字說明、沒有公式",
+       "any": [
+        [
+         "公式"
+        ],
+        [
+         "文字"
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
    "id": "broken-empty",
    "source": "sources/broken-empty.txt",
    "kind": "txt",

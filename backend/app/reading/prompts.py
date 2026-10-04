@@ -5,9 +5,11 @@ from __future__ import annotations
 from .. import config
 from ..llm.runtime import stable_hash
 
-BUNDLE_VERSION = "reading-bundle-v1"
-PROMPT_IDS = ("segment_blocks", "segment_seam", "reading_analyze", "reading_context", "reading_draft",
-              "reading_review", "reading_verify", "reading_revise", "ask", "compact", "generate", "assess")
+BUNDLE_VERSION = "reading-bundle-v2"
+PROMPT_IDS = ("segment_blocks", "segment_seam", "reading_understand", "reading_source_audit", "reading_source_revise",
+              "reading_symbols", "reading_context", "reading_bridges", "reading_body", "reading_body_audit", "reading_body_revise",
+              "reading_verify", "reading_notes", "reading_notes_revise", "reading_notes_audit", "quiz_generate",
+              "quiz_audit", "ask", "compact", "generate", "assess")
 
 
 def load_bundle() -> dict:

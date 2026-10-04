@@ -38,6 +38,47 @@ class MockBackend(LLMBackend):
             text = json.dumps({"merge": False, "reason": "（模擬）維持切開"}, ensure_ascii=False)
         elif step == "context":
             text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
+        elif step in ("understand", "revise_source"):
+            text = json.dumps(self._understand(meta.get("quote_text", ""), meta.get("segments") or []), ensure_ascii=False)
+        elif step == "source_audit":
+            text = json.dumps({"sentences": [{"id": sid, "verdict": "faithful", "note": "（模擬）"}
+                                             for sid, s in meta.get("sentences") or []],
+                               "claims": [{"id": c, "verdict": "faithful", "note": "（模擬）"} for c in meta.get("claim_ids") or []]},
+                              ensure_ascii=False)
+        elif step == "plan_bridges":
+            text = json.dumps({"learning_goal": "（模擬）讀懂這一段", "bridges": []}, ensure_ascii=False)
+        elif step in ("draft", "revise_body") and meta.get("claims") is not None:
+            # simulated 主要正文: restates every claimed source passage verbatim (formulas included); no teaching
+            body = "\n\n".join(c["source_text"] for c in meta["claims"])
+            text = json.dumps({"guide": "（模擬導讀）以下逐句重述原文。\n\n" + body, "key_points": [self._first_sentence(body)[:40]],
+                               "check": "你能用自己的話說出這一段的重點嗎？", "bridges_used": [], "limits": []}, ensure_ascii=False)
+        elif step == "body_audit":
+            text = json.dumps({"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": c["source_text"], "note": ""}
+                                          for c in meta.get("claims") or []],
+                               "bridges": [{"id": b, "verdict": "ok", "guide_quote": "", "note": ""} for b in meta.get("bridge_ids") or []],
+                               "additions": [], "uncovered_source": [], "coherence": "pass", "coherence_note": "（模擬）"},
+                              ensure_ascii=False)
+        elif step in ("notes", "notes_revise"):   # simulated notes: one per verified claim, its statement as is
+            text = json.dumps({"notes": [{"id": f"N{i}", "kind": "point", "text": st, "claim_refs": [k]}
+                                         for i, (k, st) in enumerate((meta.get("claims_map") or {}).items(), 1)]},
+                              ensure_ascii=False)
+        elif step == "notes_audit":
+            text = json.dumps({"notes": [{"id": i, "verdict": "faithful", "note": ""} for i in meta.get("note_ids") or []]},
+                              ensure_ascii=False)
+        elif step == "quiz_generate":
+            cs = []
+            for t in meta.get("plan") or []:
+                b = t["basis"][:2]
+                q = lambda kind: {"prompt": f"（模擬出題）請說明「{t['label'][:20]}」的{kind}並說明理由。",
+                                  "rubric": "回答需涵蓋依據中的條件與結論。", "hints": ["先回想依據的第一個重點？", "條件是什麼？"],
+                                  "basis": b}
+                cs.append({"topic": t["id"], "title": t["label"][:20], "explanation": "（模擬）依已核對的筆記整理。",
+                           "examples": [], "key_terms": self._terms(t["label"], 3), "basis": b,
+                           "diagnostic": q("重點"), "transfer": q("應用")})
+            text = json.dumps({"title": "（模擬）已讀範圍", "concepts": cs}, ensure_ascii=False)
+        elif step == "quiz_audit":
+            text = json.dumps({"questions": [{"id": i, "verdict": "ok", "note": ""} for i in meta.get("question_ids") or []]},
+                              ensure_ascii=False)
         elif step == "analyze":
             first = self._first_sentence(meta.get("quote_text", ""))
             text = json.dumps({"definitions": [], "claims": [first], "conditions": [], "formulas": [], "reasoning": [],
@@ -49,10 +90,12 @@ class MockBackend(LLMBackend):
             if maths:   # the simulated text keeps the formulas verbatim, as a real guide must
                 g["guide"] += "\n\n" + "\n\n".join(maths)
             text = json.dumps({**g, "supplement_notes": [], "limits": []}, ensure_ascii=False)
-        elif step == "verify":
-            text = json.dumps({"checks": []}, ensure_ascii=False)
-        elif step == "review":
-            text = json.dumps({"issues": []}, ensure_ascii=False)
+        elif step == "verify":   # simulated re-check cannot read; it keeps every flagged problem
+            text = json.dumps({"checks": [{"item": 1, "verdict": "problem", "guide_quote": "", "reason": "（模擬）無法核對"}]},
+                              ensure_ascii=False)
+        elif step == "review":   # simulated review reports every expected check, finds nothing
+            text = json.dumps({"checks": [{"check": c, "result": "pass", "evidence": "（模擬）"} for c in meta.get("expected_checks", [])],
+                               "issues": []}, ensure_ascii=False)
         elif meta.get("task") == "generate":
             text = json.dumps(self._generate(meta.get("range_text", ""), meta.get("reading_questions", [])), ensure_ascii=False)
         elif meta.get("task") == "guide":
@@ -118,6 +161,18 @@ class MockBackend(LLMBackend):
                 "guide": f"（模擬導讀）{first}\n\n請注意這幾個詞：{'、'.join(terms) or '（無）'}。"
                          f"它們之間的關係，以及成立的條件，是接下來要處理的。",
                 "key_points": [first[:40]] + terms[:2], "check": f"你能用自己的話說出「{first[:20]}」是什麼意思嗎？"}
+
+    @staticmethod
+    def _understand(text: str, segments: list) -> dict[str, Any]:
+        """Simulated source claims: one claim per source sentence, quoting it verbatim (so the program's anchor and
+        coverage checks see a complete list); the 中文課文 of a non-Chinese text is the text itself, marked."""
+        segs = segments or [["S1", text]]
+        latin = len(re.findall(r"[A-Za-z]", text)) > len(re.findall(r"[\u4e00-\u9fff]", text))
+        return {"translations": [{"id": sid, "zh": f"（模擬譯文）{s}"} for sid, s in segs] if latin else [],
+                "claims": [{"id": f"C{i}", "sentences": [sid], "statement": "", "function": "claim", "conditions": [],
+                            "exceptions": [], "strength": "", "formulas": re.findall(r"\$\$.+?\$\$|\$[^$\n]+\$", s, re.S),
+                            "depends_on": []} for i, (sid, s) in enumerate(segs, 1)],
+                "needs_context": [], "limits": []}
 
     @staticmethod
     def _segment(atoms: list[str]) -> dict[str, Any]:

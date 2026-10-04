@@ -46,11 +46,16 @@ from langgraph.types import interrupt
 
 from .. import config
 from ..db import Database
+from ..llm.context import ContextItem, ContextOverflow, Packet
 from ..llm.runtime import BackendPool, CallBudget, ModelRuntime, ModelSnapshot, stable_hash
 from ..llm.tasks import TaskContext, TaskError, ToolDispatcher, run_structured, select_context
 from ..models import ModelJudgement
 from ..persistence.repository import DbSink, Repository
 from ..reading import agent as ra
+from ..reading import gates, notes
+from ..reading.contracts import LearningSnapshot, NotesAudit, NotesOutput, QuizAudit, QuizDraft
+from ..reading.gates import symbol_like
+from ..reading.pdf_evidence import unit_symbol_evidence
 from ..reading.prompts import render
 from ..reading.segmentation import SEGMENTATION_VERSION, PlannerDeps, plan_parts, plan_units, to_quotes
 from ..reading.tools import ReadingScope, build_tools, tools_text
@@ -94,8 +99,10 @@ def model_error(e: Exception) -> dict:
     if isinstance(e, ReadingUnavailable):
         return {"code": "model_unavailable", "detail": e.detail, "retryable": True}
     if isinstance(e, TaskError):
-        code = {"unavailable": "model_unavailable", "invalid_output": "invalid_model_output", "budget": "budget_exhausted"}[e.kind]
-        return {"code": code, "detail": e.detail, "retryable": True}
+        code = {"unavailable": "model_unavailable", "invalid_output": "invalid_model_output", "budget": "budget_exhausted",
+                "context_overflow": "context_overflow"}[e.kind]
+        # a request that cannot fit the model will not fit on a retry either: the range must be made smaller
+        return {"code": code, "detail": e.detail, "retryable": e.kind != "context_overflow"}
     return {"code": "internal", "detail": f"{type(e).__name__}: {e}", "retryable": True}
 
 
@@ -133,11 +140,26 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         r = row(sid)
         content, rd = r["content_snapshot"], r["state"]["reading"]
         return ReadingScope(quotes=content["quotes"], current_index=index, parts=content["parts"],
+                            version=meta(r).get("snapshot_id", ""),
                             guides={k: v for k, v in rd["guides"].items() if int(k) < index},
                             compacts=rd["compacts"], qa=rd["qa"])
 
     reading_deps = ReadingDeps(runtime_for=runtime, prompts_for=prompts, scope_for=scope, sink=sink, repo=repo,
-                               on_stage=lambda sid, cid, st: repo.set_command_stage(sid, cid, st))
+                               on_stage=lambda sid, cid, st: repo.set_command_stage(sid, cid, st),
+                               evidence_dir=Path(deps.svc.reading_dir).parent / "evidence")
+    def symbol_evidence(r: dict, q: dict) -> dict | None:
+        """R5: the unit's PDF symbol evidence (None for md / txt, or a unit without symbols)."""
+        content = r["content_snapshot"]
+        if content["source"]["unit"] != "page":
+            return None
+        by_id = {b.block_id: b for b in repo.load_blocks(meta(r)["snapshot_id"])}   # fresh: evidence may be backfilled
+        bs = [by_id[i] for i in q["block_ids"] if i in by_id]
+        try:
+            path, _ = deps.svc.materials.file_path(content["source"]["material_id"])
+            path = str(path) if path.exists() else None
+        except Exception:  # noqa: BLE001 — a deleted material leaves no layout evidence
+            path = None
+        return unit_symbol_evidence(bs, path, symbol_like(q["text"]))
     reading_graph = build_reading_graph(reading_deps)
 
     # -- nodes ---------------------------------------------------------------------------
@@ -184,8 +206,25 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         ws.init(fresh)
         return {"error": None, "failed_node": None}
 
-    def guide_task(sid: str, idx: int, attempt: int = 1, guides: dict | None = None) -> ra.ReadingTaskInput:
-        """The input of unit `idx`'s guide as it stands now (`guides` overrides the accepted ones, for prefetch)."""
+    def learning_snapshot(r: dict, idx: int, assume_read: set[int] | None = None) -> LearningSnapshot:
+        """What unit `idx`'s guide may assume about the reader: claims of units the reader moved past (read, not
+        proven understood), the questions asked there, understanding evidence from answers, and the task
+        contract. A guide that was generated or prefetched but not read never counts."""
+        content, rd = r["content_snapshot"], r["state"]["reading"]
+        tc = meta(r).get("task_contract") or {}
+        read = sorted(i for i in set(rd.get("read") or []) | (assume_read or set()) if i < idx)
+        claims = [{"unit_id": content["quotes"][i]["unit_id"], "claim_id": c["id"], "statement": c["statement"]}
+                  for i in read[-3:] for c in (rd["guides"].get(str(i)) or {}).get("source_claims") or []][-12:]
+        questions = [{"unit_id": content["quotes"][i]["unit_id"], "question": x["question"]}
+                     for i in read for x in rd["qa"].get(str(i), [])][-6:]
+        return LearningSnapshot(depth=tc.get("depth", "close"), goal=tc.get("goal", ""),
+                                background=tc.get("reader_background", ""), read_claims=claims, open_questions=questions,
+                                evidence=(rd.get("evidence") or [])[-6:])
+
+    def guide_task(sid: str, idx: int, attempt: int = 1, guides: dict | None = None,
+                   assume_read: set[int] | None = None) -> ra.ReadingTaskInput:
+        """The input of unit `idx`'s guide as it stands now (`guides` overrides the accepted ones, `assume_read`
+        the read set — both for prefetch)."""
         r = row(sid)
         content, rd = r["content_snapshot"], r["state"]["reading"]
         gs = rd["guides"] if guides is None else guides
@@ -198,7 +237,10 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                                    has_figure=q.get("has_figure", False), material_title=content["source"]["material_title"],
                                    range_label=content["source"]["label"], prev_points=prev, qa_context=hist,
                                    model_config_hash=m["model_config_hash"], prompt_bundle_hash=m["prompt_bundle"]["hash"],
-                                   attempt=attempt)
+                                   attempt=attempt, learning=learning_snapshot(r, idx, assume_read),
+                                   source_kind="pdf" if content["source"]["unit"] == "page" else "md",
+                                   depends_on_prev=bool(q.get("depends_on_prev")),
+                                   symbol_evidence=symbol_evidence(r, q))
 
     def prefetch_key(t: ra.ReadingTaskInput) -> str:
         """Everything the guide depends on; a question asked meanwhile or another model / prompt misses the cache."""
@@ -228,7 +270,10 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             return {"error": model_error(e), "failed_node": "guide"}
         if out["status"] != "accepted":
             repo.put_artifact(f"{op}:rejected", kind="guide", status="rejected", unit_id=q["unit_id"], session_id=sid,
-                              payload={"draft": out.get("draft"), "findings": out.get("findings"), "error": out.get("error")},
+                              payload={"draft": out.get("draft"), "findings": out.get("findings"), "error": out.get("error"),
+                                       "understanding": out.get("understanding"), "gate1": out.get("gate1"),
+                                       "bridges": out.get("bridges"), "symbol_evidence": out.get("symbol_evidence"),
+                                       "budget": out.get("budget")},
                               source_hash=task.source_hash, context_hash=task.context_hash,
                               prompt_version=task.prompt_bundle_hash, model_config_hash=task.model_config_hash,
                               workflow_version=ra.READING_WORKFLOW_VERSION)
@@ -238,6 +283,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
 
         def mutate(c: dict, s: dict) -> None:
             s["reading"]["guides"][str(idx)] = art
+            s["reading"]["presented"] = sorted(set(s["reading"].get("presented") or []) | {idx})   # shown ≠ read
 
         repo.commit(sid, f"{op}:accept", kind="guide", payload=art, mutate=mutate, unit_id=q["unit_id"],
                     meta={"source_hash": task.source_hash, "context_hash": task.context_hash,
@@ -281,25 +327,36 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         c = ctx(state, "ask", op)
         pr = prompts(sid)
         m = meta(r)
-        body = render(pr["ask"], {"material_title": content["source"]["material_title"], "quote_label": quote["label"],
-                                  "quote_text": quote["text"], "guide": (rd["guides"].get(str(idx)) or {}).get("guide") or "（尚未產生）",
-                                  "history": reading.format_history(history, idx), "question": question})
         refs: list[str] = list(quote.get("block_ids") or [])
         try:
+            extra = ""
             if ASK_REFERS_RE.search(question):
                 tools = build_tools(scope(sid, idx))
                 sel = (f"學生在讀第 {idx + 1} 段（單元 id：{quote['unit_id']}）時問：「{question}」。若回答需要前面段落的內容，"
                        f"可用下列唯讀工具讀取；不需要就回答 ready。\n\n{tools_text(tools)}\n\n只輸出 JSON："
                        '{"action":"ready","calls":[],"reason":"…"}')
-                results, _ = await select_context(c, [HumanMessage(content=sel)], ToolDispatcher(tools, max_chars=2500),
+                results, _ = await select_context(c, [HumanMessage(content=sel)], ToolDispatcher(tools),
                                                   task="ask", node="ask.context", prompt_version=m["prompt_bundle"]["hash"],
                                                   meta={"quote_text": quote["text"], "question": question})
                 extra = "\n\n".join(x.content for x in results if x.ok)
-                if extra:
-                    body += "\n\n## 補充資料（唯讀，來自本次學習已讀範圍）\n" + extra
-                    refs += [u for x in results if x.ok for u in (x.args.get("unit_ids") or [x.args.get("unit_id")]) if u]
+                refs += [u for x in results if x.ok for u in x.source_ids]
+            # R2: the unit, its guide and the question are required; older Q&A and looked-up context are dropped first
+            items = [ContextItem(key="quote_text", text=quote["text"], source_ids=list(quote.get("block_ids") or [])),
+                     ContextItem(key="guide", text=(rd["guides"].get(str(idx)) or {}).get("guide") or "（尚未產生）"),
+                     ContextItem(key="question", text=question),
+                     ContextItem(key="history", text=reading.format_history(history, idx), required=False, priority=1,
+                                 dropped_text="（因長度限制，較早的問答沒有提供）"),
+                     ContextItem(key="ask_supplement", text=("\n\n## 補充資料（唯讀，來自本次學習已讀範圍）\n" + extra) if extra else "",
+                                 required=False, priority=2, dropped_text="")]
+            limits = await c.runtime.limits(ra.GUIDE_CONTEXT_TOKENS)
+            try:
+                body, rec = Packet("ask.answer", pr["ask"] + "{{ask_supplement}}", items,
+                                   {"material_title": content["source"]["material_title"], "quote_label": quote["label"]}
+                                   ).build(c.runtime.max_tokens(1024), limits)
+            except ContextOverflow as e:
+                raise TaskError("context_overflow", e.detail) from e
             ans, recs = await run_structured(c, [HumanMessage(content=body)], reading.Answer, task="ask", node="ask.answer",
-                                             prompt_version=m["prompt_bundle"]["hash"],
+                                             prompt_version=m["prompt_bundle"]["hash"], packet=rec,
                                              meta={"quote_text": quote["text"], "question": question},
                                              source_ids=refs, min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         except TaskError as e:
@@ -373,6 +430,10 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                 "error": None, "failed_node": None}
 
     async def compact(state: WorkflowState) -> dict:
+        """R6: notes of a finished part, compressed from its verified claims (never from raw text), each note bound to
+        the claims it compresses and checked (markers, formulas, audit). Verified claims no verified note covers stay
+        available as they are. If the notes cannot be produced (invalid output, budget), the part keeps its verified
+        claims as the review / quiz basis and records why; only an unreachable model blocks (retry)."""
         sid = state["session_id"]
         for pi in list(state.get("todo_compact") or []):
             r = row(sid)
@@ -385,33 +446,81 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             if upto is not None and upto < part["quote_to"]:
                 part["quote_to"] = upto
                 part["label"] += f"（讀到第 {upto + 1} 段）"
-            qs = content["quotes"][part["quote_from"]:part["quote_to"] + 1]
             op = f"{sid}:compact:{pi}:{part['quote_to']}"          # one commit per part …
             call_op = f"{op}:{state.get('pending_event_id')}"     # … a fresh call budget per command (a retry)
-            body = render(prompts(sid)["compact"], {"material_title": content["source"]["material_title"],
-                                                    "part_label": part["label"],
-                                                    "part_text": "\n\n".join(f"[{q['label']}]\n{q['text']}" for q in qs)})
+            cmap = notes.part_claims(content["quotes"], rd["guides"], part["quote_from"], part["quote_to"])
             try:
-                cp, recs = await run_structured(ctx(state, "compact", call_op), [HumanMessage(content=body)], reading.Compact,
-                                                task="compact", node="compact", prompt_version=meta(r)["prompt_bundle"]["hash"],
-                                                meta={"part_text": "\n\n".join(q["text"] for q in qs)},
-                                                source_ids=[b for q in qs for b in q.get("block_ids", [])],
-                                                min_max_tokens=2048, min_context_tokens=16384)
+                item = await compact_part(state, r, part, cmap, call_op)
             except TaskError as e:
-                return {"error": model_error(e), "failed_node": "compact"}
-            md = reading.compact_markdown(part, cp)
-            item = {**cp.model_dump(), "markdown": md, "unit_ids": [q["unit_id"] for q in qs],
-                    "claim_sources": [q["unit_id"] for q in qs], "latency_ms": recs[-1].latency_ms,
-                    "backend": recs[-1].backend, "model": recs[-1].model, "agent": "langgraph"}
+                if e.kind == "unavailable":
+                    return {"error": model_error(e), "failed_node": "compact"}
+                item = {"notes": [], "gaps": list(cmap), "status": "notes_unavailable",
+                        "reason": f"{model_error(e)['code']}: {e.detail[:160]}"}
+            item.update({"unit_ids": [q["unit_id"] for q in content["quotes"][part["quote_from"]:part["quote_to"] + 1]],
+                         "version": notes.NOTES_VERSION, "agent": "langgraph"})
+            ok = [n for n in item["notes"] if n["status"] == "verified"]
+            vn = [notes.VerifiedNote.model_validate(n) for n in item["notes"]]
+            item["markdown"] = notes.notes_markdown(part, vn, item["gaps"], cmap) if cmap else \
+                f"### {part['label']}\n\n（這一部分沒有通過核對的內容，無法整理筆記。）\n"
+            # legacy fields (read_compact tool, quiz_source_text, exports)
+            item["summary"] = " ".join(n["text"] for n in ok)
+            item["claims"] = [n["text"] for n in ok] + [cmap[k]["claim"]["statement"] for k in item["gaps"]]
+            item["key_terms"] = [n["term"] for n in ok if n["kind"] == "term" and n["term"]]
+            item["claim_sources"] = {n["id"]: n["claim_refs"] for n in item["notes"]}
 
             def mutate(c: dict, s: dict, pi=pi, item=item) -> None:
                 s["reading"]["compacts"][str(pi)] = item
 
             repo.commit(sid, op, kind="compact", payload=item, mutate=mutate)
-            workspace(sid).write_compact(part, md)
+            workspace(sid).write_compact(part, item["markdown"])
         return {"todo_compact": [], "error": None, "failed_node": None}
 
+    async def compact_part(state: WorkflowState, r: dict, part: dict, cmap: dict, call_op: str) -> dict:
+        if not cmap:
+            return {"notes": [], "gaps": [], "status": "no_basis", "reason": "這一部分沒有通過來源核對的段落"}
+        sid = state["session_id"]
+        c = ctx(state, "compact", call_op)
+        pv = meta(r)["prompt_bundle"]["hash"]
+        pr = prompts(sid)
+        fields = {"material_title": r["content_snapshot"]["source"]["material_title"], "part_label": part["label"],
+                  "claims": notes.claims_listing(cmap)}
+        claims_meta = {k: x["claim"]["statement"] for k, x in cmap.items()}
+        src_ids = sorted({x["unit_id"] for x in cmap.values()})
+
+        async def write(template: str, extra: dict, step: str):
+            out, _ = await run_structured(c, [HumanMessage(content=render(pr[template], {**fields, **extra}))], NotesOutput,
+                                          task="compact", node=step, prompt_version=pv, source_ids=src_ids,
+                                          check=notes.notes_check(cmap), json_schema=notes.notes_schema(cmap),
+                                          meta={"step": step, "claims_map": claims_meta},
+                                          min_max_tokens=3072, min_context_tokens=16384)
+            return out
+
+        async def audit(out: NotesOutput) -> NotesAudit:
+            ids = [n.id for n in out.notes]
+            tmpl = json.dumps({"notes": [{"id": i, "verdict": "faithful", "note": ""} for i in ids]}, ensure_ascii=False)
+            listing = "\n".join(f"- {n.id}［{n.kind}］{n.text}（依據 {'、'.join(n.claim_refs)}）" for n in out.notes)
+            a, _ = await run_structured(c, [HumanMessage(content=render(pr["reading_notes_audit"], {
+                **fields, "notes": listing, "output_template": tmpl}))], NotesAudit, task="compact", node="notes_audit",
+                prompt_version=pv, source_ids=src_ids, json_schema=gates.exact_ids_schema(NotesAudit, {"notes": ids}),
+                meta={"step": "notes_audit", "note_ids": ids}, min_max_tokens=2048, min_context_tokens=16384)
+            return a
+
+        out = await write("reading_notes", {}, "notes")
+        vn = notes.verify_notes(out, cmap, await audit(out))
+        gaps = notes.coverage_gaps(vn, cmap)
+        revised = False
+        if (gaps or any(n.status != "verified" for n in vn)) and c.budget.calls + 2 <= c.budget.max_calls:
+            out = await write("reading_notes_revise", {"issues": notes.notes_issues(vn, gaps, cmap),
+                                                         "notes_json": out.model_dump_json()}, "notes_revise")
+            vn = notes.verify_notes(out, cmap, await audit(out))
+            gaps = notes.coverage_gaps(vn, cmap)
+            revised = True
+        return {"notes": [n.model_dump() for n in vn], "gaps": gaps, "revised": revised,
+                "status": "verified" if not gaps and all(n.status == "verified" for n in vn) else "partial"}
+
     async def generate_quiz(state: WorkflowState) -> dict:
+        """R6: questions only from verified basis of the read range (verified notes, else verified claims), on a
+        program coverage plan; every concept and question cites its basis and passes an audit. No basis → no quiz."""
         sid = state["session_id"]
         r = row(sid)
         content, st = r["content_snapshot"], r["state"]
@@ -421,36 +530,67 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         rd = st["reading"]
         upto = rd.get("stopped_at")
         read = content["quotes"] if upto is None else content["quotes"][:upto + 1]
-        read_text = "\n\n".join(q["text"] for q in read)
-        read_parts = [p for p in content["parts"] if p["quote_from"] <= read[-1]["index"]]
-        text, mode = reading.quiz_source_text(read_text, read_parts, rd["compacts"])
+        last = read[-1]["index"]
+        basis = notes.quiz_basis(content, rd, last)
+        if not basis:
+            return {"error": {"code": "quiz_basis_insufficient", "retryable": False,
+                              "detail": "已讀範圍沒有通過來源核對的內容，無法依據來源出題。"}, "failed_node": "generate"}
+        plan = notes.coverage_plan(content, rd, basis, last, generate.MAX_CONCEPTS)
         src = content["source"]
-        material = {"id": src["material_id"], "title": src["material_title"], "unit": src["unit"]}
-        label = generate.range_label(material["unit"], src["start"], src["end"])
-        body = render(prompts(sid)["generate"], {
-            "material_title": material["title"], "range_label": label, "range_text": text,
-            "min_concepts": str(generate.MIN_CONCEPTS), "max_concepts": str(generate.MAX_CONCEPTS),
-            "source_kind": "精簡筆記（原文已在導讀時讀過，這裡只保留出題所需的重點）" if mode == "compact" else "教材原文",
-            "reading_log": reading.reading_log(read, rd) or "（沒有導讀紀錄）"})
+        label = generate.range_label(src["unit"], src["start"], src["end"])
+        pv = meta(r)["prompt_bundle"]["hash"]
+        pr = prompts(sid)
         op = f"{sid}:generate:{upto}"
+        c = ctx(state, "generate", f"{op}:{state.get('pending_event_id')}")
+        ids = {b["id"] for b in basis}
+        fields = {"material_title": src["material_title"], "range_label": label, "basis": notes.basis_listing(basis),
+                  "plan": notes.plan_listing(plan)}
         try:
-            gen, _ = await run_structured(ctx(state, "generate", f"{op}:{state.get('pending_event_id')}"), [HumanMessage(content=body)], generate.Generated,
-                                          task="generate", node="generate", prompt_version=meta(r)["prompt_bundle"]["hash"],
-                                          meta={"range_text": text, "reading_questions": [x["question"] for qs in rd["qa"].values() for x in qs]},
-                                          source_ids=[q["unit_id"] for q in read], min_max_tokens=4096, min_context_tokens=16384)
+            draft, _ = await run_structured(c, [HumanMessage(content=render(pr["quiz_generate"], fields))], QuizDraft,
+                                            task="generate", node="quiz_generate", prompt_version=pv,
+                                            check=notes.quiz_check(plan, ids), source_ids=[q["unit_id"] for q in read],
+                                            json_schema=notes.quiz_schema(plan, sorted(ids)),
+                                            meta={"step": "quiz_generate", "plan": plan}, min_max_tokens=4096,
+                                            min_context_tokens=16384)
+            qids = notes.quiz_audit_ids(draft)
+            questions = "\n".join(f"- {cc.topic}.{k}：{getattr(cc, k).prompt}（依據 {'、'.join(getattr(cc, k).basis)}；"
+                                  f"評分：{getattr(cc, k).rubric}）" for cc in draft.concepts for k in ("diagnostic", "transfer"))
+            tmpl = json.dumps({"questions": [{"id": i, "verdict": "ok", "note": ""} for i in qids]}, ensure_ascii=False)
+            audit, _ = await run_structured(c, [HumanMessage(content=render(pr["quiz_audit"], {
+                **fields, "questions": questions, "output_template": tmpl}))], QuizAudit, task="generate",
+                node="quiz_audit", prompt_version=pv, json_schema=gates.exact_ids_schema(QuizAudit, {"questions": qids}),
+                meta={"step": "quiz_audit", "question_ids": qids}, min_max_tokens=2048, min_context_tokens=16384)
         except TaskError as e:
             return {"error": model_error(e), "failed_node": "generate"}
+        kept, dropped = notes.quiz_keep(draft, audit)
+        if not kept.concepts:
+            return {"error": {"code": "quiz_unverified", "retryable": True,
+                              "detail": "題目沒有通過依據核對：" + "；".join(dropped)[:300]}, "failed_node": "generate"}
+        gen = generate.Generated(title=kept.title, concepts=[generate.GenConcept(
+            title=x.title, explanation=x.explanation, examples=x.examples, key_terms=x.key_terms,
+            diagnostic=generate.GenQuestion(**x.diagnostic.model_dump(exclude={"basis"})),
+            transfer=generate.GenQuestion(**x.transfer.model_dump(exclude={"basis"}))) for x in kept.concepts])
+        by_id = {b["id"]: b for b in basis}
+        review = notes.symbol_consistency([(rd["compacts"].get(str(p["index"])) or {}).get("notes", []) for p in content["parts"]])
 
-        def mutate(c: dict, s: dict) -> None:
-            generate.fill_content(c, gen)
-            new = engine.initial_state(c)
+        def mutate(cn: dict, s: dict) -> None:
+            generate.fill_content(cn, gen)
+            for k, x in enumerate(kept.concepts):   # each concept / question keeps the basis it was checked against
+                cn["concepts"][k]["basis"] = x.basis
+                cn["concepts"][k]["source_refs"] = sorted({u for b in x.basis for u in by_id[b]["unit_ids"]})
+                for q in cn["questions"]:
+                    if q["concept_id"] == cn["concepts"][k]["id"]:
+                        q["basis"] = getattr(x, q["type"]).basis
+            new = engine.initial_state(cn)
             new["reading"] = s["reading"]
-            new["reading"]["quiz_source"] = mode
+            new["reading"]["quiz_source"] = "verified"
             new["reading"]["quiz_scope"] = [q["unit_id"] for q in read]
+            new["reading"]["quiz_plan"] = {"topics": [{k: t[k] for k in ("id", "label", "basis")} for t in plan],
+                                           "dropped": dropped, "notation_review": review}
             s.clear()
             s.update(new)
 
-        repo.commit(sid, op + ":commit", kind="quiz", payload=gen.model_dump(), mutate=mutate)
+        repo.commit(sid, op + ":commit", kind="quiz", payload={"draft": kept.model_dump(), "dropped": dropped}, mutate=mutate)
         faults.hit("after_commit:generate")
         return {"error": None, "failed_node": None}
 
@@ -575,7 +715,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         if nxt >= len(content["quotes"]) or str(nxt) in rd["guides"]:
             return "not_applicable"
         # the next unit's input once the current unit is read: the current guide counts as accepted
-        task = guide_task(sid, nxt, 1, guides=rd["guides"])
+        task = guide_task(sid, nxt, 1, guides=rd["guides"], assume_read={rd["index"]})
         key = prefetch_key(task)
         if repo.get_artifact(key):
             return "cached"

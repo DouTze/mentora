@@ -40,9 +40,11 @@ class Repository:
                       (snap["snapshot_id"], material_id, snap["unit"], snap["start"], snap["end"],
                        snap["extraction_version"], snap["text_hash"], len(blocks), now_iso()))
             c.executemany("INSERT INTO source_blocks (block_id, snapshot_id, ordinal, kind, text, locator, text_hash, "
-                          "extraction_version, parent_block_id, piece, continues) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                          "extraction_version, parent_block_id, piece, continues, heading_level, structure_confidence, meta) "
+                          "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                           [(b.block_id, b.material_snapshot_id, b.ordinal, b.kind, b.text, b.locator.model_dump_json(),
-                            b.text_hash, b.extraction_version, b.parent_block_id, b.piece, int(b.continues)) for b in blocks])
+                            b.text_hash, b.extraction_version, b.parent_block_id, b.piece, int(b.continues),
+                            b.heading_level, b.structure_confidence, _j(b.meta) if b.meta else None) for b in blocks])
 
     def load_blocks(self, snapshot_id: str) -> list[SourceBlock]:
         with self.db.conn() as c:
@@ -50,7 +52,9 @@ class Repository:
         return [SourceBlock(block_id=r["block_id"], material_snapshot_id=r["snapshot_id"], ordinal=r["ordinal"],
                             kind=r["kind"], text=r["text"], locator=Locator.model_validate(json.loads(r["locator"])),
                             text_hash=r["text_hash"], extraction_version=r["extraction_version"],
-                            parent_block_id=r["parent_block_id"], piece=r["piece"], continues=bool(r["continues"]))
+                            parent_block_id=r["parent_block_id"], piece=r["piece"], continues=bool(r["continues"]),
+                            heading_level=r["heading_level"], structure_confidence=r["structure_confidence"],
+                            meta=json.loads(r["meta"]) if r["meta"] else {})
                 for r in rows]
 
     def get_snapshot(self, snapshot_id: str) -> dict | None:

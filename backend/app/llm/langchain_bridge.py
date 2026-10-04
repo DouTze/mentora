@@ -32,15 +32,21 @@ if os.environ.get("MENTOR_ALLOW_LANGSMITH") != "1":
 ROLE = {"human": "user", "system": "system", "ai": "assistant"}
 
 
-def to_backend_messages(messages: list[BaseMessage]) -> list[dict[str, str]]:
+def to_backend_messages(messages: list[BaseMessage]) -> list[dict]:
+    """Text messages; an image part ({"type": "image", "base64": …}) becomes the message's `images` list (the
+    Ollama chat format). Only a backend whose Capabilities declare vision is ever sent one."""
     out = []
     for m in messages:
         role = ROLE.get(m.type)
         if role is None:
             raise ValueError(f"unsupported message type for local backends: {m.type}")
-        content = m.content if isinstance(m.content, str) else "".join(
-            p.get("text", "") if isinstance(p, dict) else str(p) for p in m.content)
-        out.append({"role": role, "content": content})
+        if isinstance(m.content, str):
+            out.append({"role": role, "content": m.content})
+            continue
+        text = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in m.content
+                       if not (isinstance(p, dict) and p.get("type") == "image"))
+        images = [p["base64"] for p in m.content if isinstance(p, dict) and p.get("type") == "image"]
+        out.append({"role": role, "content": text, **({"images": images} if images else {})})
     return out
 
 

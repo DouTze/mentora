@@ -61,6 +61,12 @@ class CountingBackend(LLMBackend):
     async def health(self):
         return await self.inner.health()
 
+    async def capabilities(self):   # the wrapped adapter's real limits and vision support
+        return await self.inner.capabilities()
+
+    def count_tokens(self, messages):
+        return self.inner.count_tokens(messages)
+
     def take(self) -> list[dict]:
         out, self.calls = self.calls, []
         return out

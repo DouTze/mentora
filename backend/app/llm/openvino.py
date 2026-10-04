@@ -12,7 +12,7 @@ import os
 import time
 from typing import Any
 
-from .base import LLMBackend, LLMError, LLMResult
+from .base import Capabilities, LLMBackend, LLMError, LLMResult
 
 
 class OpenVINOBackend(LLMBackend):
@@ -73,6 +73,8 @@ class OpenVINOBackend(LLMBackend):
         return text, usage, None
 
     async def generate(self, messages, *, temperature, max_tokens, context_tokens, meta=None) -> LLMResult:
+        if any(m.get("images") for m in messages):   # never silently drop an image the caller relies on
+            raise LLMError("OpenVINO 文字模型不支援影像輸入")
         pipe = await self._pipeline()
         t0 = time.perf_counter()
         try:
@@ -83,6 +85,29 @@ class OpenVINOBackend(LLMBackend):
         except Exception as e:  # noqa: BLE001
             raise LLMError(f"OpenVINO 推論失敗：{e}") from e
         return LLMResult(text=text, latency_ms=int((time.perf_counter() - t0) * 1000), usage=usage, raw=raw)
+
+    async def capabilities(self) -> Capabilities:
+        """LLMPipeline has no per-call context size (`context_tokens` is ignored): the limit is the exported model's
+        max_position_embeddings. It is a text pipeline; images cannot be passed through this adapter."""
+        limit = None
+        try:
+            with open(os.path.join(self.model_path, "config.json"), encoding="utf-8") as f:
+                limit = int(json.load(f).get("max_position_embeddings") or 0) or None
+        except (OSError, ValueError):
+            pass
+        return Capabilities(context_limit=limit, honors_context_tokens=False, vision=False,
+                            source="openvino:config.json" if limit else "openvino:unknown")
+
+    def count_tokens(self, messages: list[dict[str, str]]) -> int | None:
+        """Exact count with the model's own chat template + tokenizer, once the pipeline is loaded."""
+        if self._pipe is None:
+            return None
+        try:
+            tok = self._pipe.get_tokenizer()
+            prompt = tok.apply_chat_template(messages, add_generation_prompt=True, extra_context={"enable_thinking": False})
+            return int(tok.encode(prompt).input_ids.get_shape()[-1])
+        except Exception:  # noqa: BLE001 - fall back to the estimate
+            return None
 
     async def health(self) -> dict[str, Any]:
         try:

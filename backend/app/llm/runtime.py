@@ -72,10 +72,12 @@ class BudgetExceeded(Exception):
 BUDGETS: dict[str, dict[str, int]] = {
     "segment_window": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},
     "seam": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},
-    "guide": {"max_calls": 8, "max_format_fixes": 1, "max_revisions": 1, "max_tool_rounds": 2, "max_tools_per_round": 2},
+    # source understanding (+ context, audit, one source revision) and teaching (bridges, draft, audit, one body
+    # revision, one re-check) share one budget; format fixes and revisions are calls too
+    "guide": {"max_calls": 14, "max_format_fixes": 2, "max_revisions": 2, "max_tool_rounds": 2, "max_tools_per_round": 2},
     "ask": {"max_calls": 4, "max_format_fixes": 1, "max_revisions": 1, "max_tool_rounds": 1, "max_tools_per_round": 2},
-    "compact": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},
-    "generate": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},
+    "compact": {"max_calls": 5, "max_format_fixes": 1, "max_revisions": 1},     # notes, audit, one revision + audit
+    "generate": {"max_calls": 3, "max_format_fixes": 1, "max_revisions": 0},    # questions, audit
     "assess": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},
 }
 
@@ -209,3 +211,11 @@ class ModelRuntime:
                                 max_tokens=max(self.snap.max_tokens, min_max_tokens),
                                 context_tokens=max(self.snap.context_tokens, min_context_tokens),
                                 semaphore=self.semaphore)
+
+    def max_tokens(self, min_max_tokens: int = 0) -> int:
+        return max(self.snap.max_tokens, min_max_tokens)
+
+    async def limits(self, task_floor: int = 0):
+        """Effective context limits of this model (capabilities of the loaded backend, capped by config)."""
+        from .context import resolve_limits
+        return resolve_limits(await self.backend.capabilities(), self.snap.context_tokens, task_floor)

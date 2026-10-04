@@ -113,9 +113,22 @@ def test_blind_packet_round_trip():
     b = {"mode": "candidate", "results": [{"id": "c", "unit_source": {"u1": "src"}, "unit_guides": {"u1": {"guide": "B"}}}]}
     packet, key, template = ev.blind_packet(a, b)
     assert "c/u1" in key and "baseline" not in packet and "candidate" not in packet
-    template["c/u1"]["X"].update(faithfulness=5, completeness=4, clarity=4)
-    template["c/u1"]["Y"].update(faithfulness=3, completeness=3, clarity=3, fabricated_claim=True)
+    template["c/u1"]["X"]["guide"].update(faithfulness=5, completeness=4, clarity=4)
+    template["c/u1"]["Y"]["guide"].update(faithfulness=3, completeness=3, clarity=3, fabricated_claim=True)
     scores = ev.score_blind(key, template)
     x_mode = key["c/u1"]["X"]
     assert scores[x_mode]["faithfulness"] == 5 and scores[x_mode]["major_errors"] == 0
     assert scores[key["c/u1"]["Y"]]["major_errors"] == 1
+
+
+def test_blind_packet_scores_the_guide_without_the_chinese_text():
+    a = {"mode": "baseline", "results": [{"id": "c", "unit_source": {"u1": "src"},
+                                          "unit_guides": {"u1": {"guide": "正文A", "chinese_text": "課文A"}}}]}
+    b = {"mode": "candidate", "results": [{"id": "c", "unit_source": {"u1": "src"}, "unit_guides": {"u1": {"guide": "正文B"}}}]}
+    packet, key, template = ev.blind_packet(a, b)
+    assert packet.index("：主要正文") < packet.index("中文課文（另評）")   # the guide is read before any 中文課文
+    assert set(template["c/u1"]["X"]) == {"guide", "chinese_text"}
+    template["c/u1"]["X"]["chinese_text"].update(faithfulness=2, missing_key_condition=True)
+    template["c/u1"]["X"]["guide"].update(faithfulness=5)
+    s = ev.score_blind(key, template)[key["c/u1"]["X"]]
+    assert s["guide"]["major_errors"] == 0 and s["chinese_text"]["major_errors"] == 1

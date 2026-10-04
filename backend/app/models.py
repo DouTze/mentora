@@ -47,6 +47,10 @@ class StartSessionRequest(BaseModel):
     material_id: str | None = None
     start: int | None = None
     end: int | None = None
+    # task contract of a LangGraph reading session (optional; defaults are recorded as defaults)
+    reading_depth: Literal["close", "skim"] | None = None
+    reading_goal: str | None = Field(default=None, max_length=200)
+    reader_background: str | None = Field(default=None, max_length=500)
 
 
 class CategoryRequest(BaseModel):
