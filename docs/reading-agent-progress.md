@@ -2,6 +2,8 @@
 
 對應規劃：[reading-agent-langgraph-plan.md](reading-agent-langgraph-plan.md)。本文件記錄每階段的實際完成項、檢查結果、決策與限制。未執行的檢查不標成通過。
 
+2026-10-04 新增 [WaAi-ML 閱讀方法落實規劃](reading-method-alignment-plan.md) 與更新後的 [Claude Code 交接指令](claude-code-reading-agent-handoff.md)。同日依 R0–R8 接續既有成果，結果見「下一輪閱讀方法落實」；下方 P0–P6 保留為第一輪紀錄。
+
 ## 狀態總覽
 
 | 階段 | 狀態 | 摘要 |
@@ -171,12 +173,157 @@ spike 決策（以實際安裝版本驗證）：
 - 首版只允許一個 runner；多 worker 需另外設計 lease heartbeat。
 - 舊版程式不能直接接手升級過的 DB（見 README 回退說明）。
 
-## 建議的下一步
+## 下一輪閱讀方法落實
 
-1. 人工盲評：依 `RUBRIC.md` 填 `scores.json`，執行 `scripts/eval_reading.py compare data/evals/p0-ollama-4b-baseline data/evals/p3-ollama-4b-candidate --scores scores.json`。
-2. 降低耗時：把 analyze 併入 draft（常態 3 次 → 2 次）、只在程式驗證或規則判斷有疑慮時才呼叫檢查，再重跑對照，目標 p95 ≤ 3 倍。
-3. 重跑 candidate 驗證檢查輸出上限修正，並量測預取後的首段等待時間。
-4. 通過後才把預設切到 `langgraph`。
+2026-10-04 對照 WaAi-ML 規範後，確認既有實作仍缺少來源先驗證、正文獨立覆蓋、完整 token 預算與壓縮後忠實性檢查。審查重跑後端結果為 **117 passed，5 個 PyMuPDF／SWIG 棄用警告**；沒有重跑真模型。
+
+已用程式與 scripted backend 重現：正文缺少條件與公式，但中文課文保留時，graph 仍可能接受；反轉獨立性前提的句子因高 bigram 覆蓋使審稿意見降級；不同第三層小節可能落在同一 Part。另確認空 review 物件會被 schema 解析為空 issues，尚未確認真模型曾產生此行為。
+
+完整證據、契約與驗收見 [閱讀方法落實規劃](reading-method-alignment-plan.md)。先修放行漏洞與交接預算，再建立來源與教學契約；不再以直接合併 analyze／draft 或省略 review 作為首要優化。後續若調整呼叫分工，須證明品質關卡仍成立。
+
+| 階段 | 狀態 | 摘要 |
+| --- | --- | --- |
+| R0 固定現況與回歸案例 | 完成 | 5 個放行漏洞＋1 個結構案例成為 fixtures；修改前 graph 與 legacy 的真模型基線另存 |
+| R1 正文驗收與審稿降級 | 完成（併入 R3 的 Gate 2） | 中文課文與正文分開核對；相似度與「補充說明」標籤不再撤銷重大問題；空的審稿不算通過 |
+| R2 上下文與輸入預算 | 完成 | 每次呼叫的輸入＋輸出保留＋餘量檢查；ContextPacket 只捨棄可選上下文；工具回傳實際來源與完整性 |
+| R3 來源與必要教學契約 | 程式完成；真模型部分通過 | 逐句命題＋Gate 1、BridgeSpec、學習狀態、Gate 2、VerifiedSource 快取與失效規則 |
+| R4 原書結構與模型批次 | 完成 | heading level、section path、論證／例子／列舉關係、一個 Part 最多一個第三層小節 |
+| R5 PDF 符號與媒材證據 | 程式完成；qwen3-vl:4b 視覺取證在自製 fixture 通過 | 頁／bbox／字型旗標／遺失字形、區域渲染、能力宣告、未確認時不公開 |
+| R6 筆記與題目忠實性 | 程式完成；未用真模型跑完整出題 | 筆記只從已驗證命題壓縮並逐條核對；題目依主題計畫與已驗證依據出題並核對 |
+| R7 相容性與前端整合 | 完成 | 舊版 DB／checkpoint（38e3c11 實際產生）升級與續接、匯出、前端狀態與 i18n |
+| R8 真模型品質與效率 | 自動對照完成；人工盲評未做 | 見下方 R8；未達切換預設的條件 |
+
+### 工作環境、分支與版本
+
+- 本輪從 `feat/reading-langgraph`（含 P0–P6 commit）建立 `feat/reading-method-alignment`。`develop` 仍停在 `2a216b7`，沒有 P0–P6 的基礎，所以沒有切回 `develop` 重做。使用者原有的未提交檔案（companion 圖檔、`STYLE.md`、`docs/` 下的規劃與交接文件）全程未修改、未提交。
+- 環境：Apple M4 Pro、24 GB；Python 3.13.11 venv；Ollama 0.35.1（本輪在本機啟動 `ollama serve`，沒有下載任何模型），使用已存在的 `qwen3-vl:4b`；溫度 0.2。OpenVINO 沒有在本輪重跑（見限制）。
+- 開工時重跑後端測試：**117 passed，5 個 PyMuPDF／SWIG 棄用警告**，與審查基線相同。
+- WaAi-ML 方法來源（唯讀）讀取版本：`git 6ee8af1`；`ReadingAgent.md` sha256 `33200a5b…`、`reading-guide-format.md` `ec262c0e…`、`reading-guide-section-format.md` `0b58eb15…`、`notation-governance.md` `ad12e2be…`。已核對 ReadingAgent §2、§3、§5.2、§6、§7、§8，format 的 §2、§4、§5，notation 的 §5、§6，以及 `reading-plain_HoML-CH1-2.md` 的細讀／略讀用法。書籍專屬 Agent（HoML／AIMA 等）的表記慣例沒有逐條落實（本專案的教材不限定一本書）。
+- 新版本識別：`reading-graph-v2`、`reading-bundle-v2`、`reading-contracts-v1`、`blocks-v2`、`units-v2`、`notes-v1`、`pdf-evidence-v1`、`markers-v1`、token 估計 `heuristic-v2`；DB migration v5。
+
+### R0 固定現況與回歸案例
+
+- `backend/evals/reading/regressions/cases.json`：審查重現的 4 個放行漏洞（正文漏條件與公式但中文課文保留、反轉「彼此獨立」、空審稿、錯誤內容標成補充說明）、一個應通過的忠實改寫（避免靠全部拒絕達標），以及兩個第三層小節落在同一 Part 的結構案例。模型輸出依角色寫在 fixture 中，同一組資料可跑不同版本的 graph。
+- 在修改前的 commit（`38e3c11`，獨立 worktree）上執行：5 個漏洞全部重現（4 個草稿被公開、兩個小節併成 1 個 Part、`ReviewResult({})` 解析成空 issues），忠實改寫正常公開。紀錄：`backend/data/evals/r0-regressions-prechange.jsonl`。
+- 修改前的真模型基線（qwen3-vl:4b，同 manifest）：`backend/data/evals/r0-graph-prechange`、`r0-legacy`（git 忽略，未覆寫 P0–P6 的舊結果）。
+
+| 指標 | legacy（r0） | 修改前 graph（r0） |
+| --- | --- | --- |
+| 公開／導讀數 | 27／28 | 23／32 |
+| 每段 p50／p95 | 9.4／15.6 秒 | 34.7／76.9 秒 |
+| 首段 p50 | 13.1 秒 | 49.7 秒 |
+| 模型呼叫 | 41 | 143 |
+| 輸入／輸出 tokens | 42,549／11,234 | 160,694／54,071 |
+| 來源完整性 | 12/13 | 13/13 |
+| 自動保留率（正文＋課文） | 0.926 | 0.649 |
+
+修改前 graph 的 9 段未公開：7 段 `quality_check_failed`（多數為審稿指出無依據內容）、2 段 `invalid_model_output`。
+
+### R1 正文驗收與審稿降級
+
+- `reading/agent.py`：程式檢查逐欄位進行；正文的公式只在正文裡找。正文完全沒有數學時，漏掉的公式是確定的事實（直接修訂）；正文有數學但不是逐字相同時，記為「待確認」，要由核對提出正文中改寫後的公式才可撤回（等價改寫不能由撰寫者自我宣告）。
+- 移除 bigram 覆蓋降級與「補充說明」降級。審稿意見的引用只在原文與「該意見所指欄位」中查找；引用不存在、沒有引用時記為「待確認」並經一次聚焦核對。撤回重大意見必須：核對給出的正文原句確實存在、句中保留來源的否定／條件／例外／量詞／必要性（`reading/markers.py`）、保留來源的公式。引用有效的「無依據」或「改變意思」意見只能靠修訂處理。
+- 審稿 schema 要求每個檢查項都回報一次（缺少、重複、空物件都會先要求格式修正，仍不完整就 `review_invalid`，不公開）。這套規則在 R3 成為 Gate 2 的一部分。
+- 測試：`tests/test_reading_regressions.py`（fixtures 全部依預期公開或擋下，且擋下的原因正確：程式公式檢查、否定反轉、檢查結果不完整、未核准的補充說明）。
+
+### R2 上下文與輸入預算
+
+- `app/llm/context.py`：`estimated_input + reserved_output + margin ≤ effective_limit` 在 `run_structured` 的每一次送出前檢查（含格式修正；放不下時，格式修正只附錯誤說明、不附無效輸出）。放不下就 `context_overflow`，不呼叫模型。
+- 有效長度來自 adapter 的能力宣告（`Capabilities`）：Ollama 由 `/api/show` 取得模型的 context length 與是否支援 vision；OpenVINO 讀 IR 的 `max_position_embeddings`，並明確標示 `context_tokens` 對它沒有作用；再以 `MENTOR_MAX_CONTEXT_TOKENS`（預設 32768）為上限。Ollama 的 `num_ctx` 改用固定級距（`MENTOR_GRAPH_NUM_CTX`，預設 16384），不再每個任務換一次而觸發模型重載。
+- `Packet`／`ContextItem`：必要項（原文、命題、橋梁、理解所依賴的補充上下文、被核對的正文）永不截斷；可選項（已讀重點、以前的問答、讀者已讀命題）依優先序整項捨棄並留下「未提供」標記；每次呼叫的 packet 與預算寫入 `llm_calls.request`。答疑也改用 packet。
+- 工具：`ToolPayload` 回傳實際讀到的單元、版本、是否完整與未提供項目；不再按字元截斷，單元整段放入或明確列為未提供。`source_refs` 記錄實際讀到的單元（讀 u-b 的前一段會記 u-a）。撰寫、核對、修訂、聚焦核對使用同一份補充上下文。
+- 估計方法 `heuristic-v2`（CJK 1、其他字元 0.35、每則訊息 8、基本 24、每張圖 1280）；OpenVINO 載入後可用 tokenizer 精算。真模型的估計／實際比見 R8。
+- 測試：`tests/test_context_budget.py`。
+
+### R3 來源與必要教學契約
+
+- 契約：`reading/contracts.py`（TaskContract、LearningSnapshot、SourceClaim、SourceUnderstanding、GateResult、VerifiedSource、BridgeSpec、BodyDraft、BodyAudit）。程式與 Gate 邏輯：`reading/gates.py`。子流程：`workflows/reading_graph.py`（`reading-graph-v2`）。
+- 階段 A／Gate 1：程式先把原文逐句編號，模型的命題只能引用句子編號（只涵蓋一句的一部分時才逐字引用）；外文逐句翻譯，中文課文由程式組裝。程式核對：每句都被引用、部分引用時涵蓋 ≥85% 且每個條件／否定／例外／量詞／必要性標記都在引用範圍內、命題陳述保留原句的這些標記、外文譯句保留公式與標記。外文另由模型逐句核對譯文；中文原文只有在標記可疑時才呼叫核對。符號：md／txt 以作者的 LaTeX 為證據；PDF 見 R5。Gate 1 沒過不會寫任何正文。
+- 真模型除錯後的決定：第一版要求模型逐字複製原文，qwen3-vl:4b 的輸出被截斷；改為引用句子編號後仍會不停追加重複的組合命題直到上限（61 秒、4096 tokens 截斷）。最後以受限解碼 schema 限制：句子編號為 enum、命題數上限約為句數＋3、外文譯句數必須等於句數。同一段降到 567 tokens、9 秒。稽核類輸出也用「必須逐一回報這些編號」的 schema（enum＋固定項數），並附上已填好編號的輸出骨架。
+- 階段 D：`plan_bridges` 依已驗證命題與讀者狀態規劃 0–4 個橋梁；每個橋梁必須指向存在的命題、說明依據類型與邊界、內容不可描述產製過程。障礙與理由只在內部，草稿 prompt 只看到核准的學科內容。
+- 學習狀態：已讀（按下一段）的單元命題、在已讀單元問過的問題、作答證據（目前在閱讀階段為空）、任務契約（深度、目標、讀者背景，未提供時記為預設）。已生成或預取但未讀的導讀不計入；`presented` 與 `read` 分開記錄。
+- 階段 E／Gate 2：正文只看已驗證命題、核准橋梁與（可選的）中文課文。程式檢查正文本身的公式、KaTeX、依賴中文課文的說法、叫學生回看原文、敘述產製過程；「補充說明」段落必須對應某個核准橋梁的內容（只用重疊度提出問題，不用來撤回問題）。模型稽核只看正文與原文全文，對每個命題與橋梁逐一回報；「已涵蓋」必須附正文片段，程式展開成整句後核對標記與公式；還要列出命題清單以外但正文漏掉的原文。一次修訂、每個正文版本最多一次聚焦核對。
+- JSON 的 LaTeX 反斜線：真模型有時以單一反斜線寫 `\frac`、`\bar`、`\top`、`\nabla`，嚴格 JSON 會把它們解成換頁、退格、tab、換行，公式被悄悄破壞。現在解析前修復 JSON 字串內的 LaTeX 反斜線（真正的 `\n` 換行保留）。這個問題 legacy 流程也有，本輪沒有修改 legacy。
+- 持久化與失效：VerifiedSource 以「原文與區塊、補充上下文、符號證據、來源階段 prompts、模型、版本」為鍵存成 `verified_source` artifact；補充上下文全為原文單元時可跨 session 重用。橋梁與正文依讀者狀態，不共用；預取鍵含學習狀態雜湊。改來源、符號證據或來源 prompt 會重驗來源；只改正文 prompt 或讀者狀態不會。
+- 預算：每段最多 14 次呼叫（含 2 次格式修正、來源與正文各 1 次修訂），每個呼叫點最多 1 次格式修正，重啟由 `llm_calls` 重建，不會重置。
+- 測試：`tests/test_reading_graph.py`（27 項）、`tests/test_learning_state.py`、`tests/test_reading_regressions.py`。
+
+### R4 原書結構與模型批次
+
+- `SourceBlock` 新增 `heading_level`、`structure_confidence`、`meta`（migration v5）。Markdown 標題深度 ≤3 構成正式小節路徑（`#`→章、`##`→節、`###`→第三層小節；此對應寫在 `segmentation.SECTION_LEVEL`），正文繼承所屬小節；PDF 以版面猜到的短標題記為低信心，不定義小節。
+- 保護關係：既有的硬性關係之外，新增「論證結論承接前提」「同一組列舉」「例子與其說明的內容」「程式碼與說明」「表格與說明」「同一段落被切成多塊後的後續句子」等軟性關係；合併後超過 1600 字就分成相鄰單元，記錄關係，並保證在同一 Part、後一單元以前一單元作為程式提供的上下文。視窗（模型批次）不切在任何關係中間；模型切法違反關係時被拒絕。
+- Part：一個 Part 最多一個正式第三層小節；同一小節內約 5000 字分一次，但不會切在相依單元之前。Part 契約記錄 section path、分割理由與結構信心。接縫檢查在承接語或指涉語開頭時才請模型判斷。
+- 測試：`tests/test_structure.py`（結構 regression、深層標題、PDF 低信心標題、`cross-window-argument` 符合 gold 且視窗不切開、例子／程式碼／where、超長論證、模型切法被拒、blocks-v1 舊資料 migration）。
+
+### R5 PDF 符號與媒材證據
+
+- `reading/pdf_evidence.py`：匯入範圍時從原始 PDF 取每個段落的頁碼、bbox、text spans（字型、大小、旗標）、粗體／斜體單字母、上標、數學字型、文字層遺失的字形，以及鄰近圖片與 caption。`materials.pdf_page_paragraphs` 讓匯入與取證使用同一份段落切法。
+- 含符號的 PDF 段落（或有字型線索）：session 的模型若在能力宣告中支援影像（Ollama `/api/show` 的 `vision`），只渲染那一段的版面區域送給同一個模型判讀，並與字型線索交叉比對（粗體、斜體、上標）；一致才記為 `confirmed`，判讀結果作為來源理解的符號依據，Gate 1 再檢查命題與中文課文有沒有把粗體向量寫成一般字母。模型不能看圖、沒有原始 PDF 或判讀矛盾時，標為 `notation_unverified` 並在任何模型呼叫前停下（原因含頁碼與可採取的做法），不從文字層猜。渲染圖存在 `backend/data/evidence/`。OpenVINO adapter 宣告不支援影像，送圖會明確報錯。
+- 自製 fixtures：`backend/evals/reading/pdf/`（`make_fixtures.py` 產生 `symbols.pdf`、`figure.pdf`）。文字層把 `w ← w − η∇L` 抽成 `w�·�w�·�··L`、把 x² 抽成 `x2`。
+- 真模型：`scripts/vision_probe.py --model qwen3-vl:4b --runs 2` 兩次都讀出 `\mathbf{w} \leftarrow \mathbf{w} - \eta \nabla L`，粗體 w、斜體 x／L、上標 2 與字型線索一致（每次 11–14 秒）。這只證明本機 4b 在這個自製 fixture 上可用，不代表真實教科書頁面的準確率。
+- 掃描 PDF 仍沿用既有的「沒有可擷取的文字」錯誤，沒有 OCR。
+- 測試：`tests/test_pdf_evidence.py`、`tests/test_reading_graph.py` 的 PDF 項目。
+
+### R6 筆記與題目
+
+- `reading/notes.py`、`learning_graph.compact`／`generate_quiz`。筆記只從 Part 內已通過 Gate 1 的命題壓縮，每條標明依據（`U2.C3`），程式核對引用存在、壓縮後沒有掉條件／否定／例外／量詞、公式保留，再由模型逐條核對；兩者都過才是 `verified`。沒有被已驗證筆記涵蓋的已驗證命題原樣保留。讀者看到的筆記（本節重點、易混淆、術語）由程式從已驗證筆記組成，不再有 300–600 字的自由摘要。筆記無法產生時保留已驗證命題並記錄原因，不擋住閱讀；只有模型連不上時才停下等待重試。
+- 出題：依據只取已讀範圍內的已驗證筆記與未被涵蓋的已驗證命題；導讀沒過的段落不提供依據。程式排出主題（已讀 Part，有提問的優先，最多 3 個），每個主題一個概念，概念與每題都要標依據；再由模型逐題核對（可由依據回答、條件適用、不需範圍外知識、提示不洩答案），沒過的概念移除，全部沒過就不出題。沒有任何已驗證依據時回 `quiz_basis_insufficient`，不硬出題。小節統整檢查跨 Part 的符號一致性（同一字母有粗體與一般寫法時提醒）。
+- 評分與教學決策仍由 `engine.py` 負責，沒有另做評分引擎。
+- 測試：`tests/test_notes_quiz.py`。
+
+### R7 相容性與前端整合
+
+- 舊資料：`tests/fixtures/v1_session/` 是用修改前的程式（`38e3c11`）實際產生的 DB 與 checkpoint（一個 session 停在等待讀者、問過一個問題；一個已在作答階段）。新程式開啟後完成 migration v5、載入舊 checkpoint；等待中的 session 在下一個命令前升級一次（`workflows/migrations.py`）：保留它自己的 ask／assess／切段提示詞，加入 v2 提示詞，補上任務契約（記為預設），已公開的 v1 導讀保持原樣並標明舊版檢查，之後的段落走 v2；用 v1 讀過的段落出題時只以原文為依據。作答中的 session 照常作答。legacy session 不受影響。升級紀錄寫在 `workflow_meta.migrations` 與匯出。
+- 讀書工作區（Markdown 鏡像）遺失時寫入不再讓命令失敗。
+- 匯出：每段導讀標明檢查版本與 Gate 1／Gate 2 結果、閱讀設定、流程升級紀錄、已核對筆記、題目依據。API：`POST /api/sessions` 新增 `reading_depth`、`reading_goal`、`reader_background`；workflow view 新增 `reading_workflow_version`、`task_contract`、`migrations`；session view 的概念與題目附 `basis`。
+- 前端：新增 13 個階段文字（例如「正在核對這一段原文說了什麼」「正在檢查導讀是否完整忠實」）；導讀或出題被擋下時顯示白話原因，檢查紀錄（含命題編號）收在可展開區；不能靠重試解決的情況（例如段落太長）不顯示重試，改說明可行做法。i18n 英文手寫並同步 `en.source.json`（沒有執行會呼叫雲端翻譯的腳本）。
+- 測試：`tests/test_compat.py`；前端 `ReadingPanel.checks.test.tsx`。
+
+### R8 真模型品質與效率
+
+條件：qwen3-vl:4b（Ollama 0.35.1，本機已有權重）、溫度 0.2、同一份 manifest（新增 `pdf-symbols` 共 14 份可讀教材＋3 份損壞來源）、同一台 M4 Pro。所有輸出在 `backend/data/evals/`（git 忽略）：`r8-legacy`、`r0-graph-prechange`、`r8-graph`（中途版）、`r8-graph-final2`（最終程式）、`r8-graph-rep2`（困難案例重跑）、`r8-report.md`（`scripts/r8_report.py` 產生）。
+
+| 指標 | legacy | 修改前 graph | 修改後 graph（最終） |
+| --- | --- | --- | --- |
+| 公開／導讀數 | 28／29 | 23／32 | 23／35（另一次同程式的完整重跑 26／35） |
+| 每段 p50／p95 | 8.9／14.0 秒 | 34.7／76.9 秒 | 31.3／100.6 秒 |
+| 首段 p50 | 11.5 秒 | 49.7 秒 | 31.4 秒 |
+| 導讀總時間 | 266 秒 | 1,311 秒 | 1,422 秒 |
+| 模型呼叫 | 45 | 143 | 198 |
+| 輸入／輸出 tokens | 46,401／11,398 | 160,694／54,071 | 243,197／58,948 |
+| 來源完整性 | 13 | 13 | 14 |
+| 邊界符合 gold | 8 | 8 | 11 |
+| 自動保留率（正文＋課文／只看正文） | 0.845／0.845 | 0.649／— | 0.649／0.649 |
+| forbidden（含注入） | 0 | 0 | 0 |
+
+- 未公開原因（最終）：`quality_check_failed` 9、`notation_unverified` 2、`invalid_model_output` 1。逐段檢視後：
+  - 確實的問題：正文把 `\mathbf` 改成 `\bm`／`\boldsymbol`（符號改變）；「補充說明」加入沒有核准的背景（包括在只講文字的段落補上梯度下降公式）；「只描述」被改寫而失去「只」；把可能性（may／can）寫成必然；正文改變命題（粒線體段落）。
+  - 檢查本身的限制：稽核模型把兩句合併後再引用，程式找不到原句（`image-limitation`、`duplicate-paragraphs`），這些可能是正確稿被擋。
+  - 證據限制：`cross-page-condition` 是沒有原始 PDF 的頁面 fixture，符號無從取證（設計上不公開）；`pdf-symbols` 第一段在這一輪的視覺判讀漏寫上標，被交叉比對擋下（重跑那一輪兩段都通過）。
+  - 模型故障：`early-quiz` 第一段兩次都陷入重複輸出 `\n` 直到 2048 tokens 上限。
+- 各節點時間（最終）：`body_audit` 398 秒、`draft` 386 秒、`understand` 207 秒、`plan_bridges` 176 秒、`revise_body` 148 秒、`verify` 88 秒、切段 35 秒、`source_audit` 9 秒、`symbols` 8 秒。時間主要花在正文撰寫與正文稽核兩步。
+- 速度：p50 約為 legacy 的 3.5 倍、p95 約 7.2 倍，**未達「p95 不超過 3 倍」**。修改前 graph 的 p95 為 5.5 倍；本輪多了來源核對與橋梁規劃，換來的是可核對的命題、逐項正文核對與較少被截斷的輸出。
+- 預取（`scripts/prefetch_probe.py`，假設每段閱讀 20 秒）：改動前每次預取都在讀者按下一段時被取消並重做（`r8-prefetch.json`：3 次取消、0 次採用）。改為「下一段」等待進行中的預取並直接採用後，`cross-window-argument` 第一次按下一段只等 1.5 秒（不預取時 31.3 秒），4 段中採用 2 段；另一段的預取遇到 Ollama 500 錯誤而改為按需產生（等 47 秒）。背景成本：4 段多出 15 次呼叫。其他兩組測試在第一段或第二段就因導讀被擋而停在重試，樣本太小，不足以下結論。
+- Token 估計（`scripts/token_calibration.py` 以 `num_predict=1` 取得 Ollama 的實際 prompt token 數）：61 個實際 prompt 形狀的估計／實際比 1.02–1.36（從不低估）。真模型輸出進入 prompt 時最低到 0.78（格式修正夾帶了重複 `\n` 的無效輸出）；為此把餘量提高到 10%＋256，且格式修正放不下時只附錯誤說明。
+- 盲評包：`data/evals/r8-compare-legacy/blind/packet.md`（legacy 對最終 graph，25 題）、`r8-compare-graph/blind/packet.md`（修改前對修改後，21 題）。**尚未人工評分**；mock 或 LLM 自評都沒有拿來代替人工分數。
+- 錯誤稿漏放／正確稿誤擋：在 regression fixtures（scripted）上，4 份錯誤稿全擋、1 份正確改寫通過。真模型的實際比例需要人工盲評才能判定；上面列出的「稽核合併引用」屬於可能的誤擋。
+- OpenVINO（CPU，`qwen3-1.7b-int4-ov`，`zh-opportunity-cost`；`r8-openvino-1.7b-cpu`）：adapter 路徑可用。受限 schema 在 OpenVINO structured output 下都產生合法輸出；pipeline 載入後 prompt token 改用 tokenizer 精算，估計等於實際（第一次呼叫尚未載入，用估計 1106 對實際 911）。但 1.7b 只為第一句列出命題，Gate 1 以「S2 沒有任何命題涵蓋」擋下 2/2 段，切段視窗也無效而退回規則切法。結論：1.7b 不足以完成這套來源核對，關卡拒絕公開而不是放行不完整的理解。8b OpenVINO 與 GPU 未測。
+
+結論：可追溯性、來源核對與符號取證都有可驗證的進展；**品質是否提升尚未經人工證明，速度未達標**，`MENTOR_WORKFLOW` 預設維持 `legacy`，不宣稱 rollout 可用。
+
+### 本輪限制與下一步
+
+- 人工盲評：依 `RUBRIC.md` 為上述兩份盲評包評分（主要正文先評、中文課文另評），以 `scripts/eval_reading.py compare … --scores scores.json` 揭盲。這是決定能否切換預設的必要條件。
+- 速度：可在不削弱關卡的前提下嘗試（皆需以同一驗收集重測）：
+  - 正文稽核只送「程式無法確認」的命題，或以分批方式稽核；
+  - 為正文 JSON 設 `maxLength`，限制退化重複；
+  - 讓預取在讀者閱讀時先跑完 Gate 1（VerifiedSource 可跨 session 重用）。
+- 稽核引用：小模型常合併兩句後引用，造成「引用的句子不在主要正文」；可改成要求逐句片段，或允許引用多個片段再由程式逐一展開。
+- 橋梁正確性仍只靠同一個 4b 模型核對：實測有一個核准橋梁把折射率寫成 v/c（應為 c/v），稽核沒有指出。
+- 書籍專屬表記（`<BOOK>_Notation.md`）沒有導入；目前以作者 LaTeX 或 PDF 視覺取證為準。
+- OpenVINO GPU（B70）、8b 模型、掃描 PDF（OCR）都沒有驗證或實作。
+- 多 worker、`cross-page-condition` 這類沒有原始檔的頁面 fixture 的取證，維持現況。
+
 
 ## 提交紀錄
 
@@ -190,3 +337,18 @@ spike 決策（以實際安裝版本驗證）：
 6. `docs`：本進度文件
 
 未提交：使用者原有的 `frontend/src/assets/companions/*.webp`、`STYLE.md`，以及 `docs/reading-agent-langgraph-plan.md`、`docs/claude-code-reading-agent-handoff.md`（本文件開頭連到規劃文件，該檔仍未納入版控）。
+
+R0–R8 的改動在 `feat/reading-method-alignment` 上，**全部未提交**（本輪沒有提交授權）。建議的拆分（依 CONTRIBUTING.MD，各自可測）：
+
+1. `test(backend)`：放行漏洞 regression fixtures 與 R0 基線腳本
+2. `fix(backend)`：正文與中文課文分開驗收、移除相似度與標籤降級、嚴格審稿 schema（R1）
+3. `feat(backend)`：模型能力宣告、輸入預算與 ContextPacket、工具的實際來源與完整性（R2）
+4. `feat(backend)!`：來源先驗證的導讀子流程 reading-graph-v2（契約、Gate 1／Gate 2、橋梁、學習狀態、VerifiedSource 快取、JSON 的 LaTeX 反斜線修復）與 prompts（R3）
+5. `feat(backend)`：原書結構、論證關係與小節邊界的 Part（R4，migration v5）
+6. `feat(backend)`：PDF 版面與字型證據、視覺取證與未確認狀態（R5）
+7. `feat(backend)`：已驗證筆記與依據綁定的出題（R6）
+8. `feat(backend)`：舊 session 升級、匯出、預取採用、評估與量測腳本（R7／R8）
+9. `feat(frontend)`：核對階段、白話的未公開原因與 i18n（R7）
+10. `docs`：README、CHANGELOG、本進度文件
+
+第 4 項標 `!`：reading-graph-v2 改變新版流程 session 的導讀契約與 prompt bundle；舊 session 由升級步驟處理（見 R7）。

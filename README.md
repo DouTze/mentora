@@ -59,7 +59,18 @@ cd frontend && bun install && bun run dev
 設 `MENTOR_WORKFLOW=langgraph` 後，**之後新建立**的教材學習改由 `backend/app/workflows/` 執行；預設仍是 `legacy`。每個 session 建立時就記下自己的流程（`workflow_runner`），之後改設定不會影響它。新版流程的差異：
 
 - **切段**：程式先把範圍抽成可追溯的來源區塊（段落、標題、清單項目、整段程式碼、`$$` 公式、跨頁的句子…），模型只回傳區塊編號與理由，正文一律由程式從區塊拼回，不會被模型改寫或漏掉。公式與其引入／where 說明、同一清單、跨頁句子等由程式標示為不可切開；模型的分組不合法時修正一次，仍不合法就退回規則切法。
-- **導讀**：每段依序「分析要點 →（需要時）用唯讀工具查前後文 → 撰寫 → 程式驗證 → 模型對照原文檢查 →（必要時）修訂一次」。公式沒有原樣保留、外文缺中文課文、條件遺漏或無依據主張等重大問題未解決時，草稿**不公開**，畫面顯示可重試的錯誤。每段最多 8 次模型呼叫，每次呼叫都記在 `llm_calls`（`GET /api/sessions/{id}/trace`）。
+- **原書結構**：Markdown 的 `#`–`###` 視為正式小節，一個閱讀部分（part）最多一個第三層小節；完整論證（第一個前提…因此…）、例子與它說明的概念、程式碼與說明、公式與 where 說明不會被切開（太長時拆成相鄰單元，但留在同一部分並帶上前一段當上下文）。PDF 以版面猜到的短標題不當成正式小節。
+- **導讀（先核對來源，再寫教學）**：每段依序
+  1. 程式把原文逐句編號，模型列出依據哪幾句的命題（外文另逐句翻成中文課文）；程式核對每一句都被涵蓋、條件／例外／否定／量詞沒有掉、公式原樣保留，外文再由模型逐句核對譯文（**Gate 1**）。
+  2. 依讀者狀態規劃最少必要的教學橋梁（可以沒有）；閱讀深度、讀者背景與規劃理由只控制寫法，不會寫進正文。
+  3. 撰寫主要正文，再由程式與模型只看正文逐項核對每個命題與橋梁（**Gate 2**）；中文課文寫到了不算正文寫到，「補充說明」標籤不能免除檢查，文字相似不能撤回重大問題。
+  4. 有問題時修訂一次；撤回疑點必須提出程式找得到、條件與公式都保留的正文原句。重大問題或必要證據未解決時，草稿**不公開**，畫面顯示白話原因（例如「需要確認公式」）與可否重試。
+  
+  每段最多 14 次模型呼叫（含格式修正與修訂），重啟不重置；每次呼叫的輸入估計、輸出保留與實際放入的上下文都記在 `llm_calls`（`GET /api/sessions/{id}/trace`）。通過 Gate 1 的來源命題會依來源、符號證據、提示詞與模型版本快取，可在其他 session 重用；正文依讀者狀態而定，不共用。
+- **輸入預算**：每次呼叫都檢查「輸入估計 + 輸出保留 + 餘量 ≤ 模型實際可用長度」（Ollama 由 `/api/show` 取得、OpenVINO 讀模型的 `max_position_embeddings`，再以 `MENTOR_MAX_CONTEXT_TOKENS` 為上限）。超出時先捨棄非必要的上下文（以前的問答、已讀重點），必要的原文、命題與橋梁絕不截斷；仍放不下就停下來說明，不會悄悄截掉條件。Ollama 的 `num_ctx` 固定在 `MENTOR_GRAPH_NUM_CTX` 的級距，避免每次呼叫都重新載入模型。
+- **PDF 符號**：匯入 PDF 時保存每段的頁碼、版面位置、字型與粗體／斜體／上標線索。含數學符號的段落只在 session 的模型能看圖（例如 Ollama 的 qwen3-vl）時，送出那一小塊版面截圖請模型判讀，並與字型線索交叉比對；不能看圖或判讀矛盾時保留為「需要確認公式」，不從純文字猜。截圖存在 `backend/data/evidence/`。
+- **筆記與出題**：讀完一部分時，筆記只從已通過 Gate 1 的命題壓縮，每條標明依據並檢查條件與公式是否保留，再由模型逐條核對；沒有筆記涵蓋的已核對命題原樣保留。出題先由程式依已讀部分排出主題（學生問過的優先），每個概念與題目都要標出依據，經核對可由依據回答且條件適用才採用；已讀範圍沒有通過核對的內容時不出題。
+- **閱讀設定**：`POST /api/sessions` 可帶 `reading_depth`（`close` 細讀／`skim` 略讀）、`reading_goal`、`reader_background`；沒帶的欄位記為預設。
 - **可恢復**：學生的每個操作是一個帶 `command_id` 的命令，先寫進 SQLite 才回應；後端重啟會接續已受理的命令，同一個命令重送只會套用一次。流程位置存在 `backend/data/checkpoints.sqlite3`（LangGraph checkpoint），學習紀錄仍以 `mentor.sqlite3` 為準。
 - **固定設定**：新 session 保存模型設定與所有提示詞的全文（prompt bundle），之後改設定或改提示詞只影響新 session。
 
@@ -68,7 +79,8 @@ cd frontend && bun install && bun run dev
 重啟與回退：
 
 - 重啟：直接重啟後端即可，啟動時會接續未完成的命令；等待學生操作的 session 不會自己前進，失敗的工作等使用者按「重試」。
-- 回退：把 `MENTOR_WORKFLOW` 改回 `legacy` 只影響之後的新 session；既有 LangGraph session 仍由新版流程服務。若要退回舊版程式，先停掉後端，成對還原備份的 `mentor.sqlite3` 與 `checkpoints.sqlite3`（備份之後的資料會遺失）。不要把升級過的 `mentor.sqlite3` 直接交給舊版程式：舊版建立 session 時用位置式的 `INSERT`，遇到新增欄位會失敗。
+- 舊 session：在導讀流程升級（reading-graph-v1 → v2）前建立的 LangGraph session，下一次操作前會自動升級一次並記在匯出的「流程升級」：已公開的導讀保持原樣並標明是舊版檢查，之後的段落使用來源核對與正文核對，原有的閱讀部分不重新切分；用舊版讀過的段落出題時只以原文為依據。
+- 回退：把 `MENTOR_WORKFLOW` 改回 `legacy` 只影響之後的新 session；既有 LangGraph session 仍由新版流程服務。若要退回舊版程式，先停掉後端，成對還原備份的 `mentor.sqlite3` 與 `checkpoints.sqlite3`（備份之後的資料會遺失）。不要把升級過的 `mentor.sqlite3` 直接交給舊版程式：舊版建立 session 時用位置式的 `INSERT`，遇到新增欄位會失敗；升級過的 session 也只能由新版程式繼續。
 - 備份：停掉後端後，一起複製 `backend/data/mentor.sqlite3`、`checkpoints.sqlite3` 與 `reading/`。
 
 ### 閱讀 agent
@@ -80,6 +92,7 @@ cd frontend && bun install && bun run dev
 ```bash
 cd backend && .venv/bin/python -m pytest     # e2e 流程：切段／導讀／答疑／分部分壓縮／答對／答錯／理由矛盾／輸出不合法／連線中斷／重啟續接／重跑／匯出
                                              # 新版流程：來源完整性、adapter 保真、預算、子流程、命令去重、真子 process 崩潰後恢復
+                                             # 閱讀方法：放行漏洞回歸、Gate 1／Gate 2、輸入預算、原書結構、PDF 符號證據、筆記／出題、舊資料相容
 cd frontend && bun test && bun run typecheck  # 畫面測試：以假 fetch 隔離後端
 cd agent && bun run typecheck                 # 閱讀 agent（實際跑需要 Ollama）
 ```
@@ -94,9 +107,12 @@ cd backend
 .venv/bin/python scripts/eval_reading.py candidate --backend ollama --model qwen3-vl:4b    # 新版流程
 .venv/bin/python scripts/eval_reading.py compare data/evals/<A> data/evals/<B>              # 指標對照 + 盲評包
 .venv/bin/python scripts/runtime_smoke.py --backend ollama --model qwen3-vl:4b             # LangChain bridge 最小真模型檢查
+.venv/bin/python scripts/r8_report.py legacy=data/evals/<A> graph=data/evals/<B>            # 公開率、未公開原因、延遲、各節點 tokens、估計／實際 tokens
+.venv/bin/python scripts/vision_probe.py --model qwen3-vl:4b                               # PDF 符號：模型能否從版面截圖讀出粗體／上下標
+.venv/bin/python scripts/prefetch_probe.py --model qwen3-vl:4b --read-seconds 20           # 預取開／關時讀者實際等待與背景呼叫成本
 ```
 
-`--stages segment` 只評切段（快）；`--cases` 指定教材。腳本只用本機模型，不會下載模型或把教材送到雲端。自動檢查只是信號，品質以 `RUBRIC.md` 的人工盲評為準。
+`--stages segment` 只評切段（快）；`--cases` 指定教材。腳本只用本機模型，不會下載模型或把教材送到雲端。自動檢查只是信號，品質以 `RUBRIC.md` 的人工盲評為準：盲評包先只呈現兩份主要正文，中文課文另外評分。放行漏洞的回歸 fixtures 在 `backend/evals/reading/regressions/`，自製 PDF fixtures 在 `backend/evals/reading/pdf/`。
 
 ## 結構
 
@@ -148,7 +164,7 @@ GET  /api/library                          # 分類 + 教材清單
 POST /api/categories   PATCH|DELETE /api/categories/{id}
 POST /api/materials (multipart: file, category_id)
 GET|PATCH|DELETE /api/materials/{id}       GET /api/materials/{id}/file
-POST /api/sessions   {"material_id","start","end"} 或 {"content_id"}
+POST /api/sessions   {"material_id","start","end","reading_depth"?,"reading_goal"?,"reader_background"?} 或 {"content_id"}
 GET  /api/sessions   GET /api/sessions/{id}
 POST /api/sessions/{id}/answer   {"answer": "..."}
 POST /api/sessions/{id}/events   {"command_id","type":"guide|ask|next|finish|answer|retry","expected_revision"?,"unit_id"?,"question_id"?,"payload"}
