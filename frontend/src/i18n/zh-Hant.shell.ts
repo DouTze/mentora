@@ -68,6 +68,8 @@ export const shell = {
   "companion.temperatureHint": "越低越穩定，越高越有變化。",
   "companion.maxTokens": "單次輸出上限（max_tokens）",
   "companion.contextTokens": "上下文長度（context tokens）",
+  "companion.parallel": "並行數量",
+  "companion.parallelHint": "模型伺服器可以同時處理的請求數。大於 1 時，閱讀期間會先核對後面幾段的原文，讀到時導讀更快。不要超過伺服器的上限：Colab notebook 會印出 REMOTE_JOBS，本機 Ollama 看 OLLAMA_NUM_PARALLEL。",
   "companion.check": "檢查連線",
   "companion.checking": "檢查中…",
   "companion.save": "儲存變更",

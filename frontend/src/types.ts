@@ -194,6 +194,8 @@ export interface ModelConfig {
   temperature: number;
   max_tokens: number;
   context_tokens: number;
+  /** requests the model server may run at once; above 1 the coming units' sources are verified ahead */
+  parallel?: number;
 }
 
 /** The remote model server saved on the backend; the token itself never comes back. */

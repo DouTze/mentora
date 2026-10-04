@@ -67,6 +67,8 @@ export const en: Dict = {
   "companion.temperatureHint": "Lower values give more consistent responses; higher values add variety.",
   "companion.maxTokens": "Output limit per response (max_tokens)",
   "companion.contextTokens": "Context length (context tokens)",
+  "companion.parallel": "Parallel requests",
+  "companion.parallelHint": "How many requests the model server can handle at once. Above 1, the sources of the next units are checked while you read, so their guided reading is ready sooner. Don't exceed the server's limit: the Colab notebook prints REMOTE_JOBS; for local Ollama see OLLAMA_NUM_PARALLEL.",
   "companion.check": "Check connection",
   "companion.checking": "Checking…",
   "companion.save": "Save changes",

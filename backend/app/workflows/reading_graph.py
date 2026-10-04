@@ -71,6 +71,7 @@ class GuideState(TypedDict, total=False):
     gate_rules: str              # gates.GATE_RULES_VERSION this attempt runs under (checked before publishing)
     budget_base: int             # calls spent by earlier, discarded runs of this attempt (carried, never refilled)
     bridges_dropped: list        # bridges removed because they could not be verified (the guide fell back to the source)
+    source_only: bool            # stop once the source is verified (warming the VerifiedSource cache ahead of the reader)
     rounds: dict                 # model node → times it has run (part of its step-cache key)
     supplements: list[dict]
     symbol_evidence: dict | None # R5: the unit's symbol evidence, confirmed by the symbols node when possible
@@ -109,10 +110,11 @@ class ReadingDeps:
 
 
 def initial_state(task: ra.ReadingTaskInput, op: str, command_id: str | None = None,
-                  budget: dict | None = None) -> GuideState:
+                  budget: dict | None = None, source_only: bool = False) -> GuideState:
     """`budget`: what an earlier, discarded run of the same attempt already spent (a run restarted because the gate
     rules changed keeps its spending; the budget is never refilled)."""
     return {"task": task.model_dump(), "op": op, "command_id": command_id, "gate_rules": gates.GATE_RULES_VERSION,
+            "source_only": source_only,
             "budget": budget or CallBudget.for_task("guide").to_dict(), "budget_base": int((budget or {}).get("calls") or 0),
             "rounds": {}, "supplements": [], "symbol_evidence": task.symbol_evidence, "context_status": "not_needed",
             "model_context_done": False,
@@ -723,7 +725,11 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                      ("revise_source", revise_source), ("plan_bridges", plan_bridges), ("draft", draft),
                      ("body_audit", body_audit), ("verify", verify), ("revise_body", revise_body)):
         g.add_node(name, model_node(name, fn))
-    for name, fn in (("gate1", gate1), ("gate2", gate2), ("drop_bridges", drop_bridges), ("accept", accept), ("hold", hold)):
+    def source_done(state: GuideState) -> dict:
+        return {"status": "source_verified"}
+
+    for name, fn in (("gate1", gate1), ("gate2", gate2), ("drop_bridges", drop_bridges), ("accept", accept), ("hold", hold),
+                     ("source_done", source_done)):
         g.add_node(name, fn)
 
     def failed_or(route):
@@ -731,16 +737,18 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
 
     judge = {"pass": "accept", "revise": "revise_body", "verify": "verify", "fail": "hold", "drop_bridges": "drop_bridges"}
     g.add_edge(START, "prepare")
-    g.add_conditional_edges("prepare", lambda s: "plan_bridges" if s.get("verified") else
-                            "symbols" if needs_symbols(s) else "understand", ["plan_bridges", "symbols", "understand"])
+    after_source = lambda s: "source_done" if s.get("source_only") else "plan_bridges"   # noqa: E731
+    g.add_conditional_edges("prepare", lambda s: after_source(s) if s.get("verified") else
+                            "symbols" if needs_symbols(s) else "understand",
+                            ["plan_bridges", "source_done", "symbols", "understand"])
     g.add_conditional_edges("symbols", failed_or(lambda s: "understand"), ["understand", "hold"])
     g.add_conditional_edges("understand", failed_or(lambda s: "context" if wants_model_context(s) else "gate1"),
                             ["context", "gate1", "hold"])
     g.add_conditional_edges("context", failed_or(lambda s: "understand" if s.get("understanding") is None else "gate1"),
                             ["understand", "gate1", "hold"])
-    g.add_conditional_edges("gate1", lambda s: {"pass": "plan_bridges", "audit": "source_audit", "revise": "revise_source",
+    g.add_conditional_edges("gate1", lambda s: {"pass": after_source(s), "audit": "source_audit", "revise": "revise_source",
                                                 "hold": "hold"}[s["decision"]],
-                            ["plan_bridges", "source_audit", "revise_source", "hold"])
+                            ["plan_bridges", "source_done", "source_audit", "revise_source", "hold"])
     g.add_conditional_edges("source_audit", failed_or(lambda s: "gate1"), ["gate1", "hold"])
     g.add_conditional_edges("revise_source", failed_or(lambda s: "gate1"), ["gate1", "hold"])
     g.add_conditional_edges("plan_bridges", failed_or(lambda s: "draft"), ["draft", "hold"])
@@ -754,6 +762,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                             ["accept", "revise_body", "drop_bridges", "hold"])
     g.add_edge("drop_bridges", "draft")
     g.add_conditional_edges("revise_body", failed_or(lambda s: "gate2"), ["gate2", "hold"])
+    g.add_edge("source_done", END)
     g.add_edge("accept", END)
     g.add_edge("hold", END)
     return g.compile(checkpointer=checkpointer)

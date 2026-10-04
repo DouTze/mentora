@@ -30,6 +30,10 @@ class ModelConfig(BaseModel):
     temperature: float = 0.2
     max_tokens: int = 512
     context_tokens: int = 8192
+    # requests the model server may run at once (Ollama: OLLAMA_NUM_PARALLEL; the Colab notebook prints it). Above 1
+    # the reading workflow verifies the sources of the next units while the reader reads. Not part of the session's
+    # model snapshot: it changes speed, not output.
+    parallel: int = Field(default=1, ge=1, le=8)
 
 
 class RemoteEndpointRequest(BaseModel):

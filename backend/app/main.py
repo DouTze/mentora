@@ -40,7 +40,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     materials = MaterialStore(db)
     svc = TutorService(db, registry, materials)
     repo = Repository(db)
-    pool = BackendPool()
+    pool = BackendPool(parallel=registry.cfg.parallel)
     runner = WorkflowRunner(WorkflowDeps(db=db, repo=repo, pool=pool, svc=svc), checkpoint_path(db))
     workflow = WorkflowService(svc, repo, pool, runner)
     svc.workflow = workflow
@@ -156,6 +156,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     @app.put("/api/settings")
     async def put_settings(cfg: ModelConfig):
         registry.update(cfg)
+        pool.set_parallel(cfg.parallel)
         db.set_setting("model_config", cfg.model_dump())
         return {"config": registry.cfg.model_dump(), "active": registry.backend.describe(), "remote": remote.public()}
 
@@ -176,6 +177,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
             raise HTTPException(400, "active companion has no model config")
         cfg = req.companions[req.active]
         registry.update(cfg)
+        pool.set_parallel(cfg.parallel)
         db.set_setting("model_config", cfg.model_dump())
         db.set_setting("companions", req.model_dump())
         return {"companions": req.model_dump(), "config": cfg.model_dump(), "active": registry.backend.describe()}
