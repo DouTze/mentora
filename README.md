@@ -110,6 +110,7 @@ cd backend
 .venv/bin/python scripts/r8_report.py legacy=data/evals/<A> graph=data/evals/<B>            # 公開率、未公開原因、延遲、各節點 tokens、估計／實際 tokens
 .venv/bin/python scripts/vision_probe.py --model qwen3-vl:4b                               # PDF 符號：模型能否從版面截圖讀出粗體／上下標
 .venv/bin/python scripts/prefetch_probe.py --model qwen3-vl:4b --read-seconds 20           # 預取開／關時讀者實際等待與背景呼叫成本
+.venv/bin/python scripts/session_probe.py --model qwen3-vl:4b --out data/evals/<dir>       # 用真實 app 讀完教材：筆記核對、出題依據與抽查表
 ```
 
 `--stages segment` 只評切段（快）；`--cases` 指定教材。腳本預設只用本機模型，不會下載模型或把教材送到雲端。自動檢查只是信號，品質以 `RUBRIC.md` 的人工盲評為準：盲評包先只呈現兩份主要正文，中文課文另外評分。放行漏洞的回歸 fixtures 在 `backend/evals/reading/regressions/`，自製 PDF fixtures 在 `backend/evals/reading/pdf/`。
