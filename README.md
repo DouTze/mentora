@@ -10,7 +10,7 @@ agent/     以 pi 為基礎的閱讀 agent（舊版流程使用；舊版流程�
 
 ## 啟動
 
-需要 `uv` 與 `bun`。
+需要 `uv` 與 `bun`（Python 由 uv 自動下載）。macOS／Linux／Windows 都用同一組指令；Windows 上分開跑時，後端改用 `.venv\Scripts\uvicorn`。
 
 ```bash
 bun run dev         # 後端 http://localhost:8000 ，前端 http://localhost:5173（/api 會代理到後端）
