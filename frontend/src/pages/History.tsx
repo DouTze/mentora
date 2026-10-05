@@ -4,6 +4,7 @@ import type { SessionListItem, SessionView } from "../types";
 import { TurnList } from "../components/TurnList";
 import { Progress } from "../components/Progress";
 import { RichText } from "../components/RichText";
+import { Icon } from "../components/Icons";
 import { useT } from "../i18n";
 
 export function HistoryPage({ onOpen }: { onOpen: (id: string) => void }) {
@@ -11,6 +12,7 @@ export function HistoryPage({ onOpen }: { onOpen: (id: string) => void }) {
   const [list, setList] = useState<SessionListItem[]>([]);
   const [selected, setSelected] = useState<SessionView | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const reload = () => api.sessions().then(setList).catch((e: RequestError) => setMsg(e.body.detail));
   useEffect(() => {
@@ -29,6 +31,18 @@ export function HistoryPage({ onOpen }: { onOpen: (id: string) => void }) {
       setMsg(r.error ? t("history.replay.doneInterrupted", { ...vars, detail: r.error.detail }) : t("history.replay.done", vars));
       await reload();
       await open(r.session.id);
+    } catch (e) {
+      setMsg((e as RequestError).body.detail);
+    }
+  };
+
+  const remove = async (id: string) => {
+    setConfirmDelete(null);
+    try {
+      await api.deleteSession(id);
+      if (selected?.id === id) setSelected(null);
+      setMsg(t("history.delete.done"));
+      await reload();
     } catch (e) {
       setMsg((e as RequestError).body.detail);
     }
@@ -83,6 +97,21 @@ export function HistoryPage({ onOpen }: { onOpen: (id: string) => void }) {
                       <button className="sm ghost" onClick={() => replay(s.id)}>
                         {t("history.replay")}
                       </button>
+                      {confirmDelete === s.id ? (
+                        <>
+                          <span className="muted">{t("history.delete.confirmText")}</span>
+                          <button className="sm danger" onClick={() => remove(s.id)}>
+                            {t("history.delete.confirm")}
+                          </button>
+                          <button className="sm" onClick={() => setConfirmDelete(null)}>
+                            {t("common.cancel")}
+                          </button>
+                        </>
+                      ) : (
+                        <button className="sm ghost" onClick={() => setConfirmDelete(s.id)}>
+                          <Icon.trash /> {t("history.delete")}
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>

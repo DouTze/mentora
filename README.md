@@ -162,7 +162,7 @@ app 本身要用遠端模型時，見「接真實模型 → 遠端 Qwen」。評
 
 ### 紀錄
 
-每輪保存：題目、學生回答、送給模型的完整訊息、模型原始輸出、驗證備註、判斷、觸發的規則與動作、導師訊息、前後狀態、耗時、token 用量、錯誤、後端與模型。Session 保存教材、策略與模型設定的快照。可匯出 JSON／Markdown，可「用目前設定重跑」同一批回答建立新紀錄。
+每輪保存：題目、學生回答、送給模型的完整訊息、模型原始輸出、驗證備註、判斷、觸發的規則與動作、導師訊息、前後狀態、耗時、token 用量、錯誤、後端與模型。Session 保存教材、策略與模型設定的快照。可匯出 JSON／Markdown，可「用目前設定重跑」同一批回答建立新紀錄。學習紀錄頁可刪除單筆紀錄（需再按一次確認）：連同逐輪紀錄、命令、模型呼叫紀錄、導讀快取、checkpoint 與 `backend/data/reading/<session>/` 一起刪除，無法復原；還有操作在進行時會拒絕。教材與其他紀錄共用的來源快照不受影響。
 
 ## API
 
@@ -177,7 +177,7 @@ POST /api/categories   PATCH|DELETE /api/categories/{id}
 POST /api/materials (multipart: file, category_id)
 GET|PATCH|DELETE /api/materials/{id}       GET /api/materials/{id}/file
 POST /api/sessions   {"material_id","start","end","reading_depth"?,"reading_goal"?,"reader_background"?} 或 {"content_id"}
-GET  /api/sessions   GET /api/sessions/{id}
+GET  /api/sessions   GET|DELETE /api/sessions/{id}
 POST /api/sessions/{id}/answer   {"answer": "..."}   # 內建教材 session；教材學習改用 events
 POST /api/sessions/{id}/events   {"command_id","type":"guide|ask|next|finish|answer|retry","expected_revision"?,"unit_id"?,"question_id"?,"payload"}
                                  # 教材學習的所有操作：202 已受理／200 已完成的重送／409 過期或忙碌（附最新 session）

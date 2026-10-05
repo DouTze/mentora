@@ -62,6 +62,7 @@ export const api = {
   materialFileUrl: (id: string) => `/api/materials/${id}/file`,
   sessions: () => call<SessionListItem[]>("/sessions"),
   session: (id: string) => call<SessionView>(`/sessions/${id}`),
+  deleteSession: (id: string) => call<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   answer: (id: string, answer: string) =>
     call<{ turn: Turn; message: TutorMessage; session: SessionView }>(`/sessions/${id}/answer`, { method: "POST", body: JSON.stringify({ answer }) }),
   /** LangGraph sessions: 202 accepted (queued/running) or 200 already finished (a resend of a known command_id) */

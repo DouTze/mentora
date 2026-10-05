@@ -466,3 +466,54 @@ def test_parallel_one_never_warms(graph_app, monkeypatch):
     s = start(c, LONG)
     prefetch_idle(c, s["id"])
     assert c.app_ref.state.runner.warm_log == []
+
+
+# -- deleting a learning record -------------------------------------------------------------------------
+
+def _rows(db, sid):
+    with db.conn() as c:
+        return {t: c.execute(f"SELECT COUNT(*) FROM {t} WHERE session_id=?", (sid,)).fetchone()[0]
+                for t in ("turns", "workflow_commands", "llm_calls", "reading_artifacts")}
+
+
+def _threads(db, sid):
+    import sqlite3
+    with sqlite3.connect(Path(db.path).with_name("checkpoints.sqlite3")) as c:
+        return [r[0] for r in c.execute("SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id LIKE ?", (f"%{sid}%",))]
+
+
+def test_deleting_a_record_removes_everything_it_owns_and_nothing_else(graph_app, monkeypatch):
+    monkeypatch.setattr(config, "READING_PREFETCH", True)   # a prefetch thread and artifact must go too
+    c, db = graph_app, graph_app.app_ref.state.db
+    keep, s = start(c), start(c)
+    s, _ = run(c, s["id"], "ask", "q1", payload={"question": "葉綠體是什麼？"})
+    c.portal.call(c.app_ref.state.runner.idle)
+    sid = s["id"]
+    workspace = c.app_ref.state.svc.reading_dir / sid
+    assert any(_rows(db, sid).values()) and _threads(db, sid) and workspace.exists()
+
+    assert c.delete(f"/api/sessions/{sid}").status_code == 200
+    assert c.get(f"/api/sessions/{sid}").status_code == 404
+    assert [x["id"] for x in c.get("/api/sessions").json()] == [keep["id"]]
+    assert not any(_rows(db, sid).values()) and not _threads(db, sid) and not workspace.exists()
+    # the other record and the shared source snapshot are untouched
+    assert any(_rows(db, keep["id"]).values()) and _threads(db, keep["id"])
+    assert c.get(f"/api/sessions/{keep['id']}").json()["reading"]["guides"]
+    assert c.delete(f"/api/sessions/{sid}").status_code == 404
+
+
+def test_a_record_with_a_pending_command_is_not_deleted(graph_app):
+    c = graph_app
+    s = start(c)
+    c.app_ref.state.repo.insert_command(s["id"], "x1", "next", {}, "h", None)   # queued, not yet picked up
+    r = c.delete(f"/api/sessions/{s['id']}")
+    assert r.status_code == 409 and r.json()["code"] == "busy"
+    assert c.get(f"/api/sessions/{s['id']}").status_code == 200
+
+
+def test_an_old_flow_record_can_be_deleted(client):
+    from conftest import answer, start as start_legacy
+    s = start_legacy(client)
+    answer(client, s["id"], "我不知道")
+    assert client.delete(f"/api/sessions/{s['id']}").status_code == 200
+    assert client.get(f"/api/sessions/{s['id']}").status_code == 404 and client.get("/api/sessions").json() == []
