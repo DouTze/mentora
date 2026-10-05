@@ -80,5 +80,12 @@ class PlannedUnit(BaseModel):
     reason: str = ""                              # short boundary reason
 
 
+class TopicSplit(BaseModel):
+    """segment_topic output: the local labels of the blocks where a new topic begins (empty = one topic), and a short
+    name per resulting part (optional)."""
+    new_topic_at: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+
+
 class WindowPlan(BaseModel):
     units: list[PlannedUnit] = Field(min_length=1)

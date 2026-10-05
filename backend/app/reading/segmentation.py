@@ -35,9 +35,9 @@ from langchain_core.messages import HumanMessage
 
 from ..llm.runtime import CallBudget, stable_hash
 from ..llm.tasks import TaskContext, TaskError, run_structured
-from .schemas import PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, WindowPlan
+from .schemas import PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicSplit, WindowPlan
 
-SEGMENTATION_VERSION = "units-v6"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check
+SEGMENTATION_VERSION = "units-v7"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -238,8 +238,10 @@ def oversize(blocks: list[SourceBlock], grp: list[int], g: list[str | None] | No
 
 def normalize_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int, hi: int) -> tuple[list[list[int]], list[str]]:
     """Repairs a model grouping of blocks[lo:hi] that keeps the original order: a left-out block joins the unit before
-    it (the first unit for leading ones), and a boundary inside a glued pair moves forward past the pair. Raises
-    PlanInvalid when blocks repeat or are out of order (that needs the model). Returns (groups, notes)."""
+    it (the first unit for leading ones); a boundary right after a heading moves back before it (a heading belongs to
+    what follows it: moving forward would pull the heading and the first sentence of its section into the unit
+    before), and a boundary inside another glued pair moves forward past the pair. Raises PlanInvalid when blocks
+    repeat or are out of order (that needs the model). Returns (groups, notes)."""
     flat = [i for grp in groups for i in grp]
     if any(b <= a for a, b in zip(flat, flat[1:])):
         errs = validate_groups(blocks, groups, lo, hi)
@@ -255,6 +257,14 @@ def normalize_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int
     g = glues(blocks)
     out: list[list[int]] = []
     for grp in groups:
+        back = 0
+        while out and grp and blocks[out[-1][-1]].kind == "heading" and g[out[-1][-1]]:
+            grp.insert(0, out[-1].pop())
+            back += 1
+            if not out[-1]:
+                out.pop()
+        if back:
+            notes.append(f"B{grp[0] - lo + 1} 是小標題，要和下面的內容同單元，程式把邊界往前移")
         moved = 0
         while out and grp and g[out[-1][-1]]:
             out[-1].append(grp.pop(0))
@@ -506,8 +516,10 @@ def needs_topic_check(blocks: list[SourceBlock], grp: list[int]) -> bool:
 async def check_topic(blocks: list[SourceBlock], grp: list[int], reason: str, w: Window, k: int,
                       deps: PlannerDeps) -> tuple[list[list[int]], list[str], str | None]:
     """One unit planned together with many others: asked alone whether it holds one topic, a small model answers
-    better than it planned the whole buffer. A split is taken only when every part can carry a guide on its own
-    (TOPIC_MIN_PART_CHARS); an invalid answer keeps the unit. (groups, reasons, note or None)"""
+    better than it planned the whole buffer. The answer only names the blocks where a new topic begins, and the
+    prompt's example is the empty list: a small model copying the example (qwen3-vl:4b copied a units example
+    verbatim and cut a section after its heading) leaves the unit as it is. A split is taken only when every part
+    can carry a guide on its own (TOPIC_MIN_PART_CHARS); an invalid answer keeps the unit. (groups, reasons, note)"""
     template = deps.prompts.get("segment_topic")
     if template is None:   # a session whose prompt snapshot predates the one-topic check
         return [grp], [reason], None
@@ -520,15 +532,21 @@ async def check_topic(blocks: list[SourceBlock], grp: list[int], reason: str, w:
     ctx: TaskContext = deps.make_ctx("segment_topic", key)
     holder: dict[str, Any] = {}
 
-    def check(plan: WindowPlan) -> None:
+    def check(ans: TopicSplit) -> None:
         from ..llm.tasks import OutputInvalid
-        try:
-            holder["groups"], _ = normalize_groups(blocks, labels_to_groups(plan, sw), sw.lo, sw.hi)
-        except PlanInvalid as e:
-            raise OutputInvalid(str(e)) from e
+        n, cuts = len(grp), set()
+        for lab in ans.new_topic_at:
+            m = re.fullmatch(r"\s*B?(\d+)\s*", str(lab))
+            if not m or not 1 <= int(m.group(1)) <= n:
+                raise OutputInvalid(f"new_topic_at 只能用 B1–B{n} 的編號（收到 {lab!r}）")
+            if int(m.group(1)) > 1:   # B1 already opens the unit
+                cuts.add(sw.lo + int(m.group(1)) - 1)
+        bounds = [sw.lo] + sorted(cuts) + [sw.hi]
+        holder["groups"], _ = normalize_groups(blocks, [list(range(a, b)) for a, b in zip(bounds, bounds[1:])],
+                                               sw.lo, sw.hi)
 
     try:
-        plan, _ = await run_structured(ctx, [HumanMessage(content=prompt)], WindowPlan, task="segment_topic",
+        ans, _ = await run_structured(ctx, [HumanMessage(content=prompt)], TopicSplit, task="segment_topic",
                                        node=f"segment.{key}", prompt_version=deps.prompt_version,
                                        meta={"step": "segment_topic", **meta},
                                        source_ids=[blocks[i].block_id for i in grp], check=check,
@@ -542,8 +560,9 @@ async def check_topic(blocks: list[SourceBlock], grp: list[int], reason: str, w:
         return [grp], [reason], None
     if min(body_chars([blocks[i] for i in g]) for g in groups) < TOPIC_MIN_PART_CHARS:
         return [grp], [reason], f"{label} 單題檢查想拆成 {len(groups)} 個單元，但有一部分太短，維持一個單元"
-    return groups, reasons_for(plan, groups, labels_to_groups(plan, sw)), \
-        f"{label} 單題檢查：裡面有 {len(groups)} 個主題，依模型指出的主題轉折拆開"
+    topics = [t.strip() for t in ans.topics]
+    reasons = topics if len(topics) == len(groups) and all(topics) else [reason] * len(groups)
+    return groups, reasons, f"{label} 單題檢查：裡面有 {len(groups)} 個主題，依模型指出的主題轉折拆開"
 
 
 async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_chars: int = WINDOW_CHARS,

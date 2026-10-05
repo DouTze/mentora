@@ -518,8 +518,7 @@ async def test_a_unit_with_two_topics_is_split_by_the_one_topic_check():
     blocks = overview_then_item()
     first, nxt = one_unit_then_rest(blocks)
     item = next(i for i, b in enumerate(blocks) if b.text.startswith("第一階段"))
-    topic = {"units": [{"blocks": [f"B1-B{item}"], "reason": "技術演進總覽"},
-                       {"blocks": [f"B{item + 1}-B{nxt}"], "reason": "規則式方法"}]}
+    topic = {"new_topic_at": [f"B{item + 1}"], "topics": ["技術演進總覽", "規則式方法"]}
     b = Scripted([first, topic])
     deps, _ = deps_for(b)
     plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
@@ -534,15 +533,18 @@ async def test_a_unit_with_two_topics_is_split_by_the_one_topic_check():
 async def test_one_topic_or_a_too_fine_split_keeps_the_unit():
     blocks = overview_then_item()
     first, nxt = one_unit_then_rest(blocks)
-    keep = {"units": [{"blocks": [f"B1-B{nxt}"], "reason": "技術演進"}]}
-    b = Scripted([first, keep])
-    deps, _ = deps_for(b)
-    plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
-    assert len(b.requests) == 2 and groups_of(plan, blocks)[0] == list(range(nxt))
+    for keep in ({"new_topic_at": [], "topics": ["技術演進"]},
+                 {"new_topic_at": [], "topics": ["這個單元的主題"]},     # the prompt's example copied: nothing is cut
+                 {"new_topic_at": ["B1"], "topics": ["技術演進"]}):      # B1 already opens the unit
+        b = Scripted([first, keep])
+        deps, _ = deps_for(b)
+        plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
+        assert len(b.requests) == 2 and groups_of(plan, blocks)[0] == list(range(nxt))
+        assert plan.units[0].boundary_reason == "技術演進"
 
     tailed = overview_then_item(tail=True)
     first_t, nxt_t = one_unit_then_rest(tailed)
-    wrap_up = {"units": [{"blocks": [f"B1-B{nxt_t - 1}"], "reason": "技術演進"}, {"blocks": [f"B{nxt_t}"], "reason": "小結"}]}
+    wrap_up = {"new_topic_at": [f"B{nxt_t}"], "topics": ["技術演進", "小結"]}
     b = Scripted([first_t, wrap_up])                              # a one-line part cannot carry a guide
     deps, _ = deps_for(b)
     plan = await seg.plan_units(tailed, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
@@ -570,3 +572,28 @@ async def test_one_topic_check_skips_short_units_and_old_prompt_snapshots():
     deps.prompts = {k: v for k, v in deps.prompts.items() if k != "segment_topic"}
     plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
     assert len(b.requests) == 1 and groups_of(plan, blocks)[0] == list(range(nxt))
+
+
+def test_a_cut_right_after_a_heading_moves_back_before_it():
+    """qwen3-vl:4b cut between "A. 第一階段" and its first sentence; moving the cut forward (as for other glued pairs)
+    pulled the heading and that sentence into the overview unit. A heading goes with what follows it."""
+    lines = ["# 技術演進脈絡", "總覽的第一句。", "", "## A. 第一階段", "第一階段的第一句。", "", "第一階段的第二段。"]
+    blocks = extract_blocks("m", "line", 1, len(lines), lines)[1]
+    head = next(i for i, b in enumerate(blocks) if b.text == "A. 第一階段")
+    groups, notes = seg.normalize_groups(blocks, [list(range(head + 1)), list(range(head + 1, len(blocks)))], 0, len(blocks))
+    assert groups == [list(range(head)), list(range(head, len(blocks)))] and any("小標題" in n for n in notes)
+    groups, _ = seg.normalize_groups(blocks, [[0], list(range(1, len(blocks)))], 0, len(blocks))   # a lone heading
+    assert groups == [list(range(len(blocks)))]
+
+
+async def test_a_new_topic_named_after_its_heading_starts_at_the_heading():
+    overview = "自然語言處理的發展可以分成四個技術階段，每個階段都改變了模型設計的思維。" * 6
+    item = "第一階段的規則式方法依賴專家手寫的語法規則與詞彙辭典，可解釋但難以擴展。" * 12
+    lines = ["# 技術演進脈絡", overview, "", "## A. 第一階段", item, "", "# 下一節", "下一節的內容很短。"]
+    blocks = extract_blocks("m", "line", 1, len(lines), lines)[1]
+    first, nxt = one_unit_then_rest(blocks)
+    head = next(i for i, b in enumerate(blocks) if b.text == "A. 第一階段")
+    b = Scripted([first, {"new_topic_at": [f"B{head + 2}"], "topics": ["技術演進總覽", "規則式方法"]}])   # the sentence after it
+    deps, _ = deps_for(b)
+    plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
+    assert groups_of(plan, blocks)[:2] == [list(range(head)), list(range(head, nxt))]
