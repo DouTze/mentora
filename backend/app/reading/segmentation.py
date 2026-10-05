@@ -26,6 +26,7 @@ The rules planner alone is a complete, valid plan (used when the model is off, u
 budget, or keeps producing invalid plans); it satisfies every protected relation by construction."""
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,7 +37,7 @@ from ..llm.runtime import CallBudget, stable_hash
 from ..llm.tasks import TaskContext, TaskError, run_structured
 from .schemas import PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, WindowPlan
 
-SEGMENTATION_VERSION = "units-v5"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair
+SEGMENTATION_VERSION = "units-v6"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -46,6 +47,8 @@ CONTEXT_PREVIEW = 300
 PART_CHARS = 5000
 ARGUMENT_MAX_CHARS = 1600   # a soft relation (argument, example, enumeration) merges units up to this size
 UNIT_MAX_TOKENS = 1600      # strict upper bound of one unit (~1600 Chinese chars): more is too much for a beginner at once
+TOPIC_CHECK_MIN_CHARS = 400 # a model unit this long with two or more paragraphs gets the one-topic check
+TOPIC_MIN_PART_CHARS = 120  # a one-topic split that leaves a smaller part is not taken (too fine for a guide)
 SECTION_LEVEL = 3           # markdown heading depth mapped to the book's formal third-level section (Ch n.m.k)
 CONCLUSION_RE = re.compile(r"^\s*(因此|所以|於是|由此可知|由此可見|由此|綜上|總之|故|therefore|thus|hence|consequently|as a result)", re.I)
 ENUM_NEXT_RE = re.compile(r"^\s*(第[二三四五六七八九十]個?|其次|再者|另一個前提|second(ly)?|third(ly)?|next)", re.I)
@@ -415,16 +418,26 @@ async def plan_window(blocks: list[SourceBlock], w: Window, deps: PlannerDeps) -
     info["format_fixes"] = ctx.budget.format_fixes
     info["notes"] += [f"{w.window_id} {n}" for n in holder["notes"]]
     reasons = reasons_for(plan, holder["groups"], labels_to_groups(plan, w))
-    groups, out_reasons = [], []
-    for k, (grp, why) in enumerate(zip(holder["groups"], reasons)):
+    # an oversize unit gets the focused split (which already looks for topic turns); the other units this buffer
+    # emits get the one-topic check, concurrently (the backend pool limits real parallelism). The last unit may be
+    # carried into the next buffer and planned again there, so it is not checked here.
+    n = len(holder["groups"])
+    final = n - 1 if w.hi < len(blocks) and n > 1 else n
+
+    async def repair(k: int, grp: list[int], why: str) -> tuple[list[list[int]], list[str], str | None]:
         if oversize(blocks, grp):
-            sub_groups, sub_reasons, note = await split_unit(blocks, grp, why, w, k, deps)
+            return await split_unit(blocks, grp, why, w, k, deps)
+        if k < final and needs_topic_check(blocks, grp):
+            return await check_topic(blocks, grp, why, w, k, deps)
+        return [grp], [why], None
+
+    groups, out_reasons = [], []
+    for sub_groups, sub_reasons, note in await asyncio.gather(*(repair(k, grp, why) for k, (grp, why)
+                                                                in enumerate(zip(holder["groups"], reasons)))):
+        if note:
             info["notes"].append(f"{w.window_id} {note}")
-            groups += sub_groups
-            out_reasons += sub_reasons
-        else:
-            groups.append(grp)
-            out_reasons.append(why)
+        groups += sub_groups
+        out_reasons += sub_reasons
     return groups, out_reasons, info
 
 
@@ -479,6 +492,58 @@ async def split_unit(blocks: list[SourceBlock], grp: list[int], reason: str, w: 
         groups += parts
         out_reasons += [why] * len(parts)
     return groups, out_reasons, f"{label} 太長，依模型指出的主題轉折拆成 {len(groups)} 個單元"
+
+
+def paragraph_count(blocks: list[SourceBlock], grp: list[int]) -> int:
+    """Paragraphs of a unit's body: a block opens one unless it continues the paragraph of the block before it."""
+    return sum(1 for k, i in enumerate(grp) if blocks[i].kind != "heading" and not (k and same_para(blocks, i)))
+
+
+def needs_topic_check(blocks: list[SourceBlock], grp: list[int]) -> bool:
+    return body_chars([blocks[i] for i in grp]) >= TOPIC_CHECK_MIN_CHARS and paragraph_count(blocks, grp) >= 2
+
+
+async def check_topic(blocks: list[SourceBlock], grp: list[int], reason: str, w: Window, k: int,
+                      deps: PlannerDeps) -> tuple[list[list[int]], list[str], str | None]:
+    """One unit planned together with many others: asked alone whether it holds one topic, a small model answers
+    better than it planned the whole buffer. A split is taken only when every part can carry a guide on its own
+    (TOPIC_MIN_PART_CHARS); an invalid answer keeps the unit. (groups, reasons, note or None)"""
+    template = deps.prompts.get("segment_topic")
+    if template is None:   # a session whose prompt snapshot predates the one-topic check
+        return [grp], [reason], None
+    label = f"B{grp[0] - w.lo + 1}–B{grp[-1] - w.lo + 1}"
+    sw = make_window(blocks, w.index, grp[0], grp[-1] + 1)
+    listing, meta = window_listing(blocks, sw)
+    prompt = template.replace("{{material_title}}", deps.material_title).replace("{{count}}", str(len(grp))) \
+        .replace("{{reason}}", reason or "（未說明）").replace("{{blocks}}", listing)
+    key = f"{w.window_id}-t{k + 1:02d}"
+    ctx: TaskContext = deps.make_ctx("segment_topic", key)
+    holder: dict[str, Any] = {}
+
+    def check(plan: WindowPlan) -> None:
+        from ..llm.tasks import OutputInvalid
+        try:
+            holder["groups"], _ = normalize_groups(blocks, labels_to_groups(plan, sw), sw.lo, sw.hi)
+        except PlanInvalid as e:
+            raise OutputInvalid(str(e)) from e
+
+    try:
+        plan, _ = await run_structured(ctx, [HumanMessage(content=prompt)], WindowPlan, task="segment_topic",
+                                       node=f"segment.{key}", prompt_version=deps.prompt_version,
+                                       meta={"step": "segment_topic", **meta},
+                                       source_ids=[blocks[i].block_id for i in grp], check=check,
+                                       min_max_tokens=2048, min_context_tokens=16384)
+    except TaskError as e:
+        if e.kind == "unavailable":
+            raise
+        return [grp], [reason], f"{label} 單題檢查無效，維持一個單元：{e.detail[:120]}"
+    groups = holder["groups"]
+    if len(groups) < 2:
+        return [grp], [reason], None
+    if min(body_chars([blocks[i] for i in g]) for g in groups) < TOPIC_MIN_PART_CHARS:
+        return [grp], [reason], f"{label} 單題檢查想拆成 {len(groups)} 個單元，但有一部分太短，維持一個單元"
+    return groups, reasons_for(plan, groups, labels_to_groups(plan, sw)), \
+        f"{label} 單題檢查：裡面有 {len(groups)} 個主題，依模型指出的主題轉折拆開"
 
 
 async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_chars: int = WINDOW_CHARS,
