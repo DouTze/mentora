@@ -13,7 +13,7 @@ from app.reading.schemas import SegmentationPlan, SourceUnit
 from app.reading.source import extract_blocks
 from evals import reading_eval as ev
 
-FIX = json.loads((ev.EVAL_DIR / "regressions" / "cases.json").read_text())
+FIX = json.loads((ev.EVAL_DIR / "regressions" / "cases.json").read_text(encoding="utf-8"))
 
 
 def rules_quotes(lines: list[str], unit: str = "line"):

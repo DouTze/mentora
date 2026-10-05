@@ -224,8 +224,8 @@ def compare(args) -> Path:
     (out / "blind" / "key.json").write_text(json.dumps(key, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "blind" / "scores.template.json").write_text(json.dumps(template, ensure_ascii=False, indent=1), encoding="utf-8")
     if args.scores:
-        k = key if not args.key else json.loads(Path(args.key).read_text())
-        sc = json.loads(Path(args.scores).read_text())
+        k = key if not args.key else json.loads(Path(args.key).read_text(encoding="utf-8"))
+        sc = json.loads(Path(args.scores).read_text(encoding="utf-8"))
         human = {"paired": ev.score_blind(k, sc), "held_review": ev.score_held(k, sc)}
         lines += ["", "## 人工 rubric（盲評）", "", "```json", json.dumps(human, ensure_ascii=False, indent=1), "```"]
     lines += ["", f"盲評包：`{out / 'blind' / 'packet.md'}`（{len(key)} 題）。評分後以 `--scores` 重新執行 compare。"]

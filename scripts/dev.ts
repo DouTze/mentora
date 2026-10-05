@@ -7,6 +7,7 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const BACKEND = join(ROOT, "backend");
 const FRONTEND = join(ROOT, "frontend");
+const WIN = process.platform === "win32";
 
 function setup(cmd: string, cwd: string) {
   const r = spawnSync(cmd, { cwd, shell: true, stdio: "inherit" });
@@ -37,7 +38,7 @@ async function startOllama(): Promise<ChildProcess | null> {
     return null;
   }
   // its request log is noisy; only errors go to the terminal
-  const child = spawn("ollama", ["serve"], { stdio: ["ignore", "ignore", "inherit"], detached: true });
+  const child = spawn("ollama", ["serve"], { stdio: ["ignore", "ignore", "inherit"], detached: !WIN });
   // Ctrl-C while waiting: the main handlers are not installed yet, so don't leave it orphaned
   const abort = () => {
     child.kill("SIGKILL");
@@ -62,15 +63,22 @@ const ollama = await startOllama();
 
 // backend stays on 127.0.0.1: LAN users reach it only through the frontend proxy (frontend/server.ts binds 0.0.0.0).
 // detached → each child leads its own process group, so we can kill the whole tree
-// (uvicorn --reload spawns workers) with kill(-pid).
+// (uvicorn --reload spawns workers) with kill(-pid). Windows has no process groups (and detached would open
+// a separate console window), so there the tree is killed with `taskkill /T` instead.
+const UVICORN = WIN ? ".venv/Scripts/uvicorn.exe" : ".venv/bin/uvicorn";
 const children: ChildProcess[] = [
-  spawn(".venv/bin/uvicorn", ["app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000"], { cwd: BACKEND, stdio: "inherit", detached: true }),
-  spawn("bun", ["--hot", "server.ts"], { cwd: FRONTEND, stdio: "inherit", detached: true }),
+  spawn(join(BACKEND, UVICORN), ["app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000"], { cwd: BACKEND, stdio: "inherit", detached: !WIN }),
+  spawn("bun", ["--hot", "server.ts"], { cwd: FRONTEND, stdio: "inherit", detached: !WIN }),
 ];
 
 function killAll(signal: NodeJS.Signals) {
   for (const c of ollama ? [...children, ollama] : children) {
     if (c.pid === undefined) continue;
+    if (WIN) {
+      // no SIGTERM on Windows: plain taskkill asks politely, /F forces
+      spawnSync("taskkill", ["/PID", String(c.pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])], { stdio: "ignore" });
+      continue;
+    }
     try {
       process.kill(-c.pid, signal);
     } catch {
@@ -106,4 +114,4 @@ for (const c of children) {
 
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
-process.on("SIGHUP", () => shutdown(0));
+if (!WIN) process.on("SIGHUP", () => shutdown(0));
