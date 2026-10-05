@@ -16,7 +16,7 @@ from app.reading.tools import ReadingScope
 from app.workflows import invoke
 from app.workflows.reading_graph import ReadingDeps, build_reading_graph, initial_state
 
-FIXTURES = json.loads((Path(__file__).resolve().parent.parent / "evals/reading/regressions/cases.json").read_text())
+FIXTURES = json.loads((Path(__file__).resolve().parent.parent / "evals/reading/regressions/cases.json").read_text(encoding="utf-8"))
 BUNDLE = load_bundle()
 SNAP = ModelSnapshot("mock", "", "", "", "", 0.2, 512, 8192)
 
