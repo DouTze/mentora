@@ -480,6 +480,20 @@ def test_audit_schemas_name_every_expected_id():
     assert claims["minItems"] == claims["maxItems"] == 2 and claims["items"]["properties"]["id"]["enum"] == ["C1", "C2"]
     assert sch["properties"]["bridges"]["maxItems"] == 0
     assert set(sch["required"]) >= {"claims", "bridges", "additions", "uncovered_source", "coherence"}
+    # free text is bounded: a reason repeated until the token limit (qwen3-vl:4b) can no longer break the JSON
+    claim = claims["items"]["properties"]
+    assert claim["note"]["maxLength"] == claim["guide_quote"]["maxLength"] == 400 and "maxLength" not in claim["id"]
+    assert sch["properties"]["uncovered_source"]["items"]["maxLength"] == 400
+
+
+def test_verify_answers_are_bounded_and_always_fit_the_output_budget():
+    from app.reading import gates
+    sch = gates.verify_schema(3)
+    check = sch["$defs"]["VerifyCheck"]["properties"]
+    assert check["item"]["enum"] == [1, 2, 3] and sch["properties"]["checks"]["maxItems"] == 3
+    assert (check["guide_quote"]["maxLength"], check["reason"]["maxLength"]) == (200, 300)
+    for n in (1, 2, 3, 5):   # every check at its bounds fits, and the budget never shrinks below the old one
+        assert gates.verify_tokens(n) >= 128 + n * (200 + 300 + 80) and gates.verify_tokens(n) >= 512 + 320 * n
 
 
 async def test_a_supplement_paragraph_must_carry_an_approved_bridge():

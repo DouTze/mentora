@@ -638,7 +638,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         fs = [ra.Finding.model_validate(f) for f in state["findings"]]
         idx = ra.to_verify(fs)
         extra = {"chinese_text": "（這項核對只看主要正文）", "guide": d["guide"], "claims": ra.verify_items_text(fs, idx)}
-        out_tokens = min(4096, 512 + 320 * len(idx))
+        out_tokens = gates.verify_tokens(len(idx))
         # numbered sentences, so a bridge's source support can be cited by id; a session pinned to an older prompt
         # bundle still gets the plain text its template asks for (the program check is the same either way)
         source_key = "sentences" if "{{sentences}}" in prompts(state)["reading_verify"] else "quote_text"
@@ -647,6 +647,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         v, _ = await run_structured(ctx, [HumanMessage(content=msg)], ra.VerifyResult, task="guide", node="verify",
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
                                     meta={"step": "verify", "quote_text": t.text}, allow_fix=False,
+                                    json_schema=gates.verify_schema(len(idx)),
                                     min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         fs = ra.apply_verify(fs, idx, v, d, t.text, bridge_refs(t))
         return {"findings": [f.model_dump() for f in fs], "verified_for": state.get("body_revisions", 0),

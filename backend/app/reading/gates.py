@@ -512,7 +512,49 @@ def exact_ids_schema(model_cls, lists: dict[str, list[str]]) -> dict:
         item = dict(defs[ref]) if ref else dict(prop["items"])
         item["properties"] = {**item["properties"], "id": {"type": "string", "enum": ids or ["-"]}}
         sch["properties"][name] = {"type": "array", "items": item, "minItems": len(ids), "maxItems": len(ids)}
+    return bound_strings(sch)
+
+
+FREE_TEXT_MAX = 400   # chars of one free-text field of a check / audit answer: a reason, a note, a quoted fragment
+
+
+def bound_strings(sch: dict, limit: int = FREE_TEXT_MAX) -> dict:
+    """Every free-text string of a check / audit schema gets a maxLength (in place). A small model sometimes repeats
+    one clause inside a reason until the token limit, leaving JSON that cannot be parsed; bounded, the string closes
+    and the answer still parses. Quoted fragments are located by prefix, so a cut quote still points at its text."""
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "string" and not {"enum", "const", "maxLength"} & node.keys():
+                node["maxLength"] = limit
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(sch)
     return sch
+
+
+VERIFY_QUOTE_MAX, VERIFY_REASON_MAX = 200, 300
+
+
+def verify_schema(n_items: int) -> dict:
+    """verify output: at most one check per listed item, numbered 1..n, with bounded free text (verify_tokens
+    leaves room for every field at its bound, so the answer is never cut)."""
+    from .agent import VerifyResult
+    sch = VerifyResult.model_json_schema()
+    check = sch["$defs"]["VerifyCheck"]
+    props = check["properties"]
+    check["properties"] = {**props, "item": {"type": "integer", "enum": list(range(1, n_items + 1))},
+                           "guide_quote": {**props["guide_quote"], "maxLength": VERIFY_QUOTE_MAX},
+                           "reason": {**props["reason"], "maxLength": VERIFY_REASON_MAX}}
+    sch["properties"]["checks"] = {**sch["properties"]["checks"], "maxItems": n_items}
+    return bound_strings(sch)
+
+
+def verify_tokens(n_items: int) -> int:
+    """Output budget of verify: every check at its bounds (about a token per Chinese char) plus the JSON around."""
+    return min(4096, max(512 + 320 * n_items, 128 + n_items * (VERIFY_QUOTE_MAX + VERIFY_REASON_MAX + 80)))
 
 
 def gate1_decide(checks: list[GateCheck], *, audited: bool, need_audit: bool, can_audit: bool,
