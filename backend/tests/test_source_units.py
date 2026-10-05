@@ -101,6 +101,62 @@ def test_page_break_mid_sentence_stays_one_sentence(manifest):
     assert b.meta["pdf_paras"] == [[1, 3], [2, 1]]
 
 
+def test_pdf_table_cells_are_a_table_and_a_numbered_heading_after_a_table_is_found_by_its_siblings():
+    """Word export of a textbook (科目1 3.1): short table cells look like headings, and "A. 第一階段" follows the
+    table's unfinished last cell, so the plain heading guess calls the cells headings and misses "A." (B. is found)."""
+    pages = ["\n\n".join([
+        "（2）技術演進脈絡",
+        "自然語言處理（NLP）的發展歷程呈現出明確的技術世代演進脈絡，從早期的規則",
+        "式系統、統計語言模型，再到進入深度學習時代，最後迎來預訓練語言模型的主",
+        "導潮流。每個技術階段的突破不僅提高了語言處理能力，也改變了模型設計的思維。",
+        "以下整理NLP 技術演進階段概覽：",
+        "時期技術階段核心特徵代表技術/模型",
+        "1980s–1990s規則式方法",
+        "（Rule-based）",
+        "手動設計語法規則與詞彙辭典ELIZA、專家系統",
+        "1990s–2010統計語言模型",
+        "（Statistical LM）",
+        "使用大量語料訓練機率模型N-gram、HMM、CRF",
+        "BERT、GPT、RoBERTa、",
+        "T5",
+    ]), "\n\n".join([
+        "A. 第一階段：規則式方法（1980s–1990s）",
+        "• 階段描述/優勢：在這一階段，NLP 主要依賴語言學家與工程師手工編寫的語法",
+        "規則與詞彙辭典進行語言處理，這一方法的優勢在於其高可解釋性與穩定的結果。",
+        "B. 第二階段：統計語言模型（1990s–2010s）",
+        "• 階段描述/優勢：為突破規則式方法的限制，NLP 進入了以機率為基礎的統計建",
+        "模時期，研究者開始依靠大量語料來訓練機率模型，大幅提高了處理的靈活性。",
+    ])]
+    _, blocks = extract_blocks("m", "page", 1, 2, pages)
+    assert [b.text for b in blocks if b.kind == "heading"] == [
+        "（2）技術演進脈絡", "A. 第一階段：規則式方法（1980s–1990s）", "B. 第二階段：統計語言模型（1990s–2010s）"]
+    tables = [b for b in blocks if b.kind == "table"]
+    assert len(tables) == 1 and tables[0].text.split("\n")[0] == "時期技術階段核心特徵代表技術/模型"
+    assert tables[0].text.endswith("BERT、GPT、RoBERTa、\nT5")              # the wrapped last cell stays in the table
+    assert tables[0].meta["pdf_paras"] == [[1, k] for k in range(6, 15)]
+    assert (tables[0].locator.char_start, tables[0].locator.char_end) == (pages[0].index("時期"), len(pages[0]))
+    intro = next(b for b in blocks if b.text == "以下整理NLP 技術演進階段概覽：")
+    assert blocks[blocks.index(intro) + 1] is tables[0]
+    assert seg.glues(blocks)[blocks.index(intro)]                            # the table stays with its lead-in
+
+
+def test_one_line_sentences_inside_a_table_region_are_cells():
+    """A table whose description cells are whole sentences: the region runs through them, and its last row keeps as
+    many sentence cells as the rows before it; the numbered item after the table is not part of it."""
+    rows = [("分詞", "（Tokenization）", "將一段文字拆解為單字、詞組或子詞。", "基於空白或斷詞字典。"),
+            ("詞性標注", "（Part-of-Speech）", "標記每個詞的語法角色。", "常用於語法分析。"),
+            ("停用詞移除", "（Stopword Removal）", "去除語意貢獻低的高頻詞。", "可降低資料維度。")]
+    page = "\n\n".join(["以下是NLP 前處理常見技術，在實務應用中，依任務需求、這些步驟常以不同順序或深度搭配執行。",
+                        "處理步驟說明常見工具與技巧"] + [c for r in rows for c in r] + [
+                        "（1）分詞（Tokenization）：",
+                        "文字處理的起點，其精準與否直接影響後續每個處理階段，針對中文、日文等無空白語言尤其重要。"])
+    _, blocks = extract_blocks("m", "page", 1, 1, [page])
+    tables = [b for b in blocks if b.kind == "table"]
+    assert len(tables) == 1 and tables[0].text.split("\n") == ["處理步驟說明常見工具與技巧"] + [c for r in rows for c in r]
+    assert not [b for b in blocks if b.kind == "heading"]
+    assert blocks[-1].text.startswith("（1）分詞") or blocks[-2].text.startswith("（1）分詞")
+
+
 def test_word_style_pdf_lines_are_rebuilt_into_sentences_and_paragraphs():
     """A Word export with wide line spacing: every line is its own layout block. Mid-sentence lines (short, no closing
     punctuation) are not headings; sentences are rebuilt across lines and grouped by paragraph."""
