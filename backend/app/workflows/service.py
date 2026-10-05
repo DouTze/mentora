@@ -2,6 +2,8 @@
 and the extra fields of the session view. Legacy sessions are untouched (TutorService)."""
 from __future__ import annotations
 
+import shutil
+
 from .. import config
 from ..llm.runtime import BackendPool, ModelSnapshot
 from ..persistence.repository import Repository
@@ -32,6 +34,21 @@ class WorkflowService:
         self.db = svc.db
 
     # -- sessions ---------------------------------------------------------------------------
+    async def delete(self, sid: str) -> None:
+        """Delete a learning record (legacy or LangGraph) with everything it owns: turns, commands, model call
+        trace, its artifacts, checkpoints and reading workspace. Refused while a command is queued or running."""
+        from ..tutor.session import SessionError
+        if not self.db.get_session(sid):
+            raise SessionError("not_found", "找不到學習紀錄")
+        if self.runner:
+            await self.runner.stop_background(sid)
+        if self.repo.active_commands(sid) or (self.runner and self.runner.busy(sid)):
+            raise SessionError("busy", "這段學習還有操作正在進行，請等它完成後再刪除")
+        self.repo.delete_session(sid)
+        if self.runner:
+            await self.runner.drop_checkpoints(sid)
+        shutil.rmtree(self.svc.reading_dir / sid, ignore_errors=True)
+
     def start_from_material(self, material_id: str, start: int, end: int, strategy_id: str, *, depth: str | None = None,
                             goal: str | None = None, background: str | None = None) -> dict:
         from ..tutor.session import SessionError

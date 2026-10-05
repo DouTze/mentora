@@ -253,6 +253,14 @@ class Repository:
         with self.db.conn() as c:
             return c.execute("SELECT revision FROM sessions WHERE id=?", (session_id,)).fetchone()[0]
 
+    def delete_session(self, session_id: str) -> None:
+        """A session and everything recorded under it, in one transaction. Rows shared by other sessions (source
+        snapshots, cached artifacts without a session) stay."""
+        with self.db.conn() as c:
+            for table in ("turns", "workflow_commands", "llm_calls", "reading_artifacts"):
+                c.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+            c.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+
     def graph_sessions(self) -> list[str]:
         with self.db.conn() as c:
             return [r[0] for r in c.execute("SELECT id FROM sessions WHERE workflow_runner='langgraph'")]

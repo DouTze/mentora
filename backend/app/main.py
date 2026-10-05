@@ -62,7 +62,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     @app.exception_handler(SessionError)
     async def _session_error(_, e: SessionError):
         status = {"not_found": 404, "completed": 409, "backend_changed": 409, "reading": 409, "not_reading": 409, "use_events": 409,
-                  "legacy_readonly": 409,
+                  "legacy_readonly": 409, "busy": 409,
                   "model_unavailable": 502, "invalid_model_output": 502}.get(e.code, 400)
         return JSONResponse(status_code=status, content={"code": e.code, "detail": e.detail, "turn": e.turn,
                                                          "retryable": e.code in ("model_unavailable", "invalid_model_output")})
@@ -205,6 +205,11 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     @app.get("/api/sessions/{sid}")
     async def get_session(sid: str):
         return svc.view(sid)
+
+    @app.delete("/api/sessions/{sid}")
+    async def delete_session(sid: str):
+        await workflow.delete(sid)
+        return {"ok": True}
 
     @app.post("/api/sessions/{sid}/answer")
     async def answer(sid: str, req: AnswerRequest, debug_invalid: bool = Query(False, include_in_schema=False)):

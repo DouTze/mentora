@@ -73,6 +73,7 @@ class WorkflowRunner:
         self.active = False
         self.refused_by: dict | None = None
         self._saver_cm = None
+        self.saver = None
         self._tasks: dict[str, asyncio.Task] = {}
         self._prefetch: dict[str, asyncio.Task] = {}
         self.prefetch_log: list[tuple[str, str]] = []   # (session, outcome), for tests / diagnostics
@@ -89,7 +90,7 @@ class WorkflowRunner:
             log.error("another workflow runner is active (pid %s); graph sessions are read-only here", holder["pid"])
             return
         self._saver_cm = AsyncSqliteSaver.from_conn_string(self.checkpoint_path)
-        saver = await self._saver_cm.__aenter__()
+        self.saver = saver = await self._saver_cm.__aenter__()
         self.graph = build_learning_graph(self.deps, saver)
         self.active = True
         self._beat = asyncio.create_task(self._heartbeat())
@@ -128,6 +129,32 @@ class WorkflowRunner:
 
     def _all_tasks(self) -> list[asyncio.Task]:
         return list(self._tasks.values()) + list(self._prefetch.values()) + list(self._warm.values())
+
+    # -- deleting a session -------------------------------------------------------------------
+    def busy(self, session_id: str) -> bool:
+        t = self._tasks.get(session_id)
+        return t is not None and not t.done()
+
+    async def stop_background(self, session_id: str) -> None:
+        """Cancel the session's prefetch and source warming (read-only for the session, so nothing is lost)."""
+        side = [t for t in (self._prefetch.pop(session_id, None), self._warm.pop(session_id, None)) if t and not t.done()]
+        for t in side:
+            t.cancel()
+        await asyncio.gather(*side, return_exceptions=True)
+
+    async def drop_checkpoints(self, session_id: str) -> None:
+        """Every checkpoint thread of the session: the main graph and the prefetch / warm threads keyed by its id."""
+        if self.saver is None:
+            return
+        await self.saver.setup()   # the tables appear on first use
+        prefix = f"{session_id}:"
+        async with self.saver.lock, self.saver.conn.execute(
+                "SELECT thread_id FROM checkpoints WHERE thread_id = ? OR substr(thread_id, 1, ?) = ? UNION "
+                "SELECT thread_id FROM writes WHERE thread_id = ? OR substr(thread_id, 1, ?) = ?",
+                (f"session:{session_id}", len(prefix), prefix) * 2) as cur:
+            threads = [r[0] for r in await cur.fetchall()]
+        for t in threads:
+            await self.saver.adelete_thread(t)
 
     # -- scheduling ------------------------------------------------------------------------
     def schedule_warm(self, session_id: str) -> None:

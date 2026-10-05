@@ -177,7 +177,7 @@ POST /api/categories   PATCH|DELETE /api/categories/{id}
 POST /api/materials (multipart: file, category_id)
 GET|PATCH|DELETE /api/materials/{id}       GET /api/materials/{id}/file
 POST /api/sessions   {"material_id","start","end","reading_depth"?,"reading_goal"?,"reader_background"?} 或 {"content_id"}
-GET  /api/sessions   GET /api/sessions/{id}
+GET  /api/sessions   GET|DELETE /api/sessions/{id}
 POST /api/sessions/{id}/answer   {"answer": "..."}   # 內建教材 session；教材學習改用 events
 POST /api/sessions/{id}/events   {"command_id","type":"guide|ask|next|finish|answer|retry","expected_revision"?,"unit_id"?,"question_id"?,"payload"}
                                  # 教材學習的所有操作：202 已受理／200 已完成的重送／409 過期或忙碌（附最新 session）
