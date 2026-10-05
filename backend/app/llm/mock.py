@@ -34,8 +34,8 @@ class MockBackend(LLMBackend):
             text = "這不是 JSON"
         elif step == "segment_blocks":
             text = json.dumps(self._segment_blocks(meta.get("blocks", [])), ensure_ascii=False)
-        elif step == "segment_seam":
-            text = json.dumps({"merge": False, "reason": "（模擬）維持切開"}, ensure_ascii=False)
+        elif step == "segment_split":
+            text = json.dumps(self._segment_split(meta.get("blocks", [])), ensure_ascii=False)
         elif step == "context":
             text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
         elif step in ("understand", "revise_source"):
@@ -193,18 +193,29 @@ class MockBackend(LLMBackend):
 
     @staticmethod
     def _segment_blocks(blocks: list[dict]) -> dict[str, Any]:
-        """Simulated block planning: follows the program's glue marks, a heading opens a unit, a short paragraph
-        joins the previous one. No understanding involved."""
+        """Simulated block planning: follows the program's glue marks, a heading opens a unit, a sentence of the
+        same rebuilt PDF paragraph or a short paragraph joins the previous one. No understanding involved."""
         units: list[dict[str, Any]] = []
         glued = False
         for b in blocks:
-            join = units and (glued or (b["kind"] != "heading" and b["chars"] < 40 and units[-1]["blocks"]))
+            join = units and (glued or (b["kind"] != "heading" and (b["chars"] < 40 or b.get("same_para"))
+                                        and units[-1]["blocks"]))
             if join and not (b["kind"] == "heading" and not glued):
                 units[-1]["blocks"].append(b["label"])
             else:
                 units.append({"blocks": [b["label"]], "title": None, "reason": "（模擬）新段落"})
             glued = b.get("glue_next", False) or b["kind"] == "heading"
         return {"units": units}
+
+    @staticmethod
+    def _segment_split(blocks: list[dict]) -> dict[str, Any]:
+        """Simulated focused split: two halves, cut at the first boundary past the middle that is not glued."""
+        labels = [b["label"] for b in blocks]
+        cut = next((k for k in range(len(blocks) // 2, len(blocks)) if k and not blocks[k - 1]["glue_next"]), None)
+        if cut is None:
+            return {"units": [{"blocks": labels, "title": None, "reason": "（模擬）無法拆開"}]}
+        return {"units": [{"blocks": labels[:cut], "title": None, "reason": "（模擬）前半"},
+                          {"blocks": labels[cut:], "title": None, "reason": "（模擬）後半"}]}
 
     @classmethod
     def _compact(cls, text: str) -> dict[str, Any]:

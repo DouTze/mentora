@@ -7,10 +7,10 @@ block IDs. Policies (versioned by EXTRACTION_VERSION):
   fence), a list item (with its continuation lines), a code fence (blank lines inside stay inside), a display
   formula (`$$ … $$`, possibly multi-line), a table (`|` lines), a block quote (`>` lines) or a figure (`![…](…)`).
   Lines are kept as extracted except trailing whitespace; heading markers are removed from the heading text.
-- pdf (unit = page): the importer already joined PyMuPDF layout blocks into paragraphs (blank-line separated) and
-  dropped running headers/footers with page numbers. A one-line short paragraph without closing punctuation on a
-  page with other paragraphs is a heading (same rule as the legacy splitter). A page's last paragraph that does not
-  end a sentence `continues` on the next page.
+- pdf (unit = page): the importer keeps PyMuPDF layout blocks (blank-line separated) and drops running headers /
+  footers. A layout block is a paragraph in a typeset book but a single line in a Word export, so layout is not
+  trusted: the range becomes one text stream, layout lines are joined until a sentence ends, and every sentence is a
+  block (see _page_blocks). Headings are guessed conservatively (pdf_layout); the planner groups sentences by meaning.
 - A paragraph / list item longer than MAX_BLOCK_CHARS is cut at sentence ends (never inside `$…$`) into pieces
   that keep `parent_block_id` and their offsets. A formula / code / table block is never cut; above
   HARD_MAX_BLOCK_CHARS it is refused as too large (there is no safe boundary).
@@ -23,7 +23,7 @@ import re
 
 from .schemas import Locator, SourceBlock
 
-EXTRACTION_VERSION = "blocks-v2"   # v2: heading levels and structure confidence
+EXTRACTION_VERSION = "blocks-v3"   # v2: heading levels and structure confidence; v3: PDF text stream cut into sentences
 MAX_BLOCK_CHARS = 700
 TARGET_PIECE_CHARS = 350
 HARD_MAX_BLOCK_CHARS = 8000
@@ -75,6 +75,7 @@ def _inline_math_spans(text: str) -> list[tuple[int, int]]:
         i = b + 1
 
 
+ENUM_ONLY_RE = re.compile(r"^\s*[(（]?[0-9A-Za-z一二三四五六七八九十ivxIVX]{1,4}[.)）]\s*$")   # "A." "1." "(iv)" — a list label
 SENT_RE = re.compile(r"[。！？!?]+[" + re.escape(CLOSERS) + r"]*|(?<=[.;])\s+(?=[A-Z一-鿿])")
 
 
@@ -84,7 +85,8 @@ def sentence_cuts(text: str) -> list[int]:
     cuts = []
     for m in SENT_RE.finditer(text):
         c = m.end()
-        if 0 < c < len(text) and not any(a < c < b for a, b in spans):
+        if 0 < c < len(text) and not any(a < c < b for a, b in spans) \
+                and not ENUM_ONLY_RE.match(text[cuts[-1] if cuts else 0:c]):
             cuts.append(c)
     return cuts
 
@@ -182,29 +184,153 @@ def _line_blocks(units: list[str], start: int) -> list[dict]:
     return out
 
 
-def _is_page_heading(p: str, n_paras: int) -> bool:
-    return "\n" not in p and len(p) <= 40 and not re.search(r"[。．.!?！？,，;；]$", p) and n_paras > 1
+HEADING_MAX_CHARS = 40
+HEADING_LINE_SHARE = 0.75   # a heading is clearly narrower than the page's full lines
+NO_HEADING_END_RE = re.compile(r"[。．.!?！？,，;；：:、]$")
+BULLET_RE = re.compile(r"^\s*[•○●■□◆◇▪▫–\-*+]\s")
+PDF_ITEM_RE = re.compile(r"^\s*(•|[-*+]\s|\d{1,3}[.)、]\s*\S|[（(]\d{1,2}[）)]|[A-Za-z][.)]\s)")
+PARA_END = SENT_END + "：:"   # a layout line ending with one of these may close a paragraph
+
+
+def _page_paras(page: str) -> list[tuple[int, int]]:
+    return [(m.start(), m.end()) for m in re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\s*$)", page, re.S)]
+
+
+def _width(text: str) -> int:
+    """Display width: a CJK / full-width char takes two columns, so mixed Chinese–English lines compare fairly."""
+    return sum(2 if CJK_CHAR_RE.match(ch) else 1 for ch in text)
+
+
+def _full_line_width(widths: list[int]) -> float:
+    """Width of a full line on this page (90th percentile of its layout paragraphs)."""
+    if not widths:
+        return 0.0
+    s = sorted(widths)
+    return s[min(len(s) - 1, int(len(s) * 0.9))]
+
+
+def pdf_layout(units: list[str]) -> list[list[tuple[int, int, str]]]:
+    """Per page: (char_start, char_end, kind) of each blank-line separated layout paragraph, kind one of heading /
+    formula / item (opens a list item) / label (a list label alone on its line) / body.
+
+    The text layer does not say where paragraphs are: in a typeset book a layout paragraph is a paragraph, in a Word
+    export it is one line. A heading guess therefore needs more than "short, no closing punctuation" (every
+    mid-sentence Chinese line is that): it must follow a finished sentence (or another heading / the range start),
+    and be shorter than the page's full lines. The guess is low confidence and never defines a section."""
+    out: list[list[tuple[int, int, str]]] = []
+    prev_closed = True
+    for page in units:
+        paras = _page_paras(page)
+        full = _full_line_width([_width(page[a:b]) for a, b in paras])
+        kinds = []
+        for a, b in paras:
+            p = page[a:b]
+            s = p.strip()
+            if s.startswith("$$") and s.endswith("$$"):
+                kind = "formula"
+            elif ENUM_ONLY_RE.match(s):
+                kind = "label"   # a list label alone on its line ("A."): it opens the item that follows
+            elif BULLET_RE.match(p):
+                kind = "item"
+            elif "\n" not in p and len(paras) > 1 and prev_closed and len(s) <= HEADING_MAX_CHARS \
+                    and _width(s) <= HEADING_LINE_SHARE * full and not NO_HEADING_END_RE.search(s):
+                kind = "heading"
+            elif PDF_ITEM_RE.match(p) or LIST_RE.match(p):
+                kind = "item"
+            else:
+                kind = "body"
+            prev_closed = kind in ("heading", "formula") or (kind != "label" and (ends_sentence(p) or s.endswith(("：", ":"))))
+            kinds.append((a, b, kind))
+        out.append(kinds)
+    return out
+
+
+def _joiner(left: str, right: str) -> str:
+    """What goes between two layout lines of one paragraph: nothing around CJK, a space between Latin words."""
+    if not left or not right:
+        return ""
+    if ENUM_ONLY_RE.match(left):
+        return " "
+    if CJK_CHAR_RE.match(left[-1]) or CJK_CHAR_RE.match(right[0]) or left[-1] in "（(「『“‘" or right[0] in "，。、；：！？）)」』”’,.;:!?":
+        return ""
+    return " "
+
+
+CJK_CHAR_RE = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿＀-￯]")
 
 
 def _page_blocks(units: list[str], start: int) -> list[dict]:
+    """PDF: the range's layout lines become one text stream, cut into sentences.
+
+    Layout lines are joined into paragraphs until a line ends a sentence (or with a colon); a heading, a formula or a
+    list item opens a new paragraph. Each paragraph is cut at sentence ends and every sentence is a block, so the
+    planner can draw unit boundaries by meaning instead of trusting PDF line breaks; `para_group` keeps the rebuilt
+    paragraph as a hint (rules fallback, planner listing, quote text). A sentence may run across a page break: its
+    locator then starts on one page and ends on the next (char_start on the start page, char_end on the end page)."""
+    layout = pdf_layout(units)
     out: list[dict] = []
-    for i, page in enumerate(units):
-        no = start + i
-        paras = [(m.start(), m.end()) for m in re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\s*$)", page, re.S)]
-        for k, (a, b) in enumerate(paras, 1):
-            p = page[a:b]
-            s = p.strip()
-            kind = ("heading" if _is_page_heading(p, len(paras)) else
-                    "formula" if s.startswith("$$") and s.endswith("$$") else
-                    "list_item" if LIST_RE.match(p) else "paragraph")
-            out.append({"kind": kind, "text": p, "start": no, "end": no, "para": k, "paras": len(paras),
-                        "char_start": a, "char_end": b, "last_on_page": k == len(paras),
-                        # a short line is a heading guess: its level is unknown and it never defines a section
-                        **({"level": None, "confidence": "low"} if kind == "heading" else {})})
-    for x, y in zip(out, out[1:]):   # a sentence broken by the page end continues on the next page
-        if x.get("last_on_page") and y["start"] == x["start"] + 1 and y.get("para") == 1 \
-                and x["kind"] not in ("heading", "formula") and y["kind"] != "heading" and not ends_sentence(x["text"]):
-            x["continues"] = True
+    group: list[tuple[int, int, int, int]] = []   # (page index, para k, char_start, char_end) of the open paragraph
+
+    def flush() -> None:
+        nonlocal group
+        if not group:
+            return
+        text, pieces = "", []   # pieces: (offset in text, page index, k, page char_start, length)
+        for pi, k, a, b in group:
+            seg = units[pi][a:b].replace("\n", " ")
+            text += _joiner(text, seg)
+            pieces.append((len(text), pi, k, a, len(seg)))
+            text += seg
+        gid = f"g{len(out):04d}"
+
+        def where(off: int, end: bool) -> tuple[int, int, int]:
+            """(page index, para k, page char offset) of a text offset (end=True: the char before `off`)."""
+            for t0, pi, k, a, n in reversed(pieces):
+                if (t0 < off <= t0 + n) if end else (t0 <= off < t0 + n):
+                    return pi, k, a + off - t0
+            t0, pi, k, a, n = pieces[-1] if end else pieces[0]
+            return pi, k, a + (n if end else 0)
+
+        cuts = sentence_cuts(text)
+        spans = [(a, b) for a, b in zip([0] + cuts, cuts + [len(text)])]
+        for a, b in spans:
+            while a < b and text[a].isspace():
+                a += 1
+            while b > a and text[b - 1].isspace():
+                b -= 1
+            if b <= a:
+                continue
+            p0, k0, c0 = where(a, False)
+            p1, _, c1 = where(b, True)
+            refs = sorted({(start + pi, k) for t0, pi, k, pa, n in pieces if t0 < b and a < t0 + n})
+            out.append({"kind": "paragraph", "text": text[a:b], "start": start + p0, "end": start + p1, "para": k0,
+                        "paras": len(layout[p0]), "char_start": c0, "char_end": c1,
+                        "meta": {"para_group": gid, "pdf_paras": [list(r) for r in refs]}})
+        group = []
+
+    for pi, kinds in enumerate(layout):
+        for k, (a, b, kind) in enumerate(kinds, 1):
+            if kind in ("heading", "formula"):
+                flush()
+                out.append({"kind": kind, "text": units[pi][a:b], "start": start + pi, "end": start + pi, "para": k,
+                            "paras": len(kinds), "char_start": a, "char_end": b, "meta": {"pdf_paras": [[start + pi, k]]},
+                            **({"level": None, "confidence": "low"} if kind == "heading" else {})})
+                continue
+            if kind in ("item", "label"):
+                flush()
+            group.append((pi, k, a, b))
+            if kind != "label" and units[pi][a:b].rstrip().rstrip(CLOSERS)[-1:] in PARA_END:
+                flush()
+    flush()
+    # locator para / paras count rebuilt paragraphs (and headings / formulas) starting on a page, not layout lines;
+    # the layout paragraphs themselves stay in meta["pdf_paras"] for the PDF evidence
+    numbers: dict[int, dict[str, int]] = {}
+    for i, r in enumerate(out):
+        key = r["meta"].get("para_group") or f"b{i}"
+        page = numbers.setdefault(r["start"], {})
+        r["para"] = page.setdefault(key, len(page) + 1)
+    for r in out:
+        r["paras"] = len(numbers[r["start"]])
     return out
 
 
@@ -222,12 +348,16 @@ def extract_blocks(material_id: str, unit: str, start: int, end: int, units: lis
                           locator=Locator(unit=unit, start=r["start"], end=r["end"], para=r.get("para"),
                                           paras=r.get("paras"), char_start=a, char_end=b),
                           text_hash=th, extraction_version=EXTRACTION_VERSION, parent_block_id=parent, piece=piece,
-                          continues=continues, heading_level=r.get("level"), structure_confidence=r.get("confidence"))
+                          continues=continues, heading_level=r.get("level"), structure_confidence=r.get("confidence"),
+                          meta=dict(r.get("meta") or {}))
         blocks.append(blk)
         return blk
 
     for r in raw:
         text, base = r["text"], r.get("char_start", 0)
+        if "para_group" in r.get("meta", {}):   # a PDF sentence: offsets already resolved, one sentence is never cut
+            add(r, text, base, r["char_end"])
+            continue
         if len(text) <= MAX_BLOCK_CHARS or r["kind"] in ("heading",):
             add(r, text, base, base + len(text), continues=r.get("continues", False))
             continue

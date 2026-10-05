@@ -23,7 +23,7 @@ from ..reading.agent import READING_WORKFLOW_VERSION
 from ..reading.contracts import CONTRACT_VERSION, TaskContract
 from ..reading.prompts import BUNDLE_VERSION, load_bundle
 
-KEEP_SESSION_PROMPTS = ("segment_blocks", "segment_seam", "ask", "assess")
+KEEP_SESSION_PROMPTS = ("segment_blocks", "segment_split", "ask", "assess")
 
 
 def upgrade_session(db: Database, sid: str) -> dict | None:

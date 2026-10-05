@@ -79,12 +79,6 @@ def load_units(case: dict, base: Path = EVAL_DIR) -> tuple[str, list[str]]:
     return ("page" if kind == "pdf" else "line"), extract_units(kind, path.read_bytes())
 
 
-def _is_page_heading(p: str, n_paras: int) -> bool:
-    """Same rule as the importer-side paragraph split: one short line without closing punctuation, on a page
-    that has other paragraphs."""
-    return "\n" not in p and len(p) <= 40 and not re.search(r"[。．.!?！？,，;；]$", p) and n_paras > 1
-
-
 def split_body(unit: str, units: list[str]) -> tuple[str, list[str]]:
     """(normalised body text without heading lines, normalised headings). Pipelines move headings into a
     `heading` field, so body text is what units must cover exactly once and in order."""
@@ -97,10 +91,11 @@ def split_body(unit: str, units: list[str]) -> tuple[str, list[str]]:
             m = None if fence else MD_HEADING_RE.match(ln)
             (heads if m else body).append(norm(m.group(1)) if m else ln)
     else:
-        for page in units:
-            paras = [p.strip() for p in re.split(r"\n\s*\n", page) if p.strip()]
-            for p in paras:
-                (heads if _is_page_heading(p, len(paras)) else body).append(norm(p) if _is_page_heading(p, len(paras)) else p)
+        from app.reading.source import pdf_layout   # same heading guess as the extractor
+
+        for page, kinds in zip(units, pdf_layout(units)):
+            for a, b, kind in kinds:
+                (heads if kind == "heading" else body).append(norm(page[a:b]) if kind == "heading" else page[a:b])
     return norm("\n".join(body)), [h for h in heads if h]
 
 
@@ -169,8 +164,10 @@ def check_segmentation(case: dict, unit: str, units: list[str], segments: list[d
     spans: list[tuple[int, int]] = []
     order_errors: list[str] = []
     pos = 0
+    heading_set = set(headings)
     for i, s in enumerate(segments):
-        t = norm(s["text"])
+        # a heading the planner kept inside a unit is a line of its text, not body text of the source
+        t = norm("\n".join(ln for ln in s["text"].split("\n") if norm(ln) not in heading_set))
         if not t:
             order_errors.append(f"unit {i + 1} is empty")
             continue

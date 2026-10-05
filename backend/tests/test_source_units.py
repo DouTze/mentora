@@ -1,5 +1,5 @@
 """Source blocks and unit planning (P2): text is kept by the program, plans are validated, rules are a valid
-fallback, windows / seams never split protected relations, and old databases migrate in place."""
+fallback, buffers never split protected relations, and old databases migrate in place."""
 import json
 import sqlite3
 
@@ -66,8 +66,11 @@ def test_every_fixture_rebuilds_exactly_from_its_blocks(manifest):
 def test_locators_point_back_into_the_extracted_text(manifest):
     _, unit, units, blocks = blocks_of(manifest, "cross-page-condition")
     for b in blocks:
-        page = units[b.locator.start - 1]
-        assert page[b.locator.char_start:b.locator.char_end] == b.text
+        first, last = units[b.locator.start - 1], units[b.locator.end - 1]
+        if b.locator.start == b.locator.end:
+            assert ev.norm(first[b.locator.char_start:b.locator.char_end]) == ev.norm(b.text)
+        else:   # a sentence across a page break: start page from char_start, end page up to char_end
+            assert ev.norm(first[b.locator.char_start:] + last[:b.locator.char_end]) == ev.norm(b.text)
     _, unit, units, blocks = blocks_of(manifest, "list-tcp")
     for b in blocks:
         lines = units[b.locator.start - 1:b.locator.end]
@@ -91,11 +94,45 @@ def test_identical_paragraphs_get_distinct_ids_and_snapshot_is_content_addressed
     assert s1["snapshot_id"] == s2["snapshot_id"] != s3["snapshot_id"]
 
 
-def test_page_break_mid_sentence_is_glued(manifest):
+def test_page_break_mid_sentence_stays_one_sentence(manifest):
     _, _, _, blocks = blocks_of(manifest, "cross-page-condition")
-    i = next(i for i, b in enumerate(blocks) if b.continues)
-    assert blocks[i].text.endswith("連續；") and blocks[i + 1].text.startswith("第二，")
-    assert seg.glues(blocks)[i] == "句子跨頁／跨區塊延續"
+    b = next(b for b in blocks if b.locator.start != b.locator.end)
+    assert (b.locator.start, b.locator.end) == (1, 2) and "連續；第二，函數在開區間" in b.text
+    assert b.meta["pdf_paras"] == [[1, 3], [2, 1]]
+
+
+def test_word_style_pdf_lines_are_rebuilt_into_sentences_and_paragraphs():
+    """A Word export with wide line spacing: every line is its own layout block. Mid-sentence lines (short, no closing
+    punctuation) are not headings; sentences are rebuilt across lines and grouped by paragraph."""
+    page = "\n\n".join([
+        "1. 前言與章節導覽",
+        "隨著人工智慧（AI）技術的迅速發展，自然語言處理（Natural Language",
+        "Processing, NLP）已逐漸成為AI 生態系統的核心之一。NLP 技術賦予機器理解、",
+        "處理並生成自然語言的能力，成為連接人類與機器溝通的重要橋樑。",
+        "本節內容將聚焦於自然語言處理技術的基礎概念與實務應用，介紹NLP 在現代",
+        "AI 應用中的關鍵角色。",
+        "A.",
+        "理解（Understand）：從語言中解析出語法結構與語意。",
+        "• 自然語言生成（NLG）：專注於機器如何產生自然語言。",
+    ])
+    _, blocks = extract_blocks("m", "page", 1, 1, [page])
+    assert [b.text for b in blocks if b.kind == "heading"] == ["1. 前言與章節導覽"]
+    body = [b for b in blocks if b.kind != "heading"]
+    assert [b.text for b in body] == [
+        "隨著人工智慧（AI）技術的迅速發展，自然語言處理（Natural Language Processing, NLP）已逐漸成為AI 生態系統的核心之一。",
+        "NLP 技術賦予機器理解、處理並生成自然語言的能力，成為連接人類與機器溝通的重要橋樑。",
+        "本節內容將聚焦於自然語言處理技術的基礎概念與實務應用，介紹NLP 在現代AI 應用中的關鍵角色。",
+        "A. 理解（Understand）：從語言中解析出語法結構與語意。",
+        "• 自然語言生成（NLG）：專注於機器如何產生自然語言。"]
+    groups = [b.meta["para_group"] for b in body]
+    assert groups[0] == groups[1] and len(set(groups)) == 4
+    assert [(b.locator.para, b.locator.paras) for b in body][:3] == [(2, 5), (2, 5), (3, 5)]
+    units = seg.rules_groups(blocks)
+    assert seg.validate_groups(blocks, units) == [] and len(units[0]) == 3   # heading + its paragraph
+    assert seg.unit_text([blocks[i] for i in units[0]]) == body[0].text + body[1].text
+    listing, meta = seg.window_listing(blocks, seg.make_window(blocks, 0, 0, len(blocks)))
+    assert "【B3】（句子，接續上一句的段落）" in listing and "【B2】（句子，程式猜測的段落開頭）" in listing
+    assert [x["same_para"] for x in meta["blocks"]][:4] == [False, False, True, False]
 
 
 def test_oversize_paragraph_is_cut_at_sentence_ends_outside_formulas():
@@ -145,15 +182,16 @@ def test_validate_groups_names_the_concrete_errors(manifest):
     assert any("重複" in e for e in seg.validate_groups(blocks, [list(range(0, n)), [n - 1]]))
 
 
-def test_windows_never_cut_glued_pairs_and_carry_read_only_context(manifest):
+def test_buffers_never_cut_glued_pairs_and_carry_read_only_context(manifest):
     _, _, _, blocks = blocks_of(manifest, "list-tcp")
     g = seg.glues(blocks)
     for size in (30, 60, 100, 200):
-        ws = seg.plan_windows(blocks, size)
-        assert ws[0].lo == 0 and ws[-1].hi == len(blocks)
-        for a, b in zip(ws, ws[1:]):
-            assert a.hi == b.lo and not g[a.hi - 1]
-            assert b.before == list(range(max(0, b.lo - seg.CONTEXT_BLOCKS), b.lo))
+        for lo in range(len(blocks)):
+            hi = seg.buffer_end(blocks, lo, g, size)
+            assert lo < hi <= len(blocks) and (hi == len(blocks) or not g[hi - 1])
+            w = seg.make_window(blocks, 0, lo, hi)
+            assert w.before == list(range(max(0, lo - seg.CONTEXT_BLOCKS), lo))
+    assert seg.buffer_end(blocks, 0, [None] * len(blocks), 10 ** 6, window_tokens=1) == 1   # the token limit applies too
 
 
 async def test_model_plan_returns_ids_and_text_is_rebuilt_by_the_program(manifest):
@@ -173,18 +211,87 @@ async def test_model_plan_returns_ids_and_text_is_rebuilt_by_the_program(manifes
     assert rep.integrity_ok and rep.boundary_ok
 
 
-async def test_invalid_plan_is_repaired_once_then_falls_back_to_rules(manifest):
+def groups_of(plan, blocks):
+    by_id = {x.block_id: i for i, x in enumerate(blocks)}
+    return [[by_id[bid] for bid in u.block_ids] for u in plan.units]
+
+
+async def test_out_of_order_plan_is_repaired_once_then_falls_back_to_rules(manifest):
     _, _, _, blocks = blocks_of(manifest, "formula-where")
-    f = next(i for i, b in enumerate(blocks) if b.kind == "formula")
-    split_formula = {"units": [{"blocks": [f"B{i + 1}" for i in range(0, f)]},
-                               {"blocks": [f"B{i + 1}" for i in range(f, len(blocks))]}]}
-    b = Scripted([split_formula, split_formula])
+    n = len(blocks)
+    repeated = {"units": [{"blocks": [f"B1-B{n}"]}, {"blocks": [f"B{n}"]}]}
+    b = Scripted([repeated, repeated])
     deps, sink = deps_for(b)
     plan = await seg.plan_units(blocks, deps)
     assert len(b.requests) == 2 and plan.planner == "rules" and plan.warnings
-    assert "不可切開" in b.requests[1]["messages"][-2]["content"] or "不可切開" in json.dumps(b.requests[1], ensure_ascii=False)
-    assert seg.validate_groups(blocks, [[next(i for i, x in enumerate(blocks) if x.block_id == bid) for bid in u.block_ids]
-                                        for u in plan.units]) == []
+    assert "重複" in json.dumps(b.requests[1], ensure_ascii=False)
+    assert seg.validate_groups(blocks, groups_of(plan, blocks)) == []
+
+
+async def test_a_cut_through_a_glued_pair_or_a_left_out_block_is_fixed_without_discarding_the_plan(manifest):
+    _, _, _, blocks = blocks_of(manifest, "formula-where")
+    f = next(i for i, b in enumerate(blocks) if b.kind == "formula")
+    n = len(blocks)
+    # the model cuts between the formula's introduction and the formula, and leaves out the last block
+    b = Scripted([{"units": [{"blocks": [f"B1-B{f}"], "reason": "引入"},
+                             {"blocks": [f"B{f + 1}-B{n - 1}"], "reason": "之後"}]}])
+    deps, _ = deps_for(b)
+    plan = await seg.plan_units(blocks, deps)
+    assert len(b.requests) == 1 and plan.planner == "model"
+    groups = groups_of(plan, blocks)
+    assert seg.validate_groups(blocks, groups) == [] and groups[0][-1] >= f + 1   # formula and `where` moved forward
+    assert groups[-1][-1] == n - 1 and plan.units[0].boundary_reason == "引入"
+    assert any("不可切開" in w for w in plan.warnings) and any("漏掉" in w for w in plan.warnings)
+
+
+def long_topics(k=3, sents=28):
+    """k topics, each a heading and one paragraph of ~sents * 27 chars; together well over the unit limit."""
+    sent = "這一句說明主題的一個面向，內容足夠長以便測試長度上限。"
+    lines = []
+    for t in range(k):
+        lines += [f"# 主題{t + 1}", sent * sents]
+    return extract_blocks("m", "line", 1, len(lines), lines)[1]
+
+
+async def test_an_oversize_unit_gets_a_focused_split_and_the_rest_of_the_plan_is_kept(manifest):
+    blocks = long_topics()
+    heads = [i for i, x in enumerate(blocks) if x.kind == "heading"]
+    n = len(blocks)
+    focused = {"units": [{"blocks": [f"B1-B{heads[1] - heads[0]}"], "reason": "主題一"},
+                         {"blocks": [f"B{heads[1] - heads[0] + 1}-B{n - heads[0]}"], "reason": "主題二"}]}
+    first = {"units": [{"blocks": [f"B1-B{heads[0]}"], "reason": "開頭"} if heads[0] else None,
+                       {"blocks": [f"B{heads[0] + 1}-B{n}"], "reason": "全部主題"}]}
+    first["units"] = [u for u in first["units"] if u]
+    b = Scripted([first, focused])
+    deps, _ = deps_for(b)
+    plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
+    assert len(b.requests) == 2 and b.requests[1]["meta"]["step"] == "segment_split"
+    focus_prompt = b.requests[1]["messages"][0]["content"]
+    assert "全部主題" in focus_prompt and "兩個以上" in focus_prompt
+    groups = groups_of(plan, blocks)
+    assert seg.validate_groups(blocks, groups) == []
+    assert any(g[0] == heads[1] for g in groups)                # the model's topic turn is kept
+    assert "主題一" in [u.boundary_reason for u in plan.units]
+
+
+async def test_a_failed_focused_split_is_split_by_the_program_at_headings(manifest):
+    blocks = long_topics()
+    heads = [i for i, x in enumerate(blocks) if x.kind == "heading"]
+    one = {"units": [{"blocks": [f"B1-B{len(blocks)}"], "reason": "全部"}]}
+    b = Scripted([one, one, one])                               # window plan; focused split twice still one unit
+    deps, _ = deps_for(b)
+    plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
+    assert len(b.requests) == 3 and plan.planner == "model"
+    groups = groups_of(plan, blocks)
+    assert seg.validate_groups(blocks, groups) == [] and len(groups) >= 2
+    assert all(g[0] in heads for g in groups)                   # program cuts prefer headings
+    assert any("程式依長度拆開" in w for w in plan.warnings)
+
+    old = Scripted([one])                                       # a prompt snapshot without segment_split
+    deps, _ = deps_for(old)
+    deps.prompts = {k: v for k, v in deps.prompts.items() if k != "segment_split"}
+    plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
+    assert len(old.requests) == 1 and seg.validate_groups(blocks, groups_of(plan, blocks)) == []
 
 
 async def test_model_unavailable_propagates_instead_of_pretending(manifest):
@@ -207,19 +314,79 @@ async def test_finished_windows_are_reused_after_a_restart(manifest):
     assert [u.block_ids for u in p1.units] == [u.block_ids for u in p2.units]
 
 
-async def test_connective_seam_asks_the_model_once_and_can_merge(manifest):
+async def test_the_last_unit_of_a_buffer_is_carried_into_the_next_one(manifest):
+    """BUF: every unit but the last is emitted; the last one may continue, so its blocks open the next buffer."""
     _, _, _, blocks = blocks_of(manifest, "cross-window-argument")
-    n = len(blocks)
-    windows = seg.plan_windows(blocks, 150)
-    outputs = []
-    for w in windows:
-        outputs.append({"units": [{"blocks": [f"B{i - w.lo + 1}"]} for i in range(w.lo, w.hi)]})
-    b = Scripted(outputs + [{"merge": True, "reason": "同一論證"}] * 5)
-    deps, sink = deps_for(b)
+
+    class OneUnitPerGluedRun(Scripted):
+        """Groups each run of glued blocks (the smallest valid units)."""
+        def __init__(self):
+            super().__init__([])
+
+        async def generate(self, messages, *, temperature, max_tokens, context_tokens, meta=None):
+            self.requests.append({"messages": messages, "meta": meta})
+            units, cur = [], []
+            for x in meta["blocks"]:
+                cur.append(x["label"])
+                if not x["glue_next"]:
+                    units.append({"blocks": cur, "reason": "測試"})
+                    cur = []
+            if cur:
+                units.append({"blocks": cur, "reason": "測試"})
+            return LLMResult(text=json.dumps({"units": units}), latency_ms=1)
+
+    b = OneUnitPerGluedRun()
+    deps, _ = deps_for(b)
     plan = await seg.plan_units(blocks, deps, window_chars=150)
-    seam_calls = [r for r in sink.records if r.task == "seam"]
-    assert seam_calls and all(r.validated["merge"] for r in seam_calls)
-    assert len(plan.units) < n
+    assert plan.planner == "model" and len(b.requests) >= 2
+    # a buffer with several units carries its last one (a single-unit buffer is emitted whole); the last buffer keeps all
+    assert any("carried" in w for w in plan.windows) and "carried" not in plan.windows[-1]
+    for w, nxt in zip(plan.windows, plan.windows[1:]):   # the carried unit opens the next buffer
+        if "carried" in w:
+            assert nxt["owned"][:len(w["carried"])] == w["carried"]
+        else:
+            assert nxt["owned"][0] not in w["owned"]
+    assert [bid for u in plan.units for bid in u.block_ids] == [x.block_id for x in blocks]
+    by_id = {x.block_id: i for i, x in enumerate(blocks)}
+    assert seg.validate_groups(blocks, [[by_id[i] for i in u.block_ids] for u in plan.units]) == []
+
+
+def test_a_unit_has_a_strict_size_limit_and_a_long_paragraph_may_split_between_sentences():
+    sent = "這一句說明主題的一個面向，內容足夠長以便測試長度上限。"   # 27 chars
+    para = sent * 80                                             # one paragraph of ~2160 chars, cut into pieces
+    _, blocks = extract_blocks("m", "line", 1, 1, [para])
+    n = len(blocks)
+    assert n > 1 and not any(seg.glues(blocks))                  # pieces end at sentence ends: the planner may cut there
+    errs = seg.validate_groups(blocks, [list(range(n))])
+    assert any("太長" in e for e in errs)
+    half = n // 2
+    assert seg.validate_groups(blocks, [list(range(half)), list(range(half, n))]) == []
+    rules = seg.rules_groups(blocks)                             # the fallback keeps the paragraph, within the limit
+    assert seg.validate_groups(blocks, rules) == [] and len(rules) >= 2
+    # a unit that cannot be split (one block, or all glued) is not refused for its size
+    big = extract_blocks("m", "line", 1, 3, ["$$", "x + " * 900, "$$"])[1]
+    assert seg.validate_groups(big, [[0]]) == []
+
+
+async def test_a_heading_is_guidance_for_the_model_not_a_checked_rule(manifest):
+    """A heading usually opens a new small topic, but the model may keep one inside a unit; its text then stays a line
+    of the unit instead of disappearing."""
+    case, unit, units, blocks = blocks_of(manifest, "zh-opportunity-cost")
+    b = Scripted([{"units": [{"blocks": ["B1-B6"], "reason": "成本概念"}]}])
+    deps, _ = deps_for(b)
+    plan = await seg.plan_units(blocks, deps)
+    assert plan.planner == "model" and len(plan.units) == 1
+    q = seg.to_quotes(unit, plan, {x.block_id: x for x in blocks})[0]
+    assert q["heading"] == "機會成本" and "\n\n沉沒成本\n\n" in q["text"]
+    assert ev.check_segmentation(case, unit, units, [q]).integrity_ok
+
+
+def test_unit_labels_accept_ranges():
+    w = seg.Window(0, 10, 20)
+    plan = seg.WindowPlan(units=[seg.PlannedUnit(blocks=["B1-B3"]), seg.PlannedUnit(blocks=["B4", "5–B10"])])
+    assert seg.labels_to_groups(plan, w) == [[10, 11, 12], list(range(13, 20))]
+    with pytest.raises(seg.PlanInvalid):
+        seg.labels_to_groups(seg.WindowPlan(units=[seg.PlannedUnit(blocks=["B3-B11"])]), w)
 
 
 def test_parts_carry_token_estimates(manifest):
