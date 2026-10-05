@@ -23,7 +23,8 @@ import re
 
 from .schemas import Locator, SourceBlock
 
-EXTRACTION_VERSION = "blocks-v3"   # v2: heading levels and structure confidence; v3: PDF text stream cut into sentences
+EXTRACTION_VERSION = "blocks-v4"   # v2: heading levels and structure confidence; v3: PDF text stream cut into sentences;
+                                   # v4: numbered PDF headings confirmed by their siblings, runs of cell-like lines are tables
 MAX_BLOCK_CHARS = 700
 TARGET_PIECE_CHARS = 350
 HARD_MAX_BLOCK_CHARS = 8000
@@ -190,6 +191,28 @@ NO_HEADING_END_RE = re.compile(r"[。．.!?！？,，;；：:、]$")
 BULLET_RE = re.compile(r"^\s*[•○●■□◆◇▪▫–\-*+]\s")
 PDF_ITEM_RE = re.compile(r"^\s*(•|[-*+]\s|\d{1,3}[.)、]\s*\S|[（(]\d{1,2}[）)]|[A-Za-z][.)]\s)")
 PARA_END = SENT_END + "：:"   # a layout line ending with one of these may close a paragraph
+TABLE_RUN = 4   # this many heading guesses in a row without a section number are table cells, not headings
+# a section number that opens a heading: "A. …", "一、…", "（1）…", "1. …" (not "3.1 …")
+ENUM_HEAD_RE = re.compile(r"^\s*(?:([A-Z])[.．]|([一二三四五六七八九十]{1,3})、|[（(](\d{1,2})[）)]|(\d{1,2})[.．](?!\d))\s*(?=\S)")
+CJK_DIGITS = {ch: i for i, ch in enumerate("一二三四五六七八九", 1)}
+
+
+def _cjk_number(t: str) -> int:
+    tens, _, ones = t.rpartition("十") if "十" in t else ("", "", t)
+    return (CJK_DIGITS.get(tens, 1) * 10 if "十" in t else 0) + CJK_DIGITS.get(ones, 0)
+
+
+def enum_label(text: str) -> tuple[str, int] | None:
+    """(numbering style, ordinal) of the section number opening a line: "A. …" → ("A.", 1), "（2）…" → ("(1)", 2)."""
+    m = ENUM_HEAD_RE.match(text)
+    if not m:
+        return None
+    latin, cjk, paren, digit = m.groups()
+    if latin:
+        return "A.", ord(latin) - ord("A") + 1
+    if cjk:
+        return "一、", _cjk_number(cjk)
+    return ("(1)", int(paren)) if paren else ("1.", int(digit))
 
 
 def _page_paras(page: str) -> list[tuple[int, int]]:
@@ -211,12 +234,23 @@ def _full_line_width(widths: list[int]) -> float:
 
 def pdf_layout(units: list[str]) -> list[list[tuple[int, int, str]]]:
     """Per page: (char_start, char_end, kind) of each blank-line separated layout paragraph, kind one of heading /
-    formula / item (opens a list item) / label (a list label alone on its line) / body.
+    formula / table / item (opens a list item) / label (a list label alone on its line) / body.
 
     The text layer does not say where paragraphs are: in a typeset book a layout paragraph is a paragraph, in a Word
     export it is one line. A heading guess therefore needs more than "short, no closing punctuation" (every
     mid-sentence Chinese line is that): it must follow a finished sentence (or another heading / the range start),
-    and be shorter than the page's full lines. The guess is low confidence and never defines a section."""
+    and be shorter than the page's full lines. A numbered line whose sibling numbers are headings ("A." when "B." is
+    one) is a heading even after an unfinished line, e.g. the last cell of a table. Table cells look like headings
+    too, so a region full of unnumbered heading guesses is a table (_tables). The guess is low confidence and never
+    defines a section."""
+    first = _layout_pass(units, frozenset())
+    found = {enum_label(units[pi][a:b].strip()) for pi, kinds in enumerate(first) for a, b, k in kinds if k == "heading"}
+    found.discard(None)
+    siblings = frozenset((style, n + d) for style, n in found for d in (-1, 1))
+    return _tables(units, _layout_pass(units, siblings) if siblings else first)
+
+
+def _layout_pass(units: list[str], siblings: frozenset[tuple[str, int]]) -> list[list[tuple[int, int, str]]]:
     out: list[list[tuple[int, int, str]]] = []
     prev_closed = True
     for page in units:
@@ -232,8 +266,8 @@ def pdf_layout(units: list[str]) -> list[list[tuple[int, int, str]]]:
                 kind = "label"   # a list label alone on its line ("A."): it opens the item that follows
             elif BULLET_RE.match(p):
                 kind = "item"
-            elif "\n" not in p and len(paras) > 1 and prev_closed and len(s) <= HEADING_MAX_CHARS \
-                    and _width(s) <= HEADING_LINE_SHARE * full and not NO_HEADING_END_RE.search(s):
+            elif "\n" not in p and len(paras) > 1 and (prev_closed or enum_label(s) in siblings) \
+                    and len(s) <= HEADING_MAX_CHARS and _width(s) <= HEADING_LINE_SHARE * full and not NO_HEADING_END_RE.search(s):
                 kind = "heading"
             elif PDF_ITEM_RE.match(p) or LIST_RE.match(p):
                 kind = "item"
@@ -242,6 +276,60 @@ def pdf_layout(units: list[str]) -> list[list[tuple[int, int, str]]]:
             prev_closed = kind in ("heading", "formula") or (kind != "label" and (ends_sentence(p) or s.endswith(("：", ":"))))
             kinds.append((a, b, kind))
         out.append(kinds)
+    return out
+
+
+def _tables(units: list[str], layout: list[list[tuple[int, int, str]]]) -> list[list[tuple[int, int, str]]]:
+    """Table regions become table lines. A region starts at an unnumbered heading guess (a short cell) and goes on
+    through more of them and through one-line sentences standing on their own (cells written as sentences); it is a
+    table when it holds TABLE_RUN or more heading guesses. After its last heading guess it keeps as many one-line
+    sentences as a row carried inside the region; when rows had none, a short unfinished line right after is the last
+    cell (e.g. "BERT、GPT、T5", not a heading only because of its comma). A numbered heading or any other line ends
+    the region."""
+    flat = [(pi, k, units[pi][a:b].strip(), kind) for pi, kinds in enumerate(layout) for k, (a, b, kind) in enumerate(kinds)]
+
+    def cell(x: int) -> bool:
+        return flat[x][3] == "heading" and enum_label(flat[x][2]) is None
+
+    def closed(x: int) -> bool:
+        return flat[x][3] in ("heading", "formula") or ends_sentence(flat[x][2]) or flat[x][2].endswith(("：", ":"))
+
+    def sentence_line(x: int) -> bool:
+        return flat[x][3] == "body" and "\n" not in flat[x][2] and ends_sentence(flat[x][2]) and (x == 0 or closed(x - 1))
+
+    table: set[int] = set()
+    i = 0
+    while i < len(flat):
+        if not cell(i):
+            i += 1
+            continue
+        last, heads, row_lines, run = i, 1, 0, 0
+        j = i + 1
+        while j < len(flat) and (cell(j) or sentence_line(j)):
+            if cell(j):
+                last, heads, row_lines, run = j, heads + 1, max(row_lines, run), 0
+            else:
+                run += 1
+            j += 1
+        if heads < TABLE_RUN:
+            i += 1
+            continue
+        end = last + min(run, row_lines)
+        def short_unfinished(x: int) -> bool:
+            return x < len(flat) and flat[x][3] == "body" and "\n" not in flat[x][2] \
+                and len(flat[x][2]) <= HEADING_MAX_CHARS and not ends_sentence(flat[x][2])
+
+        if end == last and short_unfinished(last + 1):
+            end = last + 1
+            while flat[end][2].endswith(("、", "，", ",")) and short_unfinished(end + 1):   # the cell wraps
+                end += 1
+        table.update(range(i, end + 1))
+        i = end + 1
+    out = [list(kinds) for kinds in layout]
+    for x in table:
+        pi, k = flat[x][:2]
+        a, b, _ = out[pi][k]
+        out[pi][k] = (a, b, "table")
     return out
 
 
@@ -310,6 +398,16 @@ def _page_blocks(units: list[str], start: int) -> list[dict]:
 
     for pi, kinds in enumerate(layout):
         for k, (a, b, kind) in enumerate(kinds, 1):
+            if kind == "table":   # one block per run of table lines on a page, one line per cell
+                flush()
+                cell = units[pi][a:b].replace("\n", " ")
+                if k > 1 and kinds[k - 2][2] == "table" and out and out[-1]["kind"] == "table" and out[-1]["start"] == start + pi:
+                    out[-1].update(text=out[-1]["text"] + "\n" + cell, char_end=b)
+                    out[-1]["meta"]["pdf_paras"].append([start + pi, k])
+                else:
+                    out.append({"kind": "table", "text": cell, "start": start + pi, "end": start + pi, "para": k,
+                                "paras": len(kinds), "char_start": a, "char_end": b, "meta": {"pdf_paras": [[start + pi, k]]}})
+                continue
             if kind in ("heading", "formula"):
                 flush()
                 out.append({"kind": kind, "text": units[pi][a:b], "start": start + pi, "end": start + pi, "para": k,
@@ -355,7 +453,8 @@ def extract_blocks(material_id: str, unit: str, start: int, end: int, units: lis
 
     for r in raw:
         text, base = r["text"], r.get("char_start", 0)
-        if "para_group" in r.get("meta", {}):   # a PDF sentence: offsets already resolved, one sentence is never cut
+        if "para_group" in r.get("meta", {}) or r["kind"] == "table" and "pdf_paras" in r.get("meta", {}):
+            # a PDF sentence or table: offsets already resolved, never cut
             add(r, text, base, r["char_end"])
             continue
         if len(text) <= MAX_BLOCK_CHARS or r["kind"] in ("heading",):
