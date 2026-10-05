@@ -36,13 +36,19 @@ def _overlap(a, b) -> float:
     return (x1 - x0) * (y1 - y0) / max(1e-6, (a[2] - a[0]) * (a[3] - a[1]))
 
 
-def page_evidence(page) -> list[dict]:
+def _is_bullet_span(line_spans: list[dict], k: int) -> bool:
+    """A span of private-use glyphs that opens its line is an Office list bullet (Wingdings / Symbol), not lost text."""
+    t = line_spans[k]["text"].strip()
+    return bool(t) and all("" <= ch <= "" for ch in t) and not "".join(s["text"] for s in line_spans[:k]).strip()
+
+
+def page_evidence(page, margins: frozenset[str] = frozenset()) -> list[dict]:
     """Evidence of every paragraph of one page, in the importer's paragraph order."""
     from ..materials import pdf_page_paragraphs
 
-    paras = pdf_page_paragraphs(page)
+    paras = pdf_page_paragraphs(page, margins)
     spans = [s for b in page.get_text("dict")["blocks"] if b.get("type") == 0
-             for ln in b["lines"] for s in ln["spans"] if s["text"].strip()]
+             for ln in b["lines"] for k, s in enumerate(ln["spans"]) if s["text"].strip() and not _is_bullet_span(ln["spans"], k)]
     images = [tuple(round(v, 1) for v in im["bbox"]) for im in page.get_image_info()]
     out = []
     for k, (text, bbox) in enumerate(paras, 1):
@@ -63,24 +69,55 @@ def page_evidence(page) -> list[dict]:
     return out
 
 
+def _union(boxes: list[list[float]]) -> list[float]:
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+
+
+def merge_evidence(evs: list[dict]) -> dict:
+    """One block rebuilt from several layout paragraphs (lines of a Word export, a sentence across a page break):
+    clues are pooled; `page` / `bbox` are the first page's region and `regions` lists one region per page."""
+    if len(evs) == 1:
+        return evs[0]
+    pages: dict[int, list[list[float]]] = {}
+    for e in evs:
+        pages.setdefault(e["page"], []).append(e["bbox"])
+    regions = [{"page": p, "bbox": [round(v, 1) for v in _union(bs)]} for p, bs in pages.items()]
+    return {
+        "version": EVIDENCE_VERSION, "page": regions[0]["page"], "para": evs[0]["para"], "bbox": regions[0]["bbox"],
+        "regions": regions, "spans": [s for e in evs for s in e["spans"]][:MAX_SPANS],
+        **{k: sorted({x for e in evs for x in e[k]}) for k in ("fonts", "math_fonts", "bold_tokens", "italic_tokens", "superscripts")},
+        "lost_glyphs": any(e["lost_glyphs"] for e in evs),
+        "images_near": [list(x) for x in dict.fromkeys(tuple(im) for e in evs for im in e["images_near"])],
+        "caption": any(e["caption"] for e in evs),
+    }
+
+
 def attach_evidence(pdf_path: str | Path, blocks: list) -> list:
     """Copies of the PDF blocks with `meta["pdf"]` filled from the original file (blocks of other kinds unchanged).
-    A block cut from a long paragraph shares its paragraph's evidence."""
+    A block rebuilt from several layout paragraphs (`meta["pdf_paras"]`, [[page, para], …]) pools their evidence;
+    a block cut from a long paragraph shares its paragraph's evidence."""
     import pymupdf
 
+    from ..materials import pdf_running_margins
+
     doc = pymupdf.open(str(pdf_path))
+    margins = pdf_running_margins(doc)
     cache: dict[int, list[dict]] = {}
+
+    def para_ev(page_no: int, para: int) -> dict | None:
+        if page_no not in cache:
+            cache[page_no] = page_evidence(doc[page_no - 1], margins) if 1 <= page_no <= len(doc) else []
+        evs = cache[page_no]
+        return evs[para - 1] if 0 < para <= len(evs) else None
+
     out = []
     for b in blocks:
-        if b.locator.unit != "page" or b.locator.para is None:
+        refs = b.meta.get("pdf_paras") or ([[b.locator.start, b.locator.para]] if b.locator.para is not None else [])
+        if b.locator.unit != "page" or not refs:
             out.append(b)
             continue
-        page_no = b.locator.start
-        if page_no not in cache:
-            cache[page_no] = page_evidence(doc[page_no - 1]) if 1 <= page_no <= len(doc) else []
-        evs = cache[page_no]
-        ev = evs[b.locator.para - 1] if b.locator.para - 1 < len(evs) else None
-        out.append(b.model_copy(update={"meta": {**b.meta, "pdf": ev}}) if ev else b)
+        evs = [e for e in (para_ev(p, k) for p, k in refs) if e]
+        out.append(b.model_copy(update={"meta": {**b.meta, "pdf": merge_evidence(evs)}}) if evs else b)
     return out
 
 
@@ -110,7 +147,7 @@ def unit_symbol_evidence(blocks: list, pdf_path: str | None, has_math_text: bool
     symbolic = has_math_text or clues["math_fonts"] or clues["lost_glyphs"] or bold_letters
     if not symbolic:
         return None
-    regions = [{"page": e["page"], "bbox": e["bbox"]} for e in evs]
+    regions = [r for e in evs for r in e.get("regions") or [{"page": e["page"], "bbox": e["bbox"]}]]
     if not pdf_path or not regions:
         return {"status": "unavailable", "version": EVIDENCE_VERSION, "clues": clues, "regions": regions,
                 "reason": "這一段有數學符號，但找不到原始 PDF 的版面證據，無法確認符號的字型（粗體／斜體／上下標）"}

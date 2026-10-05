@@ -59,9 +59,10 @@ def test_cross_window_argument_stays_one_unit_and_matches_gold():
     case = ev.select_cases(manifest, ["cross-window-argument"])[0]
     unit, units = ev.load_units(case)
     _, blocks = extract_blocks(case["id"], unit, 1, len(units), units)
-    for w in seg.plan_windows(blocks, case["window_chars"]):   # a model batch never cuts the argument either
-        g = seg.glues(blocks)
-        assert w.hi == len(blocks) or not g[w.hi - 1]
+    g = seg.glues(blocks)
+    for lo in range(len(blocks)):   # a model batch never cuts the argument either
+        hi = seg.buffer_end(blocks, lo, g, case["window_chars"])
+        assert hi == len(blocks) or not g[hi - 1]
     _, _, quotes = rules_quotes(units)
     rep = ev.check_segmentation(case, unit, units, [{"text": q["text"], "heading": q.get("heading")} for q in quotes])
     assert rep.integrity_ok and not rep.together_violations and not rep.protected_violations, rep.as_dict()

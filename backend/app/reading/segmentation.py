@@ -8,12 +8,19 @@ Four levels that are no longer mixed:
 - model batch (planning window): what one model call sees — a computing boundary only, never a semantic one.
 
     blocks → program marks protected relations (glue) and forced boundaries
-           → planning windows (owned blocks + read-only neighbours), never cut through a glued pair
+           → a buffer (BUF) of consecutive blocks up to WINDOW_CHARS / WINDOW_TOKENS (+ read-only neighbours),
+             never cut through a glued pair
            → model returns groups of block labels + a short reason (WindowPlan)
-           → program validates coverage / order / contiguity / glue / heading rule; one repair; else rules
-           → seams between windows: glue cannot cross a window cut; a connective-led seam may be checked by the
-             model (≤ 2 calls, 0 when the rule decides)
+           → program checks order; one repair; else rules for that buffer. Then it repairs single units instead of
+             discarding the buffer: a left-out block joins the unit before it, a cut through a glued pair moves past
+             the pair, a unit over the size limit gets a focused split request (then a program split at headings /
+             paragraph starts when that fails too)
+           → every unit but the last is final; the last one may continue past the buffer, so its blocks go back
+             into the next buffer, which is refilled after them (the last buffer keeps all its units)
            → units (+ parts), whose text the program rebuilds from the blocks.
+
+For PDFs the blocks are sentences of a rebuilt text stream (source.py): the model decides paragraph-level units by
+meaning, and `para_group` (the paragraph the program rebuilt from line ends) is only a hint.
 
 The rules planner alone is a complete, valid plan (used when the model is off, unavailable for a window after its
 budget, or keeps producing invalid plans); it satisfies every protected relation by construction."""
@@ -28,16 +35,17 @@ from langchain_core.messages import HumanMessage
 from ..llm.runtime import CallBudget, stable_hash
 from ..llm.tasks import TaskContext, TaskError, run_structured
 from .schemas import PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, WindowPlan
-from pydantic import BaseModel
 
-SEGMENTATION_VERSION = "units-v2"   # v2: argument / example / enumeration relations, section-bounded parts
+SEGMENTATION_VERSION = "units-v5"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
+WINDOW_TOKENS = 3000        # BUF limit in estimated tokens: ~3000 Chinese chars; Latin text stops at WINDOW_CHARS first
 CONTEXT_BLOCKS = 2
 CONTEXT_PREVIEW = 300
 PART_CHARS = 5000
 ARGUMENT_MAX_CHARS = 1600   # a soft relation (argument, example, enumeration) merges units up to this size
+UNIT_MAX_TOKENS = 1600      # strict upper bound of one unit (~1600 Chinese chars): more is too much for a beginner at once
 SECTION_LEVEL = 3           # markdown heading depth mapped to the book's formal third-level section (Ch n.m.k)
 CONCLUSION_RE = re.compile(r"^\s*(因此|所以|於是|由此可知|由此可見|由此|綜上|總之|故|therefore|thus|hence|consequently|as a result)", re.I)
 ENUM_NEXT_RE = re.compile(r"^\s*(第[二三四五六七八九十]個?|其次|再者|另一個前提|second(ly)?|third(ly)?|next)", re.I)
@@ -47,7 +55,6 @@ CODE_EXPLAIN_RE = re.compile(r"^\s*(這段程式|上面的程式|上述程式|�
 TABLE_EXPLAIN_RE = re.compile(r"^\s*(上表|此表|這張表|表中|the table above|this table)", re.I)
 TOKEN_METHOD = "heuristic-cjk1.0-other0.3"
 WHERE_RE = re.compile(r"^\s*(其中|式中|這裡的?|此處|where\b|here\b|with\b)", re.I)
-CONNECTIVE_RE = re.compile(r"^\s*(因此|所以|於是|由此|然而|但是|不過|此外|另外|同理|換句話說|也就是說|therefore|thus|hence|however|so\b|consequently)", re.I)
 
 
 class PlanInvalid(Exception):
@@ -82,9 +89,10 @@ def glue_reason(a: SourceBlock, b: SourceBlock, enum_open: bool = False) -> str 
         return "同一清單"
     if a.kind == "figure":
         return "圖與說明文字"
-    if a.parent_block_id and a.parent_block_id == b.parent_block_id:
-        # a sentence end is a safe place to cut a long paragraph for computing, not a semantic boundary
-        return "同一段落" if not ends_safely(a.text) else "軟：同一段落的後續句子"
+    if a.parent_block_id and a.parent_block_id == b.parent_block_id and not ends_safely(a.text):
+        # a piece cut from a long paragraph: inside a sentence it must stay; at a sentence end the planner may start a
+        # new topic there
+        return "同一段落"
     if b.kind in ("paragraph", "list_item"):
         if CONCLUSION_RE.match(b.text) and a.kind in ("paragraph", "list_item", "formula"):
             return "軟：論證的結論承接前提"
@@ -109,15 +117,21 @@ def glue_plan(blocks: list[SourceBlock]) -> tuple[list[str | None], list[dict]]:
         raw.append(glue_reason(a, b, enum_open))
     out: list[str | None] = []
     relations: list[dict] = []
+    # rest[i]: blocks[i] plus the rest of its paragraph, which usually goes with it
+    rest = [len(b.text) for b in blocks]
+    for i in range(len(blocks) - 2, -1, -1):
+        if same_para(blocks, i + 1):
+            rest[i] += rest[i + 1]
     chain = len(blocks[0].text) if blocks else 0
     for i, g in enumerate(raw):
         nxt = len(blocks[i + 1].text)
-        if g and g.startswith("軟：") and chain + nxt > ARGUMENT_MAX_CHARS:
+        if g and g.startswith("軟：") and chain + rest[i + 1] > ARGUMENT_MAX_CHARS:
             relations.append({"from": blocks[i].block_id, "to": blocks[i + 1].block_id, "reason": g[2:],
                               "note": f"合併後超過 {ARGUMENT_MAX_CHARS} 字，分成相鄰單元並保持在同一部分"})
             g = None
         out.append(g)
-        chain = chain + nxt if g else nxt
+        # the rest of a paragraph usually goes with it, so it counts towards the size a soft relation would create
+        chain = chain + nxt if g or same_para(blocks, i + 1) else nxt
     return out, relations
 
 
@@ -132,8 +146,24 @@ def glues(blocks: list[SourceBlock]) -> list[str | None]:
 
 
 def forced_break(blocks: list[SourceBlock], i: int) -> bool:
-    """A unit must start at blocks[i]: a heading that follows non-heading content."""
+    """The rules planner starts a unit at blocks[i]: a heading that follows non-heading content. For the model this is
+    guidance (a heading usually opens a new small topic), not a checked rule."""
     return i > 0 and blocks[i].kind == "heading" and blocks[i - 1].kind != "heading"
+
+
+def para_key(b: SourceBlock) -> str | None:
+    return b.meta.get("para_group") or b.parent_block_id
+
+
+def same_para(blocks: list[SourceBlock], i: int) -> bool:
+    """blocks[i] continues the paragraph of blocks[i - 1]: one the PDF extractor rebuilt, or a long paragraph cut into
+    pieces (a hint, not a protected relation)."""
+    k = para_key(blocks[i])
+    return bool(k) and i > 0 and para_key(blocks[i - 1]) == k
+
+
+def unit_tokens(blocks: list[SourceBlock]) -> int:
+    return sum(estimate_tokens(b.text) for b in blocks)
 
 
 def body_chars(blocks: list[SourceBlock]) -> int:
@@ -143,8 +173,9 @@ def body_chars(blocks: list[SourceBlock]) -> int:
 # -- rules planner --------------------------------------------------------------------
 
 def rules_groups(blocks: list[SourceBlock]) -> list[list[int]]:
-    """One paragraph-level block per unit; glued blocks together; headings open a unit; a tiny block joins its
-    neighbour when that stays under MAX_UNIT_CHARS (same granularity as the legacy candidate paragraphs)."""
+    """One paragraph-level block per unit; glued blocks together; headings open a unit; sentences of one rebuilt PDF
+    paragraph stay together up to ARGUMENT_MAX_CHARS; a tiny block joins its neighbour when that stays under
+    MAX_UNIT_CHARS (same granularity as the legacy candidate paragraphs)."""
     g = glues(blocks)
     groups: list[list[int]] = []
     for i, b in enumerate(blocks):
@@ -156,6 +187,10 @@ def rules_groups(blocks: list[SourceBlock]) -> list[list[int]]:
             cur.append(i)
             continue
         cur_chars = body_chars([blocks[j] for j in cur])
+        if same_para(blocks, i) and cur_chars + len(b.text) <= ARGUMENT_MAX_CHARS \
+                and unit_tokens([blocks[j] for j in cur] + [b]) <= UNIT_MAX_TOKENS:
+            cur.append(i)
+            continue
         small = cur_chars < MIN_UNIT_CHARS or (len(b.text) < MIN_UNIT_CHARS and b.kind == "paragraph")
         if small and cur_chars + len(b.text) <= MAX_UNIT_CHARS and b.kind not in ("code", "table"):
             cur.append(i)
@@ -165,7 +200,8 @@ def rules_groups(blocks: list[SourceBlock]) -> list[list[int]]:
 
 
 def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int = 0, hi: int | None = None) -> list[str]:
-    """Errors of a grouping of blocks[lo:hi] (empty list = valid)."""
+    """Errors of a grouping of blocks[lo:hi] (empty list = valid). Only what the program must guarantee is checked:
+    coverage and order, protected relations (glue) and the strict size limit; where a topic begins is the model's call."""
     hi = len(blocks) if hi is None else hi
     errs: list[str] = []
     flat = [i for grp in groups for i in grp]
@@ -182,13 +218,71 @@ def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int 
         return errs
     g = glues(blocks)
     for grp in groups:
-        for k, i in enumerate(grp):
-            if k and blocks[i].kind == "heading" and blocks[grp[k - 1]].kind != "heading":
-                errs.append(f"B{i - lo + 1} 是小標題，必須作為新單元的開頭")
+        if unit_tokens([blocks[i] for i in grp]) > UNIT_MAX_TOKENS and any(not g[i] for i in grp[:-1]):
+            errs.append(f"B{grp[0] - lo + 1}–B{grp[-1] - lo + 1} 太長（上限約 {UNIT_MAX_TOKENS} 字），"
+                        "請在主題轉換的句子之間拆開")
         last = grp[-1]
         if last + 1 < hi and g[last]:
             errs.append(f"B{last - lo + 1} 與 B{last - lo + 2} 不可切開（{g[last]}）")
     return errs
+
+
+def oversize(blocks: list[SourceBlock], grp: list[int], g: list[str | None] | None = None) -> bool:
+    """Over the strict size limit and splittable (some boundary inside is not glued)."""
+    g = glues(blocks) if g is None else g
+    return unit_tokens([blocks[i] for i in grp]) > UNIT_MAX_TOKENS and any(not g[i] for i in grp[:-1])
+
+
+def normalize_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int, hi: int) -> tuple[list[list[int]], list[str]]:
+    """Repairs a model grouping of blocks[lo:hi] that keeps the original order: a left-out block joins the unit before
+    it (the first unit for leading ones), and a boundary inside a glued pair moves forward past the pair. Raises
+    PlanInvalid when blocks repeat or are out of order (that needs the model). Returns (groups, notes)."""
+    flat = [i for grp in groups for i in grp]
+    if any(b <= a for a, b in zip(flat, flat[1:])):
+        errs = validate_groups(blocks, groups, lo, hi)
+        raise PlanInvalid("；".join(errs) or "區塊順序被打亂；每個單元必須依原文順序、連續")
+    notes: list[str] = []
+    groups = [list(grp) for grp in groups if grp]
+    miss = sorted(set(range(lo, hi)) - set(flat))
+    if miss:
+        notes.append("模型漏掉的區塊由程式補回前一個單元：" + "、".join(f"B{i - lo + 1}" for i in miss))
+        for i in miss:
+            k = max([k for k, grp in enumerate(groups) if grp[0] < i], default=0)
+            groups[k] = sorted(groups[k] + [i])
+    g = glues(blocks)
+    out: list[list[int]] = []
+    for grp in groups:
+        moved = 0
+        while out and grp and g[out[-1][-1]]:
+            out[-1].append(grp.pop(0))
+            moved += 1
+        if moved:
+            notes.append(f"B{out[-1][-1] - moved - lo + 1} 與下一個區塊不可切開，程式把邊界往後移")
+        if grp:
+            out.append(grp)
+    return out, notes
+
+
+def split_by_size(blocks: list[SourceBlock], grp: list[int]) -> list[list[int]]:
+    """Program split of an oversize unit: cut before the block that would pass the limit, at the best earlier
+    boundary that is not glued (a heading first, then a paragraph start, then any sentence end; the latest of those)."""
+    g = glues(blocks)
+    out: list[list[int]] = []
+    cur: list[int] = []
+    for i in grp:
+        seq = cur + [i]
+        if cur and unit_tokens([blocks[j] for j in seq]) > UNIT_MAX_TOKENS:
+            cuts = [k for k in range(1, len(seq)) if not g[seq[k] - 1]]
+            if cuts:
+                k = max(cuts, key=lambda k: (2 if blocks[seq[k]].kind == "heading" else
+                                             0 if same_para(blocks, seq[k]) else 1, k))
+                out.append(seq[:k])
+                cur = seq[k:]
+                continue
+        cur = seq
+    if cur:
+        out.append(cur)
+    return out
 
 
 # -- windows ----------------------------------------------------------------------
@@ -206,28 +300,36 @@ class Window:
         return f"w{self.index + 1:02d}"
 
 
-def plan_windows(blocks: list[SourceBlock], window_chars: int = WINDOW_CHARS) -> list[Window]:
-    """Consecutive owned ranges of about window_chars; a cut never falls inside a glued pair (the window grows
-    instead) and prefers a heading."""
-    g = glues(blocks)
-    out: list[Window] = []
-    lo, size = 0, 0
-    for i, b in enumerate(blocks):
-        if i > lo and size + len(b.text) > window_chars and not g[i - 1]:
-            out.append(Window(len(out), lo, i))
-            lo, size = i, 0
-        size += len(b.text)
-    out.append(Window(len(out), lo, len(blocks)))
-    for w in out:
-        w.before = list(range(max(0, w.lo - CONTEXT_BLOCKS), w.lo))
-        w.after = list(range(w.hi, min(len(blocks), w.hi + CONTEXT_BLOCKS)))
-    return out
+def buffer_end(blocks: list[SourceBlock], lo: int, g: list[str | None], window_chars: int = WINDOW_CHARS,
+               window_tokens: int = WINDOW_TOKENS) -> int:
+    """End (exclusive) of the buffer that starts at blocks[lo]: about window_chars characters / window_tokens
+    estimated tokens, at least one block; a cut never falls inside a glued pair (the buffer grows instead)."""
+    size = tokens = 0
+    i = lo
+    while i < len(blocks):
+        t = blocks[i].text
+        if i > lo and (size + len(t) > window_chars or tokens + estimate_tokens(t) > window_tokens) and not g[i - 1]:
+            break
+        size, tokens = size + len(t), tokens + estimate_tokens(t)
+        i += 1
+    return i
+
+
+def make_window(blocks: list[SourceBlock], index: int, lo: int, hi: int) -> Window:
+    return Window(index, lo, hi, before=list(range(max(0, lo - CONTEXT_BLOCKS), lo)),
+                  after=list(range(hi, min(len(blocks), hi + CONTEXT_BLOCKS))))
 
 
 def window_listing(blocks: list[SourceBlock], w: Window) -> tuple[str, dict]:
     g = glues(blocks)
     kinds = {"heading": "小標題", "paragraph": "段落", "list_item": "清單項目", "formula": "公式", "code": "程式碼",
              "table": "表格", "figure": "圖（只有說明文字，圖片內容無法讀取）", "quote": "引文"}
+
+    def kind(i: int) -> str:
+        if not blocks[i].meta.get("para_group"):
+            return kinds[blocks[i].kind]
+        return "句子，接續上一句的段落" if i > w.lo and same_para(blocks, i) else "句子，程式猜測的段落開頭"
+
     lines = []
     if w.before:
         lines.append("### 前文（唯讀，只供理解，不要輸出）")
@@ -237,13 +339,14 @@ def window_listing(blocks: list[SourceBlock], w: Window) -> tuple[str, dict]:
     for i in range(w.lo, w.hi):
         b = blocks[i]
         note = f"　⟶ 必須與下一個區塊同單元（{g[i]}）" if i + 1 < w.hi and g[i] else ""
-        lines.append(f"【B{i - w.lo + 1}】（{kinds[b.kind]}）{note}\n{b.text}")
+        lines.append(f"【B{i - w.lo + 1}】（{kind(i)}）{note}\n{b.text}")
     if w.after:
         lines.append("")
         lines.append("### 後文（唯讀，只供理解，不要輸出）")
         lines += [f"［後文］{blocks[i].text[:CONTEXT_PREVIEW]}" for i in w.after]
     meta = {"blocks": [{"label": f"B{i - w.lo + 1}", "kind": blocks[i].kind, "chars": len(blocks[i].text),
-                        "glue_next": bool(i + 1 < w.hi and g[i])} for i in range(w.lo, w.hi)]}
+                        "glue_next": bool(i + 1 < w.hi and g[i]), "same_para": i > w.lo and same_para(blocks, i)}
+                       for i in range(w.lo, w.hi)]}
     return "\n\n".join(lines), meta
 
 
@@ -252,27 +355,23 @@ def labels_to_groups(plan: WindowPlan, w: Window) -> list[list[int]]:
     n = w.hi - w.lo
     for u in plan.units:
         grp = []
-        for lab in u.blocks:
-            m = re.fullmatch(r"\s*B?(\d+)\s*", str(lab))
-            if not m or not 1 <= int(m.group(1)) <= n:
+        for lab in u.blocks:   # "B3" or a range "B3-B7"
+            m = re.fullmatch(r"\s*B?(\d+)\s*(?:[-–~～至到]\s*B?(\d+)\s*)?", str(lab))
+            a, z = (int(m.group(1)), int(m.group(2) or m.group(1))) if m else (0, 0)
+            if not m or not 1 <= a <= z <= n:
                 raise PlanInvalid(f"不存在的區塊編號：{lab}（只能用 B1–B{n}）")
-            grp.append(w.lo + int(m.group(1)) - 1)
+            grp += [w.lo + k - 1 for k in range(a, z + 1)]
         groups.append(grp)
     return groups
-
-
-class SeamDecision(BaseModel):
-    merge: bool
-    reason: str = ""
 
 
 # -- planner --------------------------------------------------------------------------
 
 @dataclass
 class PlannerDeps:
-    """How to call the model for one window / seam; None → rules only."""
+    """How to call the model for one buffer; None → rules only."""
     make_ctx: Any = None            # (task: str, key: str) -> TaskContext with a fresh budget for that task
-    prompts: dict[str, str] = field(default_factory=dict)   # segment_blocks, segment_seam (session snapshot)
+    prompts: dict[str, str] = field(default_factory=dict)   # segment_blocks (session snapshot)
     prompt_version: str = ""
     material_title: str = ""
 
@@ -295,20 +394,15 @@ async def plan_window(blocks: list[SourceBlock], w: Window, deps: PlannerDeps) -
 
     def check(plan: WindowPlan) -> None:
         try:
-            groups = labels_to_groups(plan, w)
+            holder["groups"], holder["notes"] = normalize_groups(blocks, labels_to_groups(plan, w), w.lo, w.hi)
         except PlanInvalid as e:
             from ..llm.tasks import OutputInvalid
             raise OutputInvalid(str(e)) from e
-        errs = validate_groups(blocks, groups, w.lo, w.hi)
-        if errs:
-            from ..llm.tasks import OutputInvalid
-            raise OutputInvalid("；".join(errs))
-        holder["groups"] = groups
 
     try:
         plan, recs = await run_structured(ctx, msgs, WindowPlan, task="segment_window", node=f"segment.{w.window_id}",
                                           prompt_version=deps.prompt_version, meta={"step": "segment_blocks", **meta},
-                                          source_ids=info["owned"], check=check, min_max_tokens=1024,
+                                          source_ids=info["owned"], check=check, min_max_tokens=2048,
                                           min_context_tokens=16384)
     except TaskError as e:
         if e.kind == "unavailable":
@@ -319,75 +413,109 @@ async def plan_window(blocks: list[SourceBlock], w: Window, deps: PlannerDeps) -
     info["planner"] = "model"
     info["calls"] = ctx.budget.calls
     info["format_fixes"] = ctx.budget.format_fixes
-    return holder["groups"], [u.reason or "" for u in plan.units], info
+    info["notes"] += [f"{w.window_id} {n}" for n in holder["notes"]]
+    reasons = reasons_for(plan, holder["groups"], labels_to_groups(plan, w))
+    groups, out_reasons = [], []
+    for k, (grp, why) in enumerate(zip(holder["groups"], reasons)):
+        if oversize(blocks, grp):
+            sub_groups, sub_reasons, note = await split_unit(blocks, grp, why, w, k, deps)
+            info["notes"].append(f"{w.window_id} {note}")
+            groups += sub_groups
+            out_reasons += sub_reasons
+        else:
+            groups.append(grp)
+            out_reasons.append(why)
+    return groups, out_reasons, info
 
 
-async def check_seam(blocks: list[SourceBlock], left: list[int], right: list[int], deps: PlannerDeps) -> tuple[bool, str, int]:
-    """Should the last unit of one window and the first unit of the next be one unit? Glue cannot cross a window
-    cut, so the rule only escalates when the right side opens with a connective (因此／然而…); merged size is
-    capped by MAX_UNIT_CHARS × 2. Returns (merge, reason, model calls)."""
-    first = next((blocks[i] for i in right if blocks[i].kind != "heading"), None)
-    from .agent import REFERS_BACK_RE
-    if blocks[right[0]].kind == "heading" or first is None or not (CONNECTIVE_RE.match(first.text)
-                                                                     or REFERS_BACK_RE.match(first.text)):
-        return False, "規則：接縫處沒有承接語或指涉語", 0
-    if body_chars([blocks[i] for i in left + right]) > MAX_UNIT_CHARS * 2 or deps.make_ctx is None:
-        return False, "規則：合併後過長或未啟用模型", 0
-    ctx: TaskContext = deps.make_ctx("seam", f"{blocks[left[0]].block_id}|{blocks[right[0]].block_id}")
-    prompt = deps.prompts["segment_seam"].replace("{{left}}", "\n\n".join(blocks[i].text for i in left)) \
-        .replace("{{right}}", "\n\n".join(blocks[i].text for i in right))
+def reasons_for(plan: WindowPlan, groups: list[list[int]], raw: list[list[int]]) -> list[str]:
+    """The model's reason for each repaired group: the reason of the planned unit its first block came from."""
+    owner = {i: (u.reason or "") for u, grp in zip(plan.units, raw) for i in grp}
+    return [owner.get(grp[0], "") for grp in groups]
+
+
+async def split_unit(blocks: list[SourceBlock], grp: list[int], reason: str, w: Window, k: int,
+                     deps: PlannerDeps) -> tuple[list[list[int]], list[str], str]:
+    """One oversize unit: a focused request that lists only its blocks and asks where the topic turns; units of that
+    answer still over the limit, or a failed answer, are split by the program. (groups, reasons, note)"""
+    label = f"B{grp[0] - w.lo + 1}–B{grp[-1] - w.lo + 1}"
+    template = deps.prompts.get("segment_split")
+    if template is None:   # a session whose prompt snapshot predates the focused split
+        parts = split_by_size(blocks, grp)
+        return parts, ["（程式依長度拆開）"] * len(parts), f"{label} 太長，程式依長度拆開"
+    sw = make_window(blocks, w.index, grp[0], grp[-1] + 1)
+    listing, meta = window_listing(blocks, sw)
+    prompt = template.replace("{{material_title}}", deps.material_title).replace("{{count}}", str(len(grp))) \
+        .replace("{{reason}}", reason or "（未說明）").replace("{{limit}}", str(UNIT_MAX_TOKENS)).replace("{{blocks}}", listing)
+    key = f"{w.window_id}-u{k + 1:02d}"
+    ctx: TaskContext = deps.make_ctx("segment_split", key)
+    holder: dict[str, Any] = {}
+
+    def check(plan: WindowPlan) -> None:
+        from ..llm.tasks import OutputInvalid
+        try:
+            groups, _ = normalize_groups(blocks, labels_to_groups(plan, sw), sw.lo, sw.hi)
+        except PlanInvalid as e:
+            raise OutputInvalid(str(e)) from e
+        if len(groups) < 2:
+            raise OutputInvalid(f"這 {len(grp)} 個區塊超過上限，必須拆成兩個以上的單元")
+        holder["groups"] = groups
+
     try:
-        d, _ = await run_structured(ctx, [HumanMessage(content=prompt)], SeamDecision, task="seam", node="segment.seam",
-                                    prompt_version=deps.prompt_version, meta={"step": "segment_seam"},
-                                    source_ids=[blocks[i].block_id for i in left + right], min_max_tokens=256)
+        plan, _ = await run_structured(ctx, [HumanMessage(content=prompt)], WindowPlan, task="segment_split",
+                                       node=f"segment.{key}", prompt_version=deps.prompt_version,
+                                       meta={"step": "segment_split", **meta},
+                                       source_ids=[blocks[i].block_id for i in grp], check=check,
+                                       min_max_tokens=2048, min_context_tokens=16384)
     except TaskError as e:
         if e.kind == "unavailable":
             raise
-        return False, f"接縫檢查無效，維持切開：{e.detail[:80]}", ctx.budget.calls
-    return d.merge, d.reason or ("模型判斷合併" if d.merge else "模型判斷切開"), ctx.budget.calls
+        parts = split_by_size(blocks, grp)
+        return parts, ["（程式依長度拆開）"] * len(parts), f"{label} 太長，聚焦拆分無效，程式依長度拆開：{e.detail[:120]}"
+    reasons = reasons_for(plan, holder["groups"], labels_to_groups(plan, sw))
+    groups, out_reasons = [], []
+    for sub_grp, why in zip(holder["groups"], reasons):
+        parts = split_by_size(blocks, sub_grp) if oversize(blocks, sub_grp) else [sub_grp]
+        groups += parts
+        out_reasons += [why] * len(parts)
+    return groups, out_reasons, f"{label} 太長，依模型指出的主題轉折拆成 {len(groups)} 個單元"
 
 
 async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_chars: int = WINDOW_CHARS,
-                     done_windows: dict[str, dict] | None = None, on_window=None) -> SegmentationPlan:
-    """Whole-range plan. `done_windows` (window_id → saved result) lets a restarted job reuse finished windows;
-    `on_window(window_id, result)` is called after each window so the caller can persist it."""
+                     window_tokens: int = WINDOW_TOKENS, done_windows: dict[str, dict] | None = None,
+                     on_window=None) -> SegmentationPlan:
+    """Whole-range plan, one buffer at a time. The last unit of a buffer may continue past it, so it is not
+    emitted: its blocks open the next buffer, refilled up to the limit. `done_windows` (window_id → saved result)
+    lets a restarted job reuse finished buffers; `on_window(window_id, result)` is called after each buffer so the
+    caller can persist it."""
     done_windows = done_windows or {}
-    windows = plan_windows(blocks, window_chars)
+    g = glues(blocks)
     all_groups: list[list[int]] = []
     reasons: list[str] = []
     infos, warnings = [], []
-    seam_at: list[int] = []
-    for w in windows:
-        saved = done_windows.get(w.window_id)   # keys: window ids and "seam:<first>|<last>"
-        if saved and saved.get("owned") == [blocks[i].block_id for i in range(w.lo, w.hi)]:
+    pos = 0
+    while pos < len(blocks):
+        w = make_window(blocks, len(infos), pos, buffer_end(blocks, pos, g, window_chars, window_tokens))
+        owned = [blocks[i].block_id for i in range(w.lo, w.hi)]
+        saved = done_windows.get(w.window_id)
+        if saved and saved.get("owned") == owned:
             groups, rs, info = saved["groups"], saved["reasons"], saved["info"]
         else:
             groups, rs, info = await plan_window(blocks, w, deps)
             if on_window:
-                on_window(w.window_id, {"owned": info["owned"], "groups": groups, "reasons": rs, "info": info})
-        if all_groups:
-            seam_at.append(len(all_groups))
+                on_window(w.window_id, {"owned": owned, "groups": groups, "reasons": rs, "info": info})
+        if w.hi < len(blocks) and len(groups) > 1:
+            info = {**info, "carried": [blocks[i].block_id for i in groups[-1]]}
+            groups, rs = groups[:-1], rs[:len(groups) - 1]
+            pos = groups[-1][-1] + 1
+        else:
+            pos = w.hi
         all_groups += groups
         reasons += rs
         infos.append(info)
         warnings += info["notes"]
-    # seams, right to left so indices stay valid
-    for k in reversed(seam_at):
-        key = f"seam:{blocks[all_groups[k - 1][0]].block_id}|{blocks[all_groups[k][-1]].block_id}"
-        if key in done_windows:
-            merge, why = done_windows[key]["merge"], done_windows[key]["reason"]
-        else:
-            merge, why, _ = await check_seam(blocks, all_groups[k - 1], all_groups[k], deps)
-            if on_window:
-                on_window(key, {"merge": merge, "reason": why})
-        for info in infos:
-            info.setdefault("seams", [])
-        infos[min(len(infos) - 1, seam_at.index(k) + 1)].setdefault("seams", []).append({"merge": merge, "reason": why})
-        if merge:
-            all_groups[k - 1:k + 1] = [all_groups[k - 1] + all_groups[k]]
-            reasons[k - 1:k + 1] = [f"{reasons[k - 1]}；接縫合併：{why}"]
     errs = validate_groups(blocks, all_groups)
-    if errs:   # cannot happen with validated windows; never ship an unchecked plan
+    if errs:   # cannot happen with validated buffers; never ship an unchecked plan
         warnings.append("整體驗證失敗，改用規則切法：" + "；".join(errs))
         all_groups = rules_groups(blocks)
         reasons = ["規則切法"] * len(all_groups)
@@ -428,8 +556,32 @@ def excerpt(text: str, head: int = 24, tail: int = 16) -> str:
 
 
 def unit_text(blocks: list[SourceBlock]) -> str:
-    """Body text rebuilt from the snapshot (headings go to the heading field, as in the legacy quotes)."""
-    return "\n\n".join(b.text for b in blocks if b.kind != "heading")
+    """Body text rebuilt from the snapshot. Headings before the body go to the heading field (leading_headings); a
+    heading the planner kept inside a unit stays in the text as its own line. Sentences of one rebuilt PDF paragraph
+    are joined into one paragraph; paragraphs are separated by a blank line."""
+    from .source import _joiner
+
+    out, group = "", None
+    for b in blocks:
+        if b.kind == "heading":
+            if out:
+                out += "\n\n" + b.text
+                group = None
+            continue
+        g = b.meta.get("para_group")
+        out += (_joiner(out, b.text) if g and g == group else "\n\n" if out else "") + b.text
+        group = g
+    return out
+
+
+def leading_headings(blocks: list[SourceBlock]) -> list[str]:
+    """Headings that open a unit, before its first body block."""
+    out = []
+    for b in blocks:
+        if b.kind != "heading":
+            break
+        out.append(b.text)
+    return out
 
 
 def section_paths(blocks: list[SourceBlock]) -> dict[str, list[str]]:
@@ -452,7 +604,7 @@ def to_quotes(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock]) 
     related = {r["to"] for r in plan.relations}
     for u in plan.units:
         bs = [by_id[i] for i in u.block_ids]
-        heads = [b.text for b in bs if b.kind == "heading"]
+        heads = leading_headings(bs)
         text = unit_text(bs)
         if not text:   # a unit of headings only (range ends on a heading): show it on the next / last quote
             pending_heading = " › ".join(filter(None, [pending_heading, *heads]))

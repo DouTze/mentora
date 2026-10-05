@@ -45,6 +45,15 @@ class MaterialError(Exception):
 
 PAGE_MARGIN_RE = re.compile(r"^(\d{1,4}|[ivxlc]{1,6})\b|\b(\d{1,4})$", re.I)   # running header/footer with a page number
 CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+# Word / Office bullets are glyphs of symbol fonts (Wingdings, Symbol) with private-use code points: at the start of a
+# line they are a list marker, not lost text
+PUA_BULLET_RE = re.compile(r"^[\ue000-\uf8ff]+\s+")
+MARGIN_EDGE = 0.09          # top / bottom share of the page where running headers and footers sit
+MARGIN_REPEAT_PAGES = 3     # an edge text (digits ignored) repeated on this many pages is a running header / footer
+
+
+def _margin_key(text: str) -> str:
+    return re.sub(r"\d+", "#", re.sub(r"\s+", "", text))
 
 
 def _join_lines(lines: list[str]) -> str:
@@ -63,25 +72,45 @@ def _join_lines(lines: list[str]) -> str:
     return re.sub(r"[ \t]+", " ", out).strip()
 
 
-def pdf_page_paragraphs(page) -> list[tuple[str, tuple[float, float, float, float]]]:
-    """(paragraph text, bbox) of one PyMuPDF page, in reading order. PyMuPDF's text blocks follow the page's layout
-    objects, so a block is a paragraph (or a heading / caption). Hyphenated line breaks are joined; running headers
-    and footers carrying a page number are dropped. The importer and the evidence extractor both use this, so a
-    block's (page, paragraph index) locator points at the same region in both."""
+def _page_text_blocks(page) -> list[tuple[str, tuple[float, float, float, float], bool]]:
+    """(joined text, bbox, at the top / bottom edge) of the page's text blocks, in PyMuPDF's reading order."""
     import pymupdf
 
     height = page.rect.height or 1
+    out = []
+    for x0, y0, x1, y1, text, *_rest in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE):
+        if _rest[1] != 0:   # block type: 0 text, 1 image
+            continue
+        lines = [PUA_BULLET_RE.sub("• ", ln.strip()) for ln in text.split("\n") if ln.strip()]
+        if lines:
+            out.append((_join_lines(lines), (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE)))
+    return out
+
+
+def pdf_running_margins(doc) -> frozenset[str]:
+    """Edge texts (digits ignored) that repeat on MARGIN_REPEAT_PAGES or more pages: running headers / footers such as
+    a chapter title, which carry no page number of their own."""
+    if len(doc) <= MARGIN_REPEAT_PAGES:
+        return frozenset()
+    seen: dict[str, int] = {}
+    for page in doc:
+        for key in {_margin_key(t) for t, _, edge in _page_text_blocks(page) if edge and len(t) <= 80}:
+            seen[key] = seen.get(key, 0) + 1
+    return frozenset(k for k, n in seen.items() if n >= MARGIN_REPEAT_PAGES)
+
+
+def pdf_page_paragraphs(page, margins: frozenset[str] = frozenset()) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """(paragraph text, bbox) of one PyMuPDF page, in reading order. A PyMuPDF text block is a paragraph in typeset
+    books, but only a line in PDFs whose line spacing is wide (Word exports): the reading pipeline rebuilds
+    paragraphs from the text itself (reading/source.py), so this layer does not guess. Hyphenated line breaks are
+    joined, Office bullet glyphs become "• ", and edge blocks are dropped when they carry a page number or are one of
+    the document's running `margins` (pdf_running_margins). The importer and the evidence extractor both use this, so
+    a block's (page, paragraph index) locator points at the same region in both."""
     out: list[tuple[str, tuple[float, float, float, float]]] = []
-    blocks = [b for b in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE) if b[6] == 0]
-    for i, (x0, y0, x1, y1, text, *_rest) in enumerate(blocks):
-        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-        if not lines:
+    for text, bbox, edge in _page_text_blocks(page):
+        if edge and len(text) <= 80 and (PAGE_MARGIN_RE.search(text) or _margin_key(text) in margins):
             continue
-        joined = _join_lines(lines)
-        at_edge = y1 < height * 0.09 or y0 > height * 0.91
-        if at_edge and len(joined) <= 80 and PAGE_MARGIN_RE.search(joined) and (i == 0 or i == len(blocks) - 1):
-            continue
-        out.append((joined, (x0, y0, x1, y1)))
+        out.append((text, bbox))
     return out
 
 
@@ -93,7 +122,8 @@ def _pdf_pages_pymupdf(data: bytes) -> list[str]:
         doc = pymupdf.open(stream=data, filetype="pdf")
     except Exception as e:  # noqa: BLE001 — pymupdf raises plain exceptions for broken files
         raise MaterialError("unreadable", f"無法讀取這個 PDF：{e}") from e
-    return ["\n\n".join(t for t, _ in pdf_page_paragraphs(page)) for page in doc]
+    margins = pdf_running_margins(doc)
+    return ["\n\n".join(t for t, _ in pdf_page_paragraphs(page, margins)) for page in doc]
 
 
 def _pdf_pages_pypdf(data: bytes) -> list[str]:
