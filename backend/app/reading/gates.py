@@ -27,7 +27,10 @@ LIST_MARK_RE = re.compile(r"\s*(?:\d{1,3}|[a-zA-Z]|[ivxIVX]{1,4})[.)、]\s*|\s*\
 SEGMENT_COVERAGE = 0.85
 SUPPLEMENT_MATCH = 0.3         # share of a 補充說明 paragraph's character bigrams found in some approved bridge        # share of a sentence's characters that claim anchors must cover
 MATH_HINT_RE = re.compile(r"[∑∫√≤≥≠≈∞∂∇αβγδεθλμσπρφωΩΣΔΠ×÷±→⇒∈∉⊂⊆∀∃]|\b[a-zA-Z]\s*[=<>]\s*[\w(]|\^|_\{?\w")
-PRODUCTION_RE = re.compile(r"本次|這次|修訂|使用者|你的要求|為了回應|依照指示|審稿|講義中加入")
+# a bridge narrating how the handout was made or revised ("本次修訂…", "依照你的要求…"). Only such phrases: the bare
+# words 使用者 / 這次 / 修訂 are subject matter too (NLU 判斷使用者意圖, 法規修訂), and catching them failed real bridges.
+PRODUCTION_RE = re.compile(r"(?:本次|這次)(?:修訂|修改|改寫|補充)|修訂(?:後的|版本|過程)|(?:根據|依照|依)(?:你|使用者)?的?(?:要求|指示)"
+                           r"|(?:你|使用者)的(?:要求|指示)|為了回應|審稿|講義中加入|這裡補上剛才|以下為修正")
 
 
 # -- source segments ------------------------------------------------------------------------------

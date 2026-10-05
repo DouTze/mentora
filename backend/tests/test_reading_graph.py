@@ -875,3 +875,23 @@ async def test_a_guide_held_only_for_its_bridges_falls_back_to_the_source_once()
     b = Scripted({"draft": [supplement, supplement], "revise_body": [supplement], "body_audit": [always] * 4})
     out, _ = await run(b, index=0)
     assert out["status"] == "failed" and b.steps().count("draft") <= 2       # falls back at most once
+
+
+def test_a_bridge_about_users_or_revisions_as_subject_matter_is_not_a_production_note():
+    """qwen3-vl:4b bridges on NLU (「判讀使用者意圖」) were refused four times as 產製或修訂過程 because the check
+    matched the bare word 使用者; only phrases that narrate making or revising the handout are refused."""
+    from app.llm.tasks import OutputInvalid
+    from app.reading.contracts import BridgePlan
+    from app.reading.gates import bridge_check
+
+    def plan(content):
+        return BridgePlan.model_validate({"learning_goal": "x", "bridges": [{
+            "id": "B1", "obstacle": "不熟悉 NLU 與 NLG 的分工", "targets": ["C1"], "content": content, "basis": "prerequisite",
+            "boundary": "integrated", "rationale": "原文只列出名稱，沒有說明分工"}]})
+
+    check = bridge_check({"C1"}, False)
+    for ok in ["NLU 專注於解析語意，例如判讀使用者意圖或情緒。", "這次比賽的結果顯示模型仍有偏誤。", "法規修訂通常需要經過公告程序。"]:
+        check(plan(ok))
+    for bad in ["本次修訂補上了 NLU 的定義。", "依照你的要求，這裡說明 NLG。", "根據使用者的要求補充例子。", "為了回應審稿意見，加入此段。"]:
+        with pytest.raises(OutputInvalid, match="產製或修訂"):
+            check(plan(bad))
