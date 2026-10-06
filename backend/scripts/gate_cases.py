@@ -147,9 +147,9 @@ def recorded_outcome(db: sqlite3.Connection, s0: dict, session_state: dict) -> d
 def capture(args) -> None:
     db = sqlite3.connect(config.DB_PATH)
     sessions = {}
+    # cases are kept, never cleared: deleting a learning record deletes its calls and checkpoints, so a case file
+    # can be the only copy left of a run; a run captured again overwrites its own file (same id)
     (OUT / "cases").mkdir(parents=True, exist_ok=True)
-    for old in (OUT / "cases").glob("*.json"):   # a fresh set: case ids follow the capture rules
-        old.unlink()
     n = 0
     for run in run_inputs(db):
         s0 = run["state0"]

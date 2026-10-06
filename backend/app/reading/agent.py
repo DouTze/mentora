@@ -325,7 +325,13 @@ def apply_verify(findings: list[Finding], idx: list[int], v: VerifyResult, draft
             full = expand_quote(field, c.guide_quote, 6)
             quoted = bool(full)
             from .gates import coverage_parity
-            lost = coverage_parity(src, full, source) if src and quoted else []
+            # the 主要正文 of a non-Chinese source is compared with the claim's audited Chinese statement (see
+            # gates.restated); the 中文課文 is the translation itself, so it is compared with the source
+            stmts = (refs or {}).get("statements") or {}
+            if f.target != "chinese_text" and not is_chinese(source) and f.item in stmts:
+                lost = coverage_parity(stmts[f.item], full, "\n\n".join(stmts.values())) if src and quoted else []
+            else:
+                lost = coverage_parity(src, full, source) if src and quoted else []
             dmath, imath = source_formulas(src)
             qn = _norm_math(full)
             missing_math = [m for m in dmath + imath if _norm_math(m) not in qn]

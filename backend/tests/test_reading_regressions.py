@@ -138,6 +138,29 @@ def test_a_negation_of_the_next_claim_in_the_same_guide_sentence_is_not_this_cla
     assert any("多了否定" in m for m in coverage_parity(claim, denied, source))
 
 
+def test_a_guide_of_an_english_source_is_compared_with_the_chinese_claims():
+    """A Chinese guide shares no wording with English sentences, and "not just … but also" / "can be taken beyond"
+    have no word-for-word counterpart: the guide is compared with each claim's audited Chinese statement."""
+    from app.reading.contracts import BodyAudit, BridgePlan, SourceClaim
+    from app.reading.gates import coverage_findings
+    source = ("MDPs are a classical formalization of sequential decision making, where actions influence not just "
+              "immediate rewards, but also subsequent situations. Some ways in which reinforcement learning can be "
+              "taken beyond MDPs are treated in Chapter 17.")
+    zh = ["MDPs 是序列決策的經典形式化，其中動作不僅影響即時獎勵，還影響後續情境。", "一些將強化學習延伸至 MDPs 之外的方法在第 17 章中討論。"]
+    claims = [SourceClaim(id=f"C{i}", sentences=[f"S{i}"], statement=s, source_text=t) for i, (s, t) in
+              enumerate(zip(zh, ["MDPs are a classical formalization of sequential decision making, where actions "
+                                 "influence not just immediate rewards, but also subsequent situations.",
+                                 "Some ways in which reinforcement learning can be taken beyond MDPs are treated in "
+                                 "Chapter 17."]), 1)]
+    audit = BodyAudit.model_validate({"claims": [{"id": c.id, "verdict": "covered", "guide_quote": "不在正文裡的句子"}
+                                                 for c in claims], "bridges": [], "additions": [],
+                                      "uncovered_source": [], "coherence": "pass"})
+    fs = coverage_findings(source, "".join(zh), claims, BridgePlan(learning_goal="x", bridges=[]), audit)
+    assert not [f for f in fs if f.severity == "major"], [f.detail for f in fs]
+    fs = coverage_findings(source, zh[0], claims, BridgePlan(learning_goal="x", bridges=[]), audit)
+    assert [(f.code, f.item) for f in fs if f.severity == "major"] == [("missing_key_claim", "C2")]
+
+
 def test_a_merged_quotation_counts_only_when_every_piece_is_in_the_guide():
     """Auditors often join two guide sentences into one quotation with an added 「且」; each piece must still be verbatim."""
     guide = "在均衡價格下，消費者想買的數量恰好等於生產者想賣的數量。兩條曲線的交點稱為市場均衡點。"

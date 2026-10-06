@@ -654,7 +654,8 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                     meta={"step": "verify", "quote_text": t.text}, allow_fix=False,
                                     json_schema=gates.verify_schema(len(idx)),
                                     min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
-        fs = ra.apply_verify(fs, idx, v, d, t.text, bridge_refs(t))
+        fs = ra.apply_verify(fs, idx, v, d, t.text,
+                             {**bridge_refs(t), "statements": {c.id: c.statement for c in claims_of(state)}})
         return {"findings": [f.model_dump() for f in fs], "verified_for": state.get("body_revisions", 0),
                 "decision": judged(state, ctx.budget, fs, allow_verify=False)}
 

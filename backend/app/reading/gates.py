@@ -660,7 +660,20 @@ def coverage_parity(claim_src: str, full: str, source: str) -> list[str]:
     return lost + added
 
 
-ABSENT_BELOW = 0.5   # a claim whose closest guide passage shares less of its wording is not in the guide
+def restated(c: SourceClaim, source: str) -> str:
+    """What the guide is compared with for a claim: the source text of a Chinese source; for any other source, the
+    claim's audited Chinese statement (Gate 1 checked it against the source). An English sentence shares no wording
+    with a Chinese guide, and its markers ("not just … but also", "can be taken beyond") have no word-for-word
+    counterpart, so comparing across languages fails faithful guides."""
+    return c.source_text if is_chinese(source) else c.statement
+
+
+def restated_source(claims: list[SourceClaim], source: str) -> str:
+    """The source in the language of the guide: itself, or the claims' statements, one per paragraph."""
+    return source if is_chinese(source) else "\n\n".join(c.statement for c in claims)
+
+
+ABSENT_BELOW = 0.5  # a claim whose closest guide passage shares less of its wording is not in the guide
 # a list lead-in ("• 代表技術與模型：", "Examples:"): it says nothing on its own; the items after it carry the content
 LEAD_IN_RE = re.compile(r"\W*[^\W][^。.!?！？]{0,15}[：:]\s*")
 
@@ -680,7 +693,7 @@ def best_match(text: str, guide: str) -> tuple[float, str]:
     return best
 
 
-def unconfirmed_coverage(c: SourceClaim, guide: str, source: str, why: str, quote: str = "", *,
+def unconfirmed_coverage(c: SourceClaim, guide: str, source: str, basis: str, why: str, quote: str = "", *,
                          formulas_missing: bool = False) -> ra.Finding:
     """The auditor said "covered" (or "unsure") without evidence the program accepts. The program looks for the
     claim itself instead of failing on the missing evidence:
@@ -688,8 +701,10 @@ def unconfirmed_coverage(c: SourceClaim, guide: str, source: str, why: str, quot
     - the closest passage lost a strength marker / added a negation, or a formula is missing → stays a blocking
       question for the re-check;
     - otherwise it is there as far as a program can tell → a warning shown with the guide, no rewrite (rewrites on
-      no evidence deleted faithful passages)."""
-    share, where = best_match(c.source_text, guide)
+      no evidence deleted faithful passages).
+    `basis`: the source in the guide's language (restated_source), for telling this claim's clauses from others'."""
+    text = restated(c, source)
+    share, where = best_match(text, guide)
     head = f"{c.id}「{c.statement[:50]}」"
     if share < ABSENT_BELOW and LEAD_IN_RE.fullmatch(c.source_text.strip()):
         return ra.Finding(code="coverage_unconfirmed", severity="minor", status="unconfirmed", origin="review",
@@ -698,7 +713,7 @@ def unconfirmed_coverage(c: SourceClaim, guide: str, source: str, why: str, quot
         return ra.Finding(code="missing_key_claim", severity="major", origin="program", item=c.id,
                           source_excerpt=c.source_text, suggested_fix=c.statement,
                           detail=f"{head}沒有寫進正文（最接近的句子只有 {share:.0%} 的字詞相同）")
-    lost = coverage_parity(c.source_text, where, source)
+    lost = coverage_parity(text, where, basis)
     if lost or formulas_missing:
         return ra.Finding(code="coverage_unconfirmed", severity="major", status="unconfirmed", origin="review",
                           item=c.id, source_excerpt=c.source_text, draft_excerpt=quote, detail=head + why)
@@ -830,6 +845,7 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
     """Body audit → findings with checked evidence (see module doc)."""
     out: list[ra.Finding] = []
     by_id = {c.id: c for c in claims}
+    basis = restated_source(claims, source)
     for v in audit.claims:
         c = by_id.get(v.id)
         if c is None:
@@ -838,7 +854,7 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
         if v.verdict == "covered":
             full = ra.expand_quote(guide, v.guide_quote, 6)
             quoted = bool(full)
-            lost = coverage_parity(c.source_text, full, source) if quoted else []
+            lost = coverage_parity(restated(c, source), full, basis) if quoted else []
             needed = [ra._norm_math(f) for f in c.formulas] + [f for f in sum(ra.source_formulas(c.source_text), [])
                                                                  if ra._is_real_math(f)]
             gn = ra._norm_math(guide)
@@ -846,9 +862,10 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
             if quoted and not lost and not miss:
                 continue
             why = ("引用的句子不在主要正文" if not quoted else "；".join(lost) if lost else f"正文沒有公式 {miss}")
-            out.append(unconfirmed_coverage(c, guide, source, f"的涵蓋無法確認：{why}", v.guide_quote, formulas_missing=bool(miss)))
+            out.append(unconfirmed_coverage(c, guide, source, basis, f"的涵蓋無法確認：{why}", v.guide_quote,
+                                            formulas_missing=bool(miss)))
         elif v.verdict == "unsure":
-            out.append(unconfirmed_coverage(c, guide, source, f"是否涵蓋無法判斷：{v.note[:60]}"))
+            out.append(unconfirmed_coverage(c, guide, source, basis, f"是否涵蓋無法判斷：{v.note[:60]}"))
         else:
             code = "meaning_changed" if v.verdict == "distorted" else ("missing_condition" if cond else "missing_key_claim")
             out.append(ra.Finding(code=code, severity="major", origin="review", item=c.id, source_excerpt=c.source_text,
