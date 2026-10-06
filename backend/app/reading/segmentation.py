@@ -203,9 +203,12 @@ def rules_groups(blocks: list[SourceBlock]) -> list[list[int]]:
     return groups
 
 
-def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int = 0, hi: int | None = None) -> list[str]:
+def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int = 0, hi: int | None = None, *,
+                    size_limit: bool = True) -> list[str]:
     """Errors of a grouping of blocks[lo:hi] (empty list = valid). Only what the program must guarantee is checked:
-    coverage and order, protected relations (glue) and the strict size limit; where a topic begins is the model's call."""
+    coverage and order, protected relations (glue) and — for the buffer planner, whose guide is one model call per
+    unit — the strict size limit; where a topic begins is the model's call. Units from 區塊 outlines have no size
+    limit (their guide is written one 區塊 at a time)."""
     hi = len(blocks) if hi is None else hi
     errs: list[str] = []
     flat = [i for grp in groups for i in grp]
@@ -222,7 +225,7 @@ def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int 
         return errs
     g = glues(blocks)
     for grp in groups:
-        if unit_tokens([blocks[i] for i in grp]) > UNIT_MAX_TOKENS and any(not g[i] for i in grp[:-1]):
+        if size_limit and unit_tokens([blocks[i] for i in grp]) > UNIT_MAX_TOKENS and any(not g[i] for i in grp[:-1]):
             errs.append(f"B{grp[0] - lo + 1}–B{grp[-1] - lo + 1} 太長（上限約 {UNIT_MAX_TOKENS} 字），"
                         "請在主題轉換的句子之間拆開")
         last = grp[-1]
@@ -792,7 +795,7 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
     bounds = starts + [len(chunks)]
     units_k = [list(range(a, b)) for a, b in zip(bounds, bounds[1:]) if b > a]
     groups = [[i for k in u for i in chunks[k]] for u in units_k]
-    errs = validate_groups(blocks, groups)
+    errs = validate_groups(blocks, groups, size_limit=False)
     if errs:   # chunks never cut a glued pair; never ship an unchecked plan
         raise PlanInvalid("；".join(errs))
     units = []

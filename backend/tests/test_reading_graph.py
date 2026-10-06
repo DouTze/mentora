@@ -919,3 +919,27 @@ def test_a_bridge_about_users_or_revisions_as_subject_matter_is_not_a_production
     for bad in ["本次修訂補上了 NLU 的定義。", "依照你的要求，這裡說明 NLG。", "根據使用者的要求補充例子。", "為了回應審稿意見，加入此段。"]:
         with pytest.raises(OutputInvalid, match="產製或修訂"):
             check(plan(bad))
+
+
+async def test_an_english_source_is_written_from_its_audited_chinese_text():
+    """Shown the English source, qwen3-vl:4b pasted it into the guide, revisions included: drafting and revising
+    get the audited 中文課文 in its place (formulas kept); the audit still compares with the English."""
+    en = [{"id": "quote-01", "index": 0, "unit_id": "u-en", "label": "p. 1", "heading": None,
+           "text": "MDPs are a classical formalization of sequential decision making. The value $q_*(a)$ is estimated for each action."}]
+    out, sink = await run(MockBackend(), index=0, quotes=en)
+    assert out["status"] == "accepted"
+    draft = next(r for r in sink.records if r.node == "draft")
+    prompt = draft.request["messages"][0]["content"]
+    source_section = prompt.split("## 這一段的原文")[1].split("\n## ")[0]
+    assert "逐句核對過的中文課文" in source_section and "$q_*(a)$" in source_section
+    assert "MDPs are a classical formalization of sequential decision making" not in source_section
+    audit = next(r for r in sink.records if r.node == "body_audit")
+    assert "MDPs are a classical formalization of sequential decision making" in audit.request["messages"][0]["content"]
+
+
+def test_a_raised_number_is_a_footnote_not_a_missing_superscript():
+    from app.reading.contracts import SymbolTranscription
+    from app.reading.gates import transcription_against_clues
+    tr = SymbolTranscription(formulas=["q_*(s, a)"], symbols=[])
+    assert transcription_against_clues(tr, {"superscripts": ["1"]}) == []            # "…processes¹"
+    assert transcription_against_clues(tr, {"superscripts": ["T"]})                    # a transpose must be read

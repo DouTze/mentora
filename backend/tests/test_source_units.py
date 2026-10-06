@@ -674,3 +674,15 @@ async def test_the_last_topic_of_a_batch_is_judged_again_with_the_next(monkeypat
     assert "P1：大主題「B」" in decides[1]            # the second batch opens at the topic that may continue
     assert "P1：大主題「B」" in decides[2] and "P2：大主題「C」" in decides[2]   # no change seen: overlap one 區塊
     assert [len(u.chunks) for u in plan.units] == [2, 3, 1]
+
+
+async def test_a_unit_from_outlines_has_no_size_limit(monkeypatch):
+    """Units from 區塊 outlines are where topics change, nothing else: a long topic stays one unit (its guide is
+    written one 區塊 at a time). The buffer planner's size limit used to send such a plan back to the rules."""
+    monkeypatch.setattr(seg, "UNIT_MAX_TOKENS", 50)
+    blocks = paragraphs(4)
+    b = Scripted([outline("A", "A", "A", "A"), {"new_topic_at": []}])
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert plan.planner == "model" and len(plan.units) == 1 and len(plan.units[0].chunks) == 4
+    assert not any("規則切法" in w for w in plan.warnings)

@@ -323,7 +323,9 @@ def transcription_against_clues(tr, clues: dict) -> list[str]:
         if len(t) == 1 and t.isalpha() and any(x.symbol == t and x.style == "bold" for x in tr.symbols):
             problems.append(f"字型顯示 {t} 為斜體，但轉寫標成粗體")
     for t in clues.get("superscripts") or []:
-        if t.strip() and not re.search(r"\^\s*\{?\s*" + re.escape(t.strip()), text):
+        # a raised number is most often a footnote mark in prose ("…decision processes¹"), which no formula carries;
+        # only a raised letter or symbol must show up as a superscript in the transcription
+        if t.strip() and not t.strip().isdigit() and not re.search(r"\^\s*\{?\s*" + re.escape(t.strip()), text):
             problems.append(f"字型顯示 {t} 是上標，但轉寫沒有寫成上標")
     return problems
 

@@ -247,6 +247,10 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             "quote_text": lambda: ContextItem(key="quote_text", text=t.text + (
                 "\n\n（注意：這一段含有圖，但圖片內容沒有被抽取出來，只能依文字說明。）" if t.has_figure else ""),
                 source_ids=t.block_ids, version=t.source_hash),
+            # what the 主要正文 is written from. A non-Chinese source is given as its audited 中文課文 only: shown the
+            # English, qwen3-vl:4b pasted it into the guide again and again, revisions included
+            "body_source": lambda: ContextItem(key="quote_text", text=body_source_text(t, verified),
+                                               source_ids=t.block_ids, version=t.source_hash),
             "supplements": lambda: ContextItem(key="supplements", text=supplements_text(state), required=relied, priority=3,
                                                source_ids=supplement_ids(state),
                                                complete=all(s.get("complete", True) for s in state.get("supplements") or [])),
@@ -270,6 +274,14 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                 required=False, priority=1),
         }
         return [make[k]() for k in keys]
+
+    def body_source_text(t: ra.ReadingTaskInput, verified: dict) -> str:
+        figure = "\n\n（注意：這一段含有圖，但圖片內容沒有被抽取出來，只能依文字說明。）" if t.has_figure else ""
+        zh = verified.get("chinese_text")
+        if ra.is_chinese(t.text) or not zh:
+            return t.text + figure
+        return ("（原文不是中文。以下是逐句核對過的中文課文，內容、條件與公式都與原文一致；正文依此用繁體中文撰寫，"
+                "不要寫成原文的語言。）\n\n" + zh + figure)
 
     def topic_text(t: ra.ReadingTaskInput) -> str:
         """Where this 區塊 sits in its 主題: the 主題總摘要 and every 區塊's outline, this one marked. Scope only."""
@@ -578,7 +590,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         out_tokens = gates.body_tokens(t.text, n_bridges)
         msg, rec = await prompt_for(ctx, state, "draft", "reading_body",
                                     with_optional("reading_body", state,
-                                                  ("quote_text", "symbol_evidence", "claims", "bridges", "chinese_text",
+                                                  ("body_source", "symbol_evidence", "claims", "bridges", "chinese_text",
                                                    "supplements", "prev_points", "qa_context"), ("topic_context",)),
                                     {}, out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", prose_fields=("guide",), node="draft",
@@ -697,7 +709,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         extra = {"issues": ra.findings_text(majors), "draft_json": json.dumps(state["draft"], ensure_ascii=False)}
         msg, rec = await prompt_for(ctx, state, "revise_body", "reading_body_revise",
                                     with_optional("reading_body_revise", state,
-                                                  ("quote_text", "symbol_evidence", "claims", "bridges", "supplements"),
+                                                  ("body_source", "symbol_evidence", "claims", "bridges", "supplements"),
                                                   ("topic_context",)), extra,
                                     out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", prose_fields=("guide",), node="revise_body",
