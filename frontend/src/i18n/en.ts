@@ -218,6 +218,8 @@ export const en: Dict = {
   "reading.original.hide": "Hide source text",
   "reading.original.show": "Show source text for this section",
   "reading.check": "Pause and reflect",
+  "reading.unverified.summary": "{n} spots in this guided reading couldn't be checked automatically; compare with the original",
+  "reading.unverified.coverage": "Couldn't confirm the guided reading matches “{source}” in the original",
   "reading.retry": "Retry",
   "reading.readOnly": "This record was created by the old reading flow, which has been removed. Its guided reading can't continue; you can still view and export it, or start a new record.",
   "reading.error.notation_unverified": "The formulas need checking: the symbols on this PDF page cannot be confirmed from the text alone.",

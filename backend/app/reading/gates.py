@@ -660,6 +660,61 @@ def coverage_parity(claim_src: str, full: str, source: str) -> list[str]:
     return lost + added
 
 
+ABSENT_BELOW = 0.5   # a claim whose closest guide passage shares less of its wording is not in the guide
+# a list lead-in ("• 代表技術與模型：", "Examples:"): it says nothing on its own; the items after it carry the content
+LEAD_IN_RE = re.compile(r"\W*[^\W][^。.!?！？]{0,15}[：:]\s*")
+
+
+def best_match(text: str, guide: str) -> tuple[float, str]:
+    """(share of `text`'s wording found, passage) for the guide passage — one sentence or two adjacent ones — that
+    carries most of it. Located by the program, so an auditor quoting the wrong sentence cannot hide a passage
+    that is there, nor invent one that is not. Bullets and other non-word marks are ignored."""
+    def bare(t):
+        return re.sub(r"[^\w]", "", t or "")
+    ss = [s for _, s in source_segments(guide)]
+    best = max(((ra_overlap(bare(text), bare(s)), s) for s in ss), default=(0.0, ""), key=lambda x: x[0])
+    for a, b in zip(ss, ss[1:]):   # two sentences only when the claim clearly spans them (a pair never scores lower)
+        share = ra_overlap(bare(text), bare(a + b))
+        if share > best[0] + 0.1:
+            best = (share, a + " " + b)
+    return best
+
+
+def unconfirmed_coverage(c: SourceClaim, guide: str, source: str, why: str, quote: str = "", *,
+                         formulas_missing: bool = False) -> ra.Finding:
+    """The auditor said "covered" (or "unsure") without evidence the program accepts. The program looks for the
+    claim itself instead of failing on the missing evidence:
+    - nothing in the guide carries its wording → missing (a program fact; revised, then held);
+    - the closest passage lost a strength marker / added a negation, or a formula is missing → stays a blocking
+      question for the re-check;
+    - otherwise it is there as far as a program can tell → a warning shown with the guide, no rewrite (rewrites on
+      no evidence deleted faithful passages)."""
+    share, where = best_match(c.source_text, guide)
+    head = f"{c.id}「{c.statement[:50]}」"
+    if share < ABSENT_BELOW and LEAD_IN_RE.fullmatch(c.source_text.strip()):
+        return ra.Finding(code="coverage_unconfirmed", severity="minor", status="unconfirmed", origin="review",
+                          item=c.id, source_excerpt=c.source_text, detail=f"{head}是列表的引導標題，正文沒有照寫")
+    if share < ABSENT_BELOW:
+        return ra.Finding(code="missing_key_claim", severity="major", origin="program", item=c.id,
+                          source_excerpt=c.source_text, suggested_fix=c.statement,
+                          detail=f"{head}沒有寫進正文（最接近的句子只有 {share:.0%} 的字詞相同）")
+    lost = coverage_parity(c.source_text, where, source)
+    if lost or formulas_missing:
+        return ra.Finding(code="coverage_unconfirmed", severity="major", status="unconfirmed", origin="review",
+                          item=c.id, source_excerpt=c.source_text, draft_excerpt=quote, detail=head + why)
+    return ra.Finding(code="coverage_unconfirmed", severity="minor", status="unconfirmed", origin="review", item=c.id,
+                      source_excerpt=c.source_text, draft_excerpt=where,
+                      detail=f"{head}{why}；程式找到的對應句子：{where[:60]}")
+
+
+def reader_notes(findings: list[ra.Finding]) -> list[dict]:
+    """What the published guide tells the reader it could not check: source content whose restatement the program
+    found in the guide but could not confirm. (Lead-ins never written out have nothing on the page to doubt; an
+    unchecked teaching addition is never published — the guide is rewritten from the source without it.)"""
+    return [{"kind": "coverage", "source": f.source_excerpt[:80], "guide": f.draft_excerpt[:80]} for f in findings
+            if f.code == "coverage_unconfirmed" and f.severity == "minor" and f.status == "unconfirmed" and f.draft_excerpt]
+
+
 def gate2_program(source: str, guide: str, claims: list[SourceClaim], bridges: BridgePlan, bridges_used: list[str],
                   task, symbol_evidence: dict | None = None) -> list[ra.Finding]:
     """Program checks of the 主要正文 alone (formulas, KaTeX, independence from the 中文課文, process leaks), the
@@ -791,12 +846,9 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
             if quoted and not lost and not miss:
                 continue
             why = ("引用的句子不在主要正文" if not quoted else "；".join(lost) if lost else f"正文沒有公式 {miss}")
-            out.append(ra.Finding(code="coverage_unconfirmed", severity="major", status="unconfirmed", origin="review",
-                                  item=c.id, source_excerpt=c.source_text, draft_excerpt=v.guide_quote,
-                                  detail=f"{c.id}「{c.statement[:50]}」的涵蓋無法確認：{why}"))
+            out.append(unconfirmed_coverage(c, guide, source, f"的涵蓋無法確認：{why}", v.guide_quote, formulas_missing=bool(miss)))
         elif v.verdict == "unsure":
-            out.append(ra.Finding(code="coverage_unconfirmed", severity="major", status="unconfirmed", origin="review",
-                                  item=c.id, source_excerpt=c.source_text, detail=f"{c.id} 是否涵蓋無法判斷：{v.note[:60]}"))
+            out.append(unconfirmed_coverage(c, guide, source, f"是否涵蓋無法判斷：{v.note[:60]}"))
         else:
             code = "meaning_changed" if v.verdict == "distorted" else ("missing_condition" if cond else "missing_key_claim")
             out.append(ra.Finding(code=code, severity="major", origin="review", item=c.id, source_excerpt=c.source_text,
@@ -817,12 +869,16 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
         elif v.verdict == "unnecessary":
             out.append(ra.Finding(code="bridge_questioned", severity="minor", origin="review", item=b.id,
                                   detail=f"檢查認為 {b.id} 可能不必要：{v.note[:80]}"))
+        # where the guide really carries the bridge, found by the program (the auditor's quote is only a hint)
+        _, located = best_match(b.content, guide)
+        written = ra_overlap(b.content, located) >= SUPPLEMENT_MATCH
         if v.verdict in ("ok", "unnecessary"):
-            # present: the quoted guide passage must exist and carry the bridge's content
+            # present: the quoted guide passage must exist and carry the bridge's content. An approved bridge that is
+            # not written in leaves a faithful guide without one teaching aid: recorded, never a reason to rewrite
             full = ra.expand_quote(guide, v.guide_quote, 6)
             if not full or ra_overlap(b.content, full) < SUPPLEMENT_MATCH:
-                out.append(ra.Finding(code="bridge_unconfirmed", severity="major", status="unconfirmed", origin="review",
-                                      item=b.id, source_excerpt=b.content, draft_excerpt=v.guide_quote,
+                out.append(ra.Finding(code="bridge_unconfirmed", severity="minor", status="unconfirmed", origin="review",
+                                      item=b.id, source_excerpt=b.content, draft_excerpt=located if written else "",
                                       detail=f"教學橋梁 {b.id} 是否寫進正文無法確認："
                                              + ("引用的句子不在主要正文" if not full else "引用的句子與橋梁內容不符")))
         if v.verdict != "absent":
@@ -833,10 +889,14 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
                                       detail=f"教學橋梁 {b.id} 的內容不正確：{v.note[:80] or b.content[:60]}",
                                       suggested_fix="改正或刪除這項補充內容"))
             elif v.correct == "unsure" or not support_ok:
-                out.append(ra.Finding(code="bridge_correctness_unconfirmed", severity="major", status="unconfirmed",
-                                      origin="review", item=b.id, source_excerpt=b.content, basis=b.basis,
+                # only what is on the page can mislead: a bridge written in stays blocking (re-check, then the guide is
+                # written again from the source alone); one that never reached the guide is only recorded
+                out.append(ra.Finding(code="bridge_correctness_unconfirmed", severity="major" if written else "minor",
+                                      status="unconfirmed", origin="review", item=b.id, source_excerpt=b.content,
+                                      basis=b.basis,
                                       detail=f"教學橋梁 {b.id} 的正確性沒有可核對的依據"
-                                             + ("（依據原文的橋梁必須引用存在的原文句子編號）" if b.basis == "source" else "")))
+                                             + ("（依據原文的橋梁必須引用存在的原文句子編號）" if b.basis == "source" else "")
+                                             + ("" if written else "（這項橋梁沒有寫進正文）")))
     kinds = {"unsupported": "unsupported_claim", "incorrect": "unsupported_claim", "process": "process_leak",
              "narration": "narration", "redirect": "redirect_to_source"}
     for a in audit.additions:

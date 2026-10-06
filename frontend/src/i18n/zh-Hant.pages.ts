@@ -142,6 +142,8 @@ export const pages = {
   "reading.original.hide": "收起原文",
   "reading.original.show": "展開這段原文",
   "reading.check": "讀完想一想",
+  "reading.unverified.summary": "這段導讀有 {n} 處沒能自動核對，建議對照原文閱讀",
+  "reading.unverified.coverage": "原文「{source}」在導讀中的寫法沒能自動確認一致",
   "reading.retry": "重試",
   "reading.readOnly": "這筆學習是用已移除的舊版流程建立的，導讀無法繼續；可以檢視與匯出，或重新建立一筆學習。",
   "reading.error.notation_unverified": "需要確認公式：這一段 PDF 上的符號無法只從文字確認。",
