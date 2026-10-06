@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,3 +31,12 @@ def answer(client, sid, text, expect=200, **params):
     r = client.post(f"/api/sessions/{sid}/answer", json={"answer": text}, params=params)
     assert r.status_code == expect, r.text
     return r.json()
+
+
+def child_env(**extra: str) -> dict[str, str]:
+    """A minimal environment for a test subprocess: a short PATH plus what the OS needs to start Python at all
+    (Windows cannot initialise its socket layer — asyncio's _overlapped — without SYSTEMROOT), UTF-8 I/O."""
+    keep = ("SYSTEMROOT", "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA")
+    env = {"PATH": os.environ.get("PATH", "") if os.name == "nt" else "/usr/bin:/bin", "PYTHONUTF8": "1",
+           "PYTHONIOENCODING": "utf-8"}
+    return env | {k: os.environ[k] for k in keep if k in os.environ} | extra
