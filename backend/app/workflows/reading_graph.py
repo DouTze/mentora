@@ -353,6 +353,11 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         """Program-side context: a unit that opens by pointing back ("在這兩個條件下…") gets its previous unit,
         read through the same read-only tool and recorded the same way; no model call is needed for that."""
         t = task(state)
+        if deps.repo is not None:
+            # the run's input, so that scripts/gate_cases.py can replay it later under other gate rules (its model
+            # calls are in llm_calls under the same operation key); first write wins on a resume
+            deps.repo.put_artifact(f"{state['op']}:input", kind="guide_input", status="cached", payload=dict(state),
+                                   session_id=t.session_id, unit_id=t.unit_id)
         sups, status = [], "not_needed"
         if ra.REFERS_BACK_RE.match(t.text) or t.depends_on_prev:
             if t.index == 0:
