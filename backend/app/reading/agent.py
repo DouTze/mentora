@@ -23,7 +23,7 @@ GUIDE_MAX_TOKENS = 2048
 GUIDE_CONTEXT_TOKENS = 8192
 SUPPLEMENT_CONTEXT_TOKENS = 12288
 
-MAJOR = {"wrong_formula", "missing_condition", "unsupported_claim", "missing_key_claim", "meaning_changed",
+MAJOR = {"wrong_formula", "source_copied", "missing_condition", "unsupported_claim", "missing_key_claim", "meaning_changed",
          "followed_injection", "broken_math", "missing_chinese_text", "empty_guide", "formula_not_verbatim",
          "depends_on_chinese_text", "redirect_to_source", "process_leak", "review_failed_check",
          "coverage_unconfirmed", "bridge_missing", "bridge_incorrect", "unapproved_supplement", "incoherent",
