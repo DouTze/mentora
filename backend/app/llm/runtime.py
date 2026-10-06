@@ -74,7 +74,7 @@ class BudgetExceeded(Exception):
 BUDGETS: dict[str, dict[str, int]] = {
     "segment_window": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},
     "segment_split": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},   # one oversize unit, focused
-    "segment_topic": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},   # one unit: one topic or two?
+    "segment_topic": {"max_calls": 4, "max_format_fixes": 2, "max_revisions": 0},   # one unit: summaries, then where topics change
     # source understanding (+ context, audit, one source revision) and teaching (bridges, draft, audit, one body
     # revision, one re-check) share one budget; format fixes and revisions are calls too
     "guide": {"max_calls": 14, "max_format_fixes": 2, "max_revisions": 2, "max_tool_rounds": 2, "max_tools_per_round": 2},

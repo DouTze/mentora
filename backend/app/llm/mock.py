@@ -36,8 +36,11 @@ class MockBackend(LLMBackend):
             text = json.dumps(self._segment_blocks(meta.get("blocks", [])), ensure_ascii=False)
         elif step == "segment_split":
             text = json.dumps(self._segment_split(meta.get("blocks", [])), ensure_ascii=False)
-        elif step == "segment_topic":   # simulated: always one topic (no understanding involved)
-            text = json.dumps({"new_topic_at": [], "topics": ["（模擬）同一主題"]}, ensure_ascii=False)
+        elif step == "segment_topic_summary":   # simulated: every paragraph on one topic (no understanding involved)
+            text = json.dumps({"paragraphs": [{"topic": "（模擬）同一主題", "aspect": f"第 {k} 段"}
+                                              for k in range(1, int(meta.get("paragraphs", 1)) + 1)]}, ensure_ascii=False)
+        elif step == "segment_topic":
+            text = json.dumps({"new_topic_at": []}, ensure_ascii=False)
         elif step == "context":
             text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
         elif step in ("understand", "revise_source"):

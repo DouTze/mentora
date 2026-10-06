@@ -35,9 +35,9 @@ from langchain_core.messages import HumanMessage
 
 from ..llm.runtime import CallBudget, stable_hash
 from ..llm.tasks import TaskContext, TaskError, run_structured
-from .schemas import PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicSplit, WindowPlan
+from .schemas import PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts, TopicSummary, WindowPlan
 
-SEGMENTATION_VERSION = "units-v7"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section
+SEGMENTATION_VERSION = "units-v8"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -513,56 +513,97 @@ def needs_topic_check(blocks: list[SourceBlock], grp: list[int]) -> bool:
     return body_chars([blocks[i] for i in grp]) >= TOPIC_CHECK_MIN_CHARS and paragraph_count(blocks, grp) >= 2
 
 
+TOPIC_PARA_PREVIEW = 400    # chars of one paragraph shown to the topic summary
+
+
+def topic_paragraphs(blocks: list[SourceBlock], grp: list[int]) -> list[list[int]]:
+    """The unit as paragraphs for the topic check: one opens at a heading or a paragraph start, never between glued
+    blocks (a heading stays with its first paragraph). Only how the text is shown; where topics change is the
+    model's call."""
+    g = glues(blocks)
+    out = [[grp[0]]]
+    for i in grp[1:]:
+        if (blocks[i].kind == "heading" or not same_para(blocks, i)) and not g[i - 1]:
+            out.append([i])
+        else:
+            out[-1].append(i)
+    return out
+
+
 async def check_topic(blocks: list[SourceBlock], grp: list[int], reason: str, w: Window, k: int,
                       deps: PlannerDeps) -> tuple[list[list[int]], list[str], str | None]:
-    """One unit planned together with many others: asked alone whether it holds one topic, a small model answers
-    better than it planned the whole buffer. The answer only names the blocks where a new topic begins, and the
-    prompt's example is the empty list: a small model copying the example (qwen3-vl:4b copied a units example
-    verbatim and cut a section after its heading) leaves the unit as it is. A split is taken only when every part
-    can carry a guide on its own (TOPIC_MIN_PART_CHARS); an invalid answer keeps the unit. (groups, reasons, note)"""
-    template = deps.prompts.get("segment_topic")
-    if template is None:   # a session whose prompt snapshot predates the one-topic check
+    """Is one planned unit one topic? Asked directly, a small model was unstable (qwen3-vl:4b on a textbook: the
+    overview and its first item split once in three, a single stage split twice in three). So the question comes in
+    two steps that it answers well: first the topic and aspect of every paragraph (an overview of several items is
+    "…總覽", an item's own details, limits and examples keep the item as topic), then, from those lines only, the
+    paragraphs where a new topic begins. The decision prompt's example is the empty list, so copying it cuts nothing.
+    A split is taken only when every part can carry a guide on its own (TOPIC_MIN_PART_CHARS); an invalid answer
+    keeps the unit. (groups, reasons, note)"""
+    summary_t, decide_t = deps.prompts.get("segment_topic_summary"), deps.prompts.get("segment_topic")
+    if summary_t is None or decide_t is None:   # a session whose prompt snapshot predates this check
         return [grp], [reason], None
     label = f"B{grp[0] - w.lo + 1}–B{grp[-1] - w.lo + 1}"
-    sw = make_window(blocks, w.index, grp[0], grp[-1] + 1)
-    listing, meta = window_listing(blocks, sw)
-    prompt = template.replace("{{material_title}}", deps.material_title).replace("{{count}}", str(len(grp))) \
-        .replace("{{reason}}", reason or "（未說明）").replace("{{blocks}}", listing)
+    paras = topic_paragraphs(blocks, grp)
+    n = len(paras)
+    if n < 2:
+        return [grp], [reason], None
+    previews = ["\n".join([blocks[i].text for i in p if blocks[i].kind == "heading"]
+                          + [unit_text([blocks[i] for i in p if blocks[i].kind != "heading"])]).strip() for p in paras]
+    listing = "\n\n".join(f"【P{j}】\n{t[:TOPIC_PARA_PREVIEW]}{'…' if len(t) > TOPIC_PARA_PREVIEW else ''}"
+                          for j, t in enumerate(previews, 1))
     key = f"{w.window_id}-t{k + 1:02d}"
     ctx: TaskContext = deps.make_ctx("segment_topic", key)
-    holder: dict[str, Any] = {}
+    source_ids = [blocks[i].block_id for i in grp]
+    summary_schema = TopicSummary.model_json_schema()
+    summary_schema["properties"]["paragraphs"] = {**summary_schema["properties"]["paragraphs"], "minItems": n, "maxItems": n}
+    item = summary_schema["$defs"]["ParagraphTopic"]["properties"]
+    item["topic"] = {**item["topic"], "maxLength": 40}
+    item["aspect"] = {**item["aspect"], "maxLength": 40}
+    starts_schema = TopicStarts.model_json_schema()
+    starts_schema["properties"]["new_topic_at"] = {"type": "array", "items": {"type": "integer", "enum": list(range(1, n + 1))},
+                                                   "maxItems": n}
 
-    def check(ans: TopicSplit) -> None:
+    def check_summary(ans: TopicSummary) -> None:
         from ..llm.tasks import OutputInvalid
-        n, cuts = len(grp), set()
-        for lab in ans.new_topic_at:
-            m = re.fullmatch(r"\s*B?(\d+)\s*", str(lab))
-            if not m or not 1 <= int(m.group(1)) <= n:
-                raise OutputInvalid(f"new_topic_at 只能用 B1–B{n} 的編號（收到 {lab!r}）")
-            if int(m.group(1)) > 1:   # B1 already opens the unit
-                cuts.add(sw.lo + int(m.group(1)) - 1)
-        bounds = [sw.lo] + sorted(cuts) + [sw.hi]
-        holder["groups"], _ = normalize_groups(blocks, [list(range(a, b)) for a, b in zip(bounds, bounds[1:])],
-                                               sw.lo, sw.hi)
+        if len(ans.paragraphs) != n:
+            raise OutputInvalid(f"paragraphs 必須剛好 {n} 個（每段一個），收到 {len(ans.paragraphs)} 個")
+
+    def check_starts(ans: TopicStarts) -> None:
+        from ..llm.tasks import OutputInvalid
+        bad = [x for x in ans.new_topic_at if not 1 <= x <= n]
+        if bad:
+            raise OutputInvalid(f"new_topic_at 只能用 1–{n} 的段落號碼（收到 {bad}）")
 
     try:
-        ans, _ = await run_structured(ctx, [HumanMessage(content=prompt)], TopicSplit, task="segment_topic",
-                                       node=f"segment.{key}", prompt_version=deps.prompt_version,
-                                       meta={"step": "segment_topic", **meta},
-                                       source_ids=[blocks[i].block_id for i in grp], check=check,
-                                       min_max_tokens=2048, min_context_tokens=16384)
+        summ, _ = await run_structured(
+            ctx, [HumanMessage(content=summary_t.replace("{{material_title}}", deps.material_title)
+                               .replace("{{count}}", str(n)).replace("{{paragraphs}}", listing))],
+            TopicSummary, task="segment_topic", node=f"segment.{key}.summary", prompt_version=deps.prompt_version,
+            meta={"step": "segment_topic_summary", "paragraphs": n}, source_ids=source_ids, check=check_summary,
+            json_schema=summary_schema, min_max_tokens=1024, min_context_tokens=16384)
+        lines = "\n".join(f"P{j}：大主題「{x.topic.strip()}」｜{x.aspect.strip()}" for j, x in enumerate(summ.paragraphs, 1))
+        starts, _ = await run_structured(
+            ctx, [HumanMessage(content=decide_t.replace("{{material_title}}", deps.material_title)
+                               .replace("{{count}}", str(n)).replace("{{summaries}}", lines))],
+            TopicStarts, task="segment_topic", node=f"segment.{key}", prompt_version=deps.prompt_version,
+            meta={"step": "segment_topic", "paragraphs": n}, source_ids=source_ids, check=check_starts,
+            json_schema=starts_schema, min_max_tokens=512, min_context_tokens=16384)
     except TaskError as e:
         if e.kind == "unavailable":
             raise
         return [grp], [reason], f"{label} 單題檢查無效，維持一個單元：{e.detail[:120]}"
-    groups = holder["groups"]
+    cuts = sorted({paras[x - 1][0] for x in starts.new_topic_at if x > 1})   # P1 already opens the unit
+    if not cuts:
+        return [grp], [reason], None
+    bounds = [grp[0]] + cuts + [grp[-1] + 1]
+    groups, _ = normalize_groups(blocks, [list(range(a, b)) for a, b in zip(bounds, bounds[1:])], grp[0], grp[-1] + 1)
     if len(groups) < 2:
         return [grp], [reason], None
     if min(body_chars([blocks[i] for i in g]) for g in groups) < TOPIC_MIN_PART_CHARS:
         return [grp], [reason], f"{label} 單題檢查想拆成 {len(groups)} 個單元，但有一部分太短，維持一個單元"
-    topics = [t.strip() for t in ans.topics]
-    reasons = topics if len(topics) == len(groups) and all(topics) else [reason] * len(groups)
-    return groups, reasons, f"{label} 單題檢查：裡面有 {len(groups)} 個主題，依模型指出的主題轉折拆開"
+    topic_of = {i: summ.paragraphs[j].topic.strip() for j, p in enumerate(paras) for i in p}
+    reasons = [topic_of.get(g[0]) or topic_of.get(next((i for i in g if i in topic_of), g[0]), reason) for g in groups]
+    return groups, reasons, f"{label} 單題檢查：裡面有 {len(groups)} 個主題（{'／'.join(reasons)}），依模型指出的主題轉折拆開"
 
 
 async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_chars: int = WINDOW_CHARS,

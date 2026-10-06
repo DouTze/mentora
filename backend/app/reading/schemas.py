@@ -80,11 +80,19 @@ class PlannedUnit(BaseModel):
     reason: str = ""                              # short boundary reason
 
 
-class TopicSplit(BaseModel):
-    """segment_topic output: the local labels of the blocks where a new topic begins (empty = one topic), and a short
-    name per resulting part (optional)."""
-    new_topic_at: list[str] = Field(default_factory=list)
-    topics: list[str] = Field(default_factory=list)
+class ParagraphTopic(BaseModel):
+    topic: str = Field(min_length=1)   # what the paragraph mainly introduces ("…總覽" for an overview of several items)
+    aspect: str = ""                   # which side of that topic it covers
+
+
+class TopicSummary(BaseModel):
+    """segment_topic_summary output: one topic / aspect per paragraph of the unit, in order."""
+    paragraphs: list[ParagraphTopic] = Field(min_length=1)
+
+
+class TopicStarts(BaseModel):
+    """segment_topic output: the paragraph numbers (1-based) where a new topic begins; empty = one topic."""
+    new_topic_at: list[int] = Field(default_factory=list)
 
 
 class WindowPlan(BaseModel):
