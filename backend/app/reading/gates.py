@@ -636,6 +636,30 @@ def ra_overlap(text: str, ref: str) -> float:
     return len(a & bi(ref)) / len(a) if a else 1.0
 
 
+CLAUSE_RE = re.compile(r"[，,；;：:。！？!?\n]")
+OTHER_SENTENCE_MATCH = 0.5     # share of a guide clause's bigrams found in another source sentence: it restates that one
+
+
+def coverage_parity(claim_src: str, full: str, source: str) -> list[str]:
+    """parity() of a claim against the guide sentence(s) quoted as covering it. A lost marker counts anywhere in
+    the sentence. An added negation counts only in the clauses that do not restate another source sentence: a long
+    guide sentence often carries the next claims too ("ELIZA…，但並不具備語意理解"), and their 並不 / 無法 are
+    checked against their own sentences. A clause like "這並不正確" restates nothing, so it still counts here."""
+    lost = [m for m in parity(claim_src, full) if "多了否定" not in m]
+    # the claim's own sentence(s) — also the one a partial quote ("彼此獨立") comes from — are never "another"
+    others = [s for _, s in source_segments(source)
+              if ra.norm_text(s) not in ra.norm_text(claim_src) and ra_overlap(claim_src, s) < OTHER_SENTENCE_MATCH]
+    mine = []
+    for clause in CLAUSE_RE.split(full or ""):
+        if not clause.strip():
+            continue
+        best = max((ra_overlap(clause, s) for s in others), default=0.0)
+        if best < OTHER_SENTENCE_MATCH or best <= ra_overlap(clause, claim_src):
+            mine.append(clause)
+    added = [m for m in parity(claim_src, "，".join(mine)) if "多了否定" in m]
+    return lost + added
+
+
 def gate2_program(source: str, guide: str, claims: list[SourceClaim], bridges: BridgePlan, bridges_used: list[str],
                   task, symbol_evidence: dict | None = None) -> list[ra.Finding]:
     """Program checks of the 主要正文 alone (formulas, KaTeX, independence from the 中文課文, process leaks), the
@@ -759,7 +783,7 @@ def coverage_findings(source: str, guide: str, claims: list[SourceClaim], bridge
         if v.verdict == "covered":
             full = ra.expand_quote(guide, v.guide_quote, 6)
             quoted = bool(full)
-            lost = parity(c.source_text, full) if quoted else []
+            lost = coverage_parity(c.source_text, full, source) if quoted else []
             needed = [ra._norm_math(f) for f in c.formulas] + [f for f in sum(ra.source_formulas(c.source_text), [])
                                                                  if ra._is_real_math(f)]
             gn = ra._norm_math(guide)

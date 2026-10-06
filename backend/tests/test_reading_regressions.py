@@ -123,6 +123,21 @@ def test_markers_ignore_code_and_treat_only_if_not_only_as_a_condition():
     assert parity("Only if x > 0 is the formula valid.", "這個公式有效。")    # "only if" still is a condition
 
 
+def test_a_negation_of_the_next_claim_in_the_same_guide_sentence_is_not_this_claims():
+    """A guide sentence that carries two source sentences: the 並不 / 無法 of the second one are not added to the first."""
+    from app.reading.gates import coverage_parity
+    source = ("• ELIZA：早期的對話式AI 系統，通過關鍵詞比對進行簡單的對話模擬。"
+              "ELIZA能夠進行特定情境下的對話，但並不具備語意理解，無法處理複雜的語境。")
+    claim = "• ELIZA：早期的對話式AI 系統，通過關鍵詞比對進行簡單的對話模擬。"
+    guide = ("代表技術包括ELIZA：早期的對話式AI系統，通過關鍵詞比對進行簡單的對話模擬，"
+             "ELIZA能夠進行特定情境下的對話，但並不具備語意理解，無法處理複雜的語境。")
+    assert coverage_parity(claim, guide, source) == []
+    reversed_ = "ELIZA並不是早期的對話式AI系統，通過關鍵詞比對進行簡單的對話模擬。"
+    assert any("多了否定" in m for m in coverage_parity(claim, reversed_, source))
+    denied = "ELIZA是早期的對話式AI系統，通過關鍵詞比對進行簡單的對話模擬，這並不正確。"
+    assert any("多了否定" in m for m in coverage_parity(claim, denied, source))
+
+
 def test_a_merged_quotation_counts_only_when_every_piece_is_in_the_guide():
     """Auditors often join two guide sentences into one quotation with an added 「且」; each piece must still be verbatim."""
     guide = "在均衡價格下，消費者想買的數量恰好等於生產者想賣的數量。兩條曲線的交點稱為市場均衡點。"
