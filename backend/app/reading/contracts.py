@@ -174,6 +174,14 @@ class BridgePlan(BaseModel):
 
 # -- E / F: body and Gate 2 ----------------------------------------------------------------------
 
+class TopicOverview(BaseModel):
+    """reading_topic output: the 主題總摘要 (scope and context for each 區塊's guide, never content), the key points
+    and the self-check question shown after the last 區塊."""
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
+    check: str = ""
+
+
 class BodyDraft(BaseModel):
     guide: str = Field(min_length=10)
     key_points: list[str] = Field(default_factory=list)

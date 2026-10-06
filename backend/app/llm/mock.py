@@ -39,8 +39,19 @@ class MockBackend(LLMBackend):
         elif step == "segment_topic_summary":   # simulated: every paragraph on one topic (no understanding involved)
             text = json.dumps({"paragraphs": [{"topic": "（模擬）同一主題", "aspect": f"第 {k} 段"}
                                               for k in range(1, int(meta.get("paragraphs", 1)) + 1)]}, ensure_ascii=False)
-        elif step == "segment_topic":
-            text = json.dumps({"new_topic_at": []}, ensure_ascii=False)
+        elif step == "segment_outline":   # simulated: a 區塊 under a heading is about that heading's subject
+            n, heads, topic, out = int(meta.get("paragraphs", 1)), meta.get("headings") or [], "（模擬）同一主題", []
+            for k in range(1, n + 1):
+                topic = (heads[k - 1] if k - 1 < len(heads) else "") or topic
+                out.append({"topic": topic, "aspect": f"第 {k} 段", "summary": f"（模擬）第 {k} 段"})
+            text = json.dumps({"paragraphs": out}, ensure_ascii=False)
+        elif step == "segment_topic":   # simulated: a new topic where the topic wording changes
+            ts = meta.get("topics") or []
+            text = json.dumps({"new_topic_at": [k for k in range(2, len(ts) + 1) if ts[k - 1] != ts[k - 2]]},
+                              ensure_ascii=False)
+        elif step == "reading_topic":
+            text = json.dumps({"summary": "（模擬）這個主題的概要。", "key_points": ["（模擬）重點"],
+                               "check": "你能用自己的話說出這個主題的重點嗎？"}, ensure_ascii=False)
         elif step == "context":
             text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
         elif step in ("understand", "revise_source"):

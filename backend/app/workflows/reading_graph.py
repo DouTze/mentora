@@ -264,11 +264,27 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                 required=False, priority=2, source_ids=[f"{x['unit_id']}:{x['claim_id']}" for x in learning.read_claims]),
             "bridge_refs": lambda: ContextItem(key="bridge_refs", text=bridge_refs_text(learning), required=False, priority=2,
                                                source_ids=[f"{x['unit_id']}:{x['claim_id']}" for x in learning.read_claims]),
+            "topic_context": lambda: ContextItem(key="topic_context", text=topic_text(t), required=False, priority=3),
             "open_questions": lambda: ContextItem(key="open_questions", text="\n".join(
                 f"  - [{x['unit_id']}] {x['question']}" for x in learning.open_questions) or "  （無）",
                 required=False, priority=1),
         }
         return [make[k]() for k in keys]
+
+    def topic_text(t: ra.ReadingTaskInput) -> str:
+        """Where this 區塊 sits in its 主題: the 主題總摘要 and every 區塊's outline, this one marked. Scope only."""
+        tp = t.topic or {}
+        chunks = tp.get("chunks") or []
+        if not chunks:
+            return "（這一段就是一個完整主題，沒有分區塊）"
+        k = int(tp.get("index", 0))
+        lines = [f"主題總摘要：{tp.get('summary') or '（無）'}",
+                 f"這個主題分成 {len(chunks)} 個區塊，你現在只寫第 {k + 1} 塊（標 ▶）："]
+        for j, c in enumerate(chunks):
+            lines.append(f"{'▶' if j == k else '  '} 第 {j + 1} 塊｜{c.get('topic') or '—'}｜{c.get('aspect') or '—'}"
+                         f"｜{c.get('summary') or '—'}")
+        lines.append(f"只寫第 {k + 1} 塊原文裡的內容；前面的區塊學生已經讀過，後面的區塊會另外導讀，都不要寫進來。")
+        return "\n".join(lines)
 
     def bridge_refs(t: ra.ReadingTaskInput) -> dict:
         """What a non-source bridge may cite as checkable support (see gates.bridge_support_problem)."""
@@ -359,13 +375,23 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             deps.repo.put_artifact(f"{state['op']}:input", kind="guide_input", status="cached", payload=dict(state),
                                    session_id=t.session_id, unit_id=t.unit_id)
         sups, status = [], "not_needed"
-        if ra.REFERS_BACK_RE.match(t.text) or t.depends_on_prev:
+        tp = t.topic or {}
+        if (ra.REFERS_BACK_RE.match(t.text) or t.depends_on_prev) and int(tp.get("index", 0)) > 0:
+            # a later 區塊 points back into its own 主題: the previous 區塊, given by the program
+            prev = tp.get("prev") or {}
+            sups.append({"tool": "read_neighbor_units", "args": {"unit_id": tp.get("unit_id"), "block": tp["index"]},
+                         "ok": bool(prev.get("text")), "content": prev.get("text") or "", "note": "同一主題的前一個區塊",
+                         "source_ids": prev.get("block_ids") or [], "version": "", "complete": True, "omitted": [],
+                         "by": "program"})
+            status = "provided" if prev.get("text") else "missing"
+        elif ra.REFERS_BACK_RE.match(t.text) or t.depends_on_prev:
             if t.index == 0:
                 status = "outside_range"
             else:
                 d = ToolDispatcher(build_tools(deps.scope_for(t.session_id, t.index)))
                 res = await d.run([ToolCallRequest(tool="read_neighbor_units",
-                                                   args={"unit_id": t.unit_id, "before": 1, "after": 0})], 1)
+                                                   args={"unit_id": tp.get("unit_id") or t.unit_id, "before": 1,
+                                                         "after": 0})], 1)
                 sups += [{**r.as_dict(), "by": "program"} for r in res]
                 status = "provided" if any(r.ok for r in res) else "missing"
         key, _ = vsrc_key({**state, "supplements": sups})
@@ -535,7 +561,9 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         t = task(state)
         v = state["verified"]
         msg, rec = await prompt_for(ctx, state, "plan_bridges", "reading_bridges",
-                                    ("quote_text", "claims", "read_claims", "open_questions"), {}, 1024)
+                                    with_optional("reading_bridges", state,
+                                                  ("quote_text", "claims", "read_claims", "open_questions"),
+                                                  ("topic_context",)), {}, 1024)
         claim_ids = {c["id"] for c in v["claims"]}
         b, _ = await run_structured(ctx, [HumanMessage(content=msg)], BridgePlan, task="guide", node="plan_bridges",
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
@@ -549,8 +577,9 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         n_bridges = len((state.get("bridges") or {}).get("bridges") or [])
         out_tokens = gates.body_tokens(t.text, n_bridges)
         msg, rec = await prompt_for(ctx, state, "draft", "reading_body",
-                                    ("quote_text", "symbol_evidence", "claims", "bridges", "chinese_text", "supplements",
-                                     "prev_points", "qa_context"),
+                                    with_optional("reading_body", state,
+                                                  ("quote_text", "symbol_evidence", "claims", "bridges", "chinese_text",
+                                                   "supplements", "prev_points", "qa_context"), ("topic_context",)),
                                     {}, out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", prose_fields=("guide",), node="draft",
                                     json_schema=gates.body_schema(t.text, n_bridges),
@@ -667,7 +696,9 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         majors = [ra.Finding.model_validate(f) for f in state["findings"] if f["severity"] == "major"]
         extra = {"issues": ra.findings_text(majors), "draft_json": json.dumps(state["draft"], ensure_ascii=False)}
         msg, rec = await prompt_for(ctx, state, "revise_body", "reading_body_revise",
-                                    ("quote_text", "symbol_evidence", "claims", "bridges", "supplements"), extra,
+                                    with_optional("reading_body_revise", state,
+                                                  ("quote_text", "symbol_evidence", "claims", "bridges", "supplements"),
+                                                  ("topic_context",)), extra,
                                     out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], BodyDraft, task="guide", prose_fields=("guide",), node="revise_body",
                                     json_schema=gates.body_schema(t.text, n_bridges),

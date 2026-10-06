@@ -59,6 +59,9 @@ class ReadingTaskInput(BaseModel):
     source_kind: str = "md"                      # md | txt | pdf (decides what counts as symbol evidence)
     depends_on_prev: bool = False                # a protected relation (argument, example …) continues from the previous unit
     symbol_evidence: dict | None = None          # R5: page / region / font evidence of this unit, if any
+    # a 區塊 of a 主題 (docs/reading-block-guide-plan.md): {"summary": 主題總摘要, "chunks": [{"topic", "aspect",
+    # "summary"} …], "index": this 區塊}. Scope and context for teaching only — never content, never checked against
+    topic: dict | None = None
 
     @property
     def source_hash(self) -> str:
@@ -68,7 +71,7 @@ class ReadingTaskInput(BaseModel):
     def context_hash(self) -> str:
         """Everything about the reader the guide depends on (the verified source does not depend on it)."""
         return stable_hash([self.prev_points, [(q.get("question"), q.get("answer")) for q in self.qa_context],
-                            self.learning.hash])
+                            self.learning.hash] + ([self.topic] if self.topic else []))
 
 
 class TeachingPlan(BaseModel):

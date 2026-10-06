@@ -173,7 +173,7 @@ def capture(args) -> None:
                 drafts.setdefault(digest(u["draft"]["guide"]), u["draft"]["guide"])
             if u.get("understanding"):
                 understandings.setdefault(digest(u["understanding"]), u["understanding"])
-        kind = "warm" if s0.get("source_only") else "prefetch" if op.endswith(":run") else "guide"
+        kind = "warm" if s0.get("source_only") else "prefetch" if op.endswith(":run") or ":prefetch:" in op else "guide"
         case_id = f"{sid}-{t['unit_id']}-{kind}-a{t['attempt']}-{digest(op)[:6]}"
         case = {"id": case_id, "session_id": sid, "unit_id": t["unit_id"], "label": t["label"], "kind": kind,
                 "start": run["start"], "state0": s0, "prompts": meta["prompt_bundle"]["prompts"],
