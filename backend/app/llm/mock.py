@@ -67,14 +67,15 @@ class MockBackend(LLMBackend):
         elif step == "plan_bridges":
             text = json.dumps({"learning_goal": "（模擬）讀懂這一段", "bridges": []}, ensure_ascii=False)
         elif step in ("draft", "revise_body") and meta.get("claims") is not None:
-            # simulated 主要正文: restates every claimed source passage verbatim (formulas included); no teaching
-            body = "\n\n".join(c["source_text"] for c in meta["claims"])
+            # simulated 主要正文: restates every claim — the source passage verbatim for a Chinese source, the audited
+            # Chinese statement (with the source's formulas) otherwise, as a real guide must; no teaching
+            body = "\n\n".join(self._restated(c) for c in meta["claims"])
             body += "".join(f"\n\n$${f}$$" for f in meta.get("evidence_formulas") or [])
             body += "".join(f"\n\n{b['content']}" for b in meta.get("bridges") or [])
             text = json.dumps({"guide": "（模擬導讀）以下逐句重述原文。\n\n" + body, "key_points": [self._first_sentence(body)[:40]],
                                "check": "你能用自己的話說出這一段的重點嗎？", "bridges_used": [], "limits": []}, ensure_ascii=False)
         elif step == "body_audit":
-            text = json.dumps({"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": c["source_text"], "note": ""}
+            text = json.dumps({"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": self._restated(c), "note": ""}
                                           for c in meta.get("claims") or []],
                                "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": "S1",
                                             "guide_quote": b["content"], "note": ""} for b in meta.get("bridges") or []],
@@ -173,6 +174,14 @@ class MockBackend(LLMBackend):
         words = Counter(w.lower() for w in re.findall(r"[A-Za-z]{4,}", text))
         return [t for t, _ in (grams + words).most_common(n)]
 
+    @staticmethod
+    def _restated(c: dict) -> str:
+        src = c.get("source_text") or ""
+        if len(re.findall(r"[一-鿿]", src)) >= len(re.findall(r"[A-Za-z]", src)) or not c.get("statement"):
+            return src
+        maths = [m for m in re.findall(r"\$\$.+?\$\$|\$[^$\n]+\$", src, re.S) if m not in c["statement"]]
+        return c["statement"] + "".join(f" {m}" for m in maths)
+
     @classmethod
     def _guide(cls, text: str) -> dict[str, Any]:
         """Simulated 導讀: restates the paragraph; no understanding involved."""
@@ -190,7 +199,11 @@ class MockBackend(LLMBackend):
         coverage checks see a complete list); the 中文課文 of a non-Chinese text is the text itself, marked."""
         segs = segments or [["S1", text]]
         latin = len(re.findall(r"[A-Za-z]", text)) > len(re.findall(r"[\u4e00-\u9fff]", text))
-        return {"translations": [{"id": sid, "zh": f"（模擬譯文）{s}"} for sid, s in segs] if latin else [],
+        def zh(s: str) -> str:   # simulated translation: the words joined by ・ (markers and formulas kept, not the source verbatim)
+            parts = re.split(r"(\$\$.+?\$\$|\$[^$\n]+\$)", s, flags=re.S)
+            return "（模擬譯文）" + "".join(p if p.startswith("$") else re.sub(r"\s+", "・", p) for p in parts)
+
+        return {"translations": [{"id": sid, "zh": zh(s)} for sid, s in segs] if latin else [],
                 "claims": [{"id": f"C{i}", "sentences": [sid], "statement": "", "function": "claim", "conditions": [],
                             "exceptions": [], "strength": "", "formulas": re.findall(r"\$\$.+?\$\$|\$[^$\n]+\$", s, re.S),
                             "depends_on": []} for i, (sid, s) in enumerate(segs, 1)],
