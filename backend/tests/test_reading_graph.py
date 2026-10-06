@@ -417,6 +417,19 @@ async def test_replies_committed_before_a_lost_checkpoint_are_reused(tmp_path):
     assert out2["artifact"]["guide"] == out1["artifact"]["guide"] and len(repo.list_llm_calls("s1")) == n
 
 
+async def test_a_run_keeps_its_input_so_it_can_be_replayed(tmp_path):
+    """scripts/gate_cases.py replays a run from its stored input and its recorded calls (same operation key)."""
+    repo = Repository(Database(tmp_path / "db.sqlite3"))
+    out, _ = await run(MockBackend(), index=0, repo=repo)
+    [inp] = repo.list_artifacts("s1", "guide_input")
+    s0 = inp["payload"]
+    assert s0["task"]["unit_id"] == QUOTES[0]["unit_id"] and s0["draft"] is None
+    assert all(c["operation_key"].startswith(s0["op"] + ":") for c in repo.list_llm_calls("s1"))
+    deps, _, _ = make(MockBackend(), index=0)
+    again = await invoke(build_reading_graph(deps), s0, {"configurable": {"thread_id": "replay"}})
+    assert again["status"] == out["status"] == "accepted" and again["artifact"]["guide"] == out["artifact"]["guide"]
+
+
 async def test_a_verified_source_is_reused_by_another_session_but_teaching_is_not(tmp_path):
     repo = Repository(Database(tmp_path / "db.sqlite3"))
     b = Scripted()
