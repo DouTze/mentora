@@ -6,7 +6,6 @@ import { Icon, KindTag } from "../components/Icons";
 import { Working } from "../components/Working";
 import { useT } from "../i18n";
 
-const MAX_RANGE_CHARS = 60000; // same limit the backend enforces (read in parts, so this bounds time rather than context)
 
 interface Props {
   id: string;
@@ -97,7 +96,6 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
     onNavigate({ page: "home" });
   };
 
-  const tooLarge = chars > MAX_RANGE_CHARS;
   // typed values are applied when the field is left (or Enter), so a half-typed end never drags the start along
   const commitRange = (a: number, b: number) => setRange([clamp(Math.min(a, b)), clamp(Math.max(a, b))]);
 
@@ -212,12 +210,11 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
             )}
           </div>
 
-          <div className={`range-summary ${range ? "on" : ""} ${tooLarge ? "over" : ""}`} data-testid="range-summary">
+          <div className={`range-summary ${range ? "on" : ""}`} data-testid="range-summary">
             {range ? (
               <>
                 <strong>{range[0] === range[1] ? t("material.range.single", { n: range[0], unit: unitName }) : t("material.range.span", { start: range[0], end: range[1], unit: unitName })}</strong>
                 <span>{t("material.range.size", { count: range[1] - range[0] + 1, unit: unitName, chars: chars.toLocaleString() })}</span>
-                {tooLarge && <span>{t("material.range.tooLarge", { max: MAX_RANGE_CHARS.toLocaleString() })}</span>}
               </>
             ) : (
               <span>{t(material.unit === "page" ? "material.range.hint.page" : "material.range.hint.line")}</span>
@@ -229,7 +226,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
               {error}
             </div>
           )}
-          <button className="primary block" onClick={startLearning} disabled={!range || tooLarge || busy}>
+          <button className="primary block" onClick={startLearning} disabled={!range || busy}>
             {t(busy ? "material.start.preparing" : "material.start")}
           </button>
           {busy && <Working label={t("material.start.working")} />}

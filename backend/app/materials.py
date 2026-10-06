@@ -13,7 +13,6 @@ from . import config
 from .db import Database, new_id, now_iso
 
 KINDS = {".pdf": "pdf", ".md": "md", ".markdown": "md", ".txt": "txt"}
-MAX_RANGE_CHARS = 60000  # per session; the range is read in parts of reading.PART_CHARS, so this bounds time, not context
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
@@ -265,6 +264,4 @@ class MaterialStore:
             text = "\n".join(units)
         if not text.strip():
             raise MaterialError("no_text", "這個範圍裡沒有文字。")
-        if len(text) > MAX_RANGE_CHARS:
-            raise MaterialError("range_too_large", f"這個範圍有 {len(text)} 字，超過一次學習的上限 {MAX_RANGE_CHARS} 字。請縮小範圍。")
         return m, text
