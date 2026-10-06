@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, RequestError } from "../api";
-import type { ApiError, SessionView } from "../types";
+import type { ApiError, Guide, SessionView } from "../types";
 import { RichText } from "./RichText";
 import { Working } from "./Working";
 import { useT, type Key } from "../i18n";
@@ -47,7 +47,7 @@ export function ReadingPanel({ session, onSession }: Props) {
   const busy = !!job && !job.error;
   const readOnly = !isGraph(session); // created by the removed old flow: viewable, not continued
   const wf = session.workflow ?? null;
-  const cmds = useCommands(session, onSession, ["ask", "next", "finish", "retry", "guide"]);
+  const cmds = useCommands(session, onSession, ["ask", "next", "finish", "retry", "guide", "retry_blocks"]);
   const [failedAsk, setFailedAsk] = useState<string | null>(null);
   const sending = !!cmds.running && cmds.running.type !== "ask";
 
@@ -136,6 +136,10 @@ export function ReadingPanel({ session, onSession }: Props) {
       </div>
       {quote.heading && <h2 className="reading-heading">{quote.heading}</h2>}
 
+      {guide?.blocks ? (
+        <TopicBlocks guide={guide} retrying={sending} onRetry={!readOnly && !busy ? () => command("retry_blocks") : undefined} />
+      ) : (
+      <>
       <blockquote className="quote">
         <div className="label">{t("reading.quote.label", { label: quote.label })}</div>
         <div className="excerpt">
@@ -180,6 +184,8 @@ export function ReadingPanel({ session, onSession }: Props) {
             <Working stage={segmenting ? "segment" : (job?.stage ?? "guide")} detail={job?.detail_stage} />
           </div>
         )
+      )}
+      </>
       )}
 
       {qa.length > 0 && (
@@ -290,6 +296,74 @@ export function ReadingPanel({ session, onSession }: Props) {
               </details>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A 主題 written one 區塊 at a time: each source 區塊, then its guide. A 區塊 whose guide did not pass its checks
+ *  shows the source only; those 區塊 can be written again without touching the others. */
+function TopicBlocks({ guide, retrying, onRetry }: { guide: Guide; retrying: boolean; onRetry?: () => void }) {
+  const t = useT();
+  const blocks = guide.blocks ?? [];
+  return (
+    <div className="topic" data-testid="topic">
+      {guide.topic_summary && (
+        <p className="topic-summary" data-testid="topic-summary">
+          <span className="label">{t("reading.topic.summary")}</span>
+          {guide.topic_summary}
+        </p>
+      )}
+      {blocks.map((b) => (
+        <section key={b.index} className="block" data-testid="block">
+          {b.heading && <h3 className="block-heading">{b.heading}</h3>}
+          <blockquote className="quote">
+            <div className="label">{t("reading.block.label", { n: b.index + 1, total: blocks.length })}</div>
+            <div className="source-text">
+              <RichText text={b.source} />
+            </div>
+            {b.chinese_text && (
+              <div className="chinese">
+                <strong>{t("reading.chineseText")}</strong>
+                <RichText text={b.chinese_text} />
+              </div>
+            )}
+          </blockquote>
+          {b.status === "accepted" ? (
+            <div className="guide" data-testid="block-guide">
+              <RichText text={b.guide} />
+              {b.unverified && b.unverified.length > 0 && (
+                <details className="unverified" data-testid="unverified">
+                  <summary>{t("reading.unverified.summary", { n: b.unverified.length })}</summary>
+                  <ul>
+                    {b.unverified.map((u, i) => (
+                      <li key={i}>{t("reading.unverified.coverage", { source: u.source })}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          ) : (
+            <div className="block-failed" data-testid="block-failed">
+              {t("reading.block.failed")}
+            </div>
+          )}
+        </section>
+      ))}
+      {guide.partial && onRetry && (
+        <div className="row">
+          <button onClick={onRetry} disabled={retrying} data-testid="retry-blocks">
+            {t("reading.block.retry")}
+          </button>
+        </div>
+      )}
+      {guide.check && (
+        <div className="guide">
+          <div className="check">
+            <span className="label">{t("reading.check")}</span>
+            <RichText text={guide.check} inline />
+          </div>
         </div>
       )}
     </div>

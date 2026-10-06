@@ -77,6 +77,22 @@ export interface Guide {
   agent?: string;
   /** source passages whose restatement in a published guide the checks found but could not confirm */
   unverified?: { kind: "coverage"; source: string; guide: string }[];
+  /** a 主題 written one 區塊 at a time: shown as source 區塊 and guide 區塊 alternately */
+  mode?: "blocks";
+  topic_summary?: string;
+  blocks?: GuideBlock[];
+  /** some 區塊 did not pass their checks: shown as source only, and can be written again */
+  partial?: boolean;
+}
+
+export interface GuideBlock {
+  index: number;
+  source: string;
+  heading?: string | null;
+  status: "accepted" | "failed";
+  guide: string;
+  chinese_text?: string | null;
+  unverified?: { kind: "coverage"; source: string; guide: string }[];
 }
 
 export interface ReadingQA {
