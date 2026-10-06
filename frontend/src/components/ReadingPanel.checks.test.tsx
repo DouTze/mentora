@@ -46,6 +46,30 @@ describe("held guides", () => {
   });
 });
 
+describe("published guides with unchecked spots", () => {
+  function published(unverified?: NonNullable<ReadingView["guides"][string]["unverified"]>): SessionView {
+    const s = held({ code: "x", detail: "" });
+    const guide = { chinese_text: null, guide: "梯度下降沿負梯度更新參數。", key_points: [], check: "", unverified };
+    return { ...s, reading: { ...s.reading!, guides: { "0": guide }, job: null }, workflow: { ...wfBase, waiting: "student", error: null } };
+  }
+
+  test("the guide is shown, with a folded list of what could not be checked", async () => {
+    serve(published([{ kind: "coverage", source: "w ← w − η∇L", guide: "沿負梯度更新" },
+                     { kind: "coverage", source: "η 是學習率", guide: "學習率" }]));
+    render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
+    expect(await screen.findByTestId("guide")).toHaveTextContent("梯度下降沿負梯度更新參數");
+    expect(screen.getByTestId("unverified")).toHaveTextContent("這段導讀有 2 處沒能自動核對");
+    expect(screen.getByTestId("unverified")).toHaveTextContent("原文「η 是學習率」在導讀中的寫法沒能自動確認一致");
+  });
+
+  test("no note when everything was checked (and for guides published before the field existed)", async () => {
+    serve(published(undefined));
+    render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
+    await screen.findByTestId("guide");
+    expect(screen.queryByTestId("unverified")).toBeNull();
+  });
+});
+
 describe("working stages", () => {
   test("v2 stages read as what the tutor is checking", () => {
     render(<Working stage="guide" detail="understand" />);

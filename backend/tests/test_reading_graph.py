@@ -314,11 +314,20 @@ async def test_a_covered_verdict_counts_only_with_a_quote_from_the_guide():
         a = covered_audit(m)
         a["claims"][0]["guide_quote"] = "這句只在中文課文裡"
         return a
-    b = Scripted({"body_audit": [from_chinese], "verify": [
-        {"checks": [{"item": 1, "verdict": "no_problem", "guide_quote": reworded(QUOTES[0]["text"])}]}]})
+    b = Scripted({"body_audit": [from_chinese]})
     out, _ = await run(b, index=0)
-    assert b.steps()[-1] == "verify" and out["status"] == "accepted"
-    assert [w["code"] for w in out["artifact"]["warnings"]] == ["review_withdrawn"]
+    # the program finds the claim in the guide itself: published, with the unconfirmed restatement shown to the reader
+    a = out["artifact"]
+    assert out["status"] == "accepted" and "verify" not in b.steps() and "revise_body" not in b.steps()
+    assert [w["code"] for w in a["warnings"]] == ["coverage_unconfirmed"]
+    assert [n["kind"] for n in a["unverified"]] == ["coverage"] and a["unverified"][0]["guide"] in a["guide"]
+
+    # the guide really lacks it: a Chinese-text quote never answers for the guide — a program fact, revised then held
+    gone = lambda m: {**verbatim_body(m), "guide": "這一段在講別的事情，和原文無關。"}
+    b = Scripted({"body_audit": [from_chinese, from_chinese], "draft": [gone], "revise_body": [gone]})
+    out, _ = await run(b, index=0)
+    assert out["status"] == "failed" and "verify" not in b.steps()
+    assert any(f["code"] == "missing_key_claim" and f["severity"] == "major" for f in out["findings"])
 
 
 async def test_an_empty_or_partial_audit_is_never_a_pass():
@@ -582,9 +591,11 @@ async def test_an_ok_bridge_needs_a_real_guide_passage_and_a_supported_correctne
     b = Scripted({"plan_bridges": [bridge], "draft": [no_bridge_body], "revise_body": [no_bridge_body],
                   "body_audit": [audit(), audit()]})
     out, _ = await run(b, index=0)
-    assert dropped(out) and "drop_bridges" not in b.steps()      # a program node, not a model call
-    assert any(h.get("stage") == "drop_bridges" and "是否寫進正文無法確認" in json.dumps(h["findings"], ensure_ascii=False)
-               for h in out["history"])
+    # nothing of the bridge is on the page, so nothing can mislead: published as written, not rewritten; the record
+    # keeps the doubt and does not claim the bridge was used
+    a = out["artifact"]
+    assert out["status"] == "accepted" and "revise_body" not in b.steps() and "切線斜率" not in a["guide"]
+    assert a["bridges_used"] == [] and [w["code"] for w in a["warnings"]] == ["bridge_unconfirmed"]
 
     b = Scripted({"plan_bridges": [bridge], "body_audit": [audit(guide_quote="可微表示函數在該點有切線斜率", correct="no",
                                                                 note="可微不等於只有切線")] * 2})

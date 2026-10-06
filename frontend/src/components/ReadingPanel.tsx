@@ -162,6 +162,16 @@ export function ReadingPanel({ session, onSession }: Props) {
               <RichText text={guide.check} inline />
             </div>
           )}
+          {guide.unverified && guide.unverified.length > 0 && (
+            <details className="unverified" data-testid="unverified">
+              <summary>{t("reading.unverified.summary", { n: guide.unverified.length })}</summary>
+              <ul>
+                {guide.unverified.map((u, i) => (
+                  <li key={i}>{t("reading.unverified.coverage", { source: u.source })}</li>
+                ))}
+              </ul>
+            </details>
+          )}
         </div>
       ) : (
         !shownError && !readOnly && (

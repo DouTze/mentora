@@ -700,10 +700,14 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             "supplement_notes": [x.content for x in bridges.bridges if x.boundary == "supplement"],
             "source_claims": v["claims"], "verified_source_key": v["key"], "gate1": v["gate1"], "gate2": g2.model_dump(),
             "coverage": (state.get("audit") or {}).get("claims"),
-            "bridges": bridges.model_dump(), "bridges_used": d.get("bridges_used") or [],
+            "bridges": bridges.model_dump(),
+            # what the draft says it used, less the bridges the checks could not find in the guide
+            "bridges_used": [x for x in d.get("bridges_used") or []
+                             if not any(f.code == "bridge_unconfirmed" and f.item == x for f in fs)],
             "unit_id": t["unit_id"], "source_refs": list(t["block_ids"]) + supplement_ids(state),
             "context_status": state.get("context_status"),
             "review_status": "passed_with_warnings" if minors else "passed", "warnings": minors,
+            "unverified": gates.reader_notes(fs),
             "revised": state.get("body_revisions", 0) > 0 or state.get("source_revisions", 0) > 0,
             "prompt_version": t["prompt_bundle_hash"], "model_config_hash": t["model_config_hash"],
             "workflow_version": ra.READING_WORKFLOW_VERSION, "contract_version": CONTRACT_VERSION,

@@ -75,6 +75,8 @@ export interface Guide {
   check: string;
   latency_ms?: number;
   agent?: string;
+  /** source passages whose restatement in a published guide the checks found but could not confirm */
+  unverified?: { kind: "coverage"; source: string; guide: string }[];
 }
 
 export interface ReadingQA {
