@@ -200,7 +200,6 @@ export const en: Dict = {
   "material.range.single": "{unit} {n}",
   "material.range.span": "{unit} {start}–{end}",
   "material.range.size": "{count} {unit} · {chars} characters",
-  "material.range.tooLarge": "This exceeds the {max}-character limit per session. Select a smaller range.",
   "material.range.hint.page": "Click a page on the left to set the start, then click another to set the end.",
   "material.range.hint.line": "Click a line number on the left to set the start, then click another to set the end.",
   "material.start.preparing": "Preparing guided reading…",

@@ -122,7 +122,6 @@ export const pages = {
   "material.range.single": "第 {n} {unit}",
   "material.range.span": "第 {start}–{end} {unit}",
   "material.range.size": "{count} {unit} · {chars} 字",
-  "material.range.tooLarge": "超過一次學習的上限 {max} 字，請縮小範圍。",
   "material.range.hint.page": "在左邊點一下頁面設定起點，再點一下設定終點。",
   "material.range.hint.line": "在左邊點一下行號設定起點，再點一下設定終點。",
   "material.start.preparing": "準備導讀中…",

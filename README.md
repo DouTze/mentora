@@ -52,7 +52,7 @@ cd frontend && bun install && bun run dev
 
 ### 長範圍怎麼讀
 
-範圍切段後再依原書結構分成**閱讀部分**（`backend/app/reading/segmentation.py`）。讀完一個部分，後端從已核對的命題整理出筆記；出題只依據已讀且已核對的命題與筆記。一次學習的上限是 60,000 字（`backend/app/materials.py` 的 `MAX_RANGE_CHARS`），限制的是時間而不是 context。切段、導讀與筆記另外鏡像成 Markdown 檔，放在 `backend/data/reading/<session>/`（`quotes/`、`guides/`、`parts/`）。掃描型 PDF（沒有文字層）目前會被拒絕。學習紀錄會保留每一輪的題目原文、導讀時的每段導讀與提問。
+範圍切段後再依原書結構分成**閱讀部分**（`backend/app/reading/segmentation.py`）。讀完一個部分，後端從已核對的命題整理出筆記；出題只依據已讀且已核對的命題與筆記。一次學習的範圍沒有字數上限：導讀一次只處理一個區塊，範圍再大也不會讓單次模型呼叫變長，只是整體需要的時間比較久。切段、導讀與筆記另外鏡像成 Markdown 檔，放在 `backend/data/reading/<session>/`（`quotes/`、`guides/`、`parts/`）。掃描型 PDF（沒有文字層）目前會被拒絕。學習紀錄會保留每一輪的題目原文、導讀時的每段導讀與提問。
 
 ### 學習流程
 
