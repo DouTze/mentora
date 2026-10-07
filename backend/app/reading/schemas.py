@@ -48,6 +48,16 @@ class SourceUnit(BaseModel):
     context_refs: list[str] = Field(default_factory=list)   # read-only neighbours shown to the planner
     boundary_reason: str = ""
     segmentation_version: str
+    chunks: list["UnitChunk"] = Field(default_factory=list)   # 區塊: the paragraph-sized pieces a guide is written for
+
+
+class UnitChunk(BaseModel):
+    """One 區塊 of a unit (主題): about a paragraph of source blocks, with the outline the planner wrote for it. The
+    outline is a scope hint for the guide, never content."""
+    block_ids: list[str] = Field(min_length=1)
+    topic: str = ""
+    aspect: str = ""
+    summary: str = ""
 
 
 class ReadingPart(BaseModel):
@@ -83,10 +93,16 @@ class PlannedUnit(BaseModel):
 class ParagraphTopic(BaseModel):
     topic: str = Field(min_length=1)   # what the paragraph mainly introduces ("…總覽" for an overview of several items)
     aspect: str = ""                   # which side of that topic it covers
+    summary: str = ""                  # segment_outline: what the paragraph says, in one sentence
 
 
 class TopicSummary(BaseModel):
     """segment_topic_summary output: one topic / aspect per paragraph of the unit, in order."""
+    paragraphs: list[ParagraphTopic] = Field(min_length=1)
+
+
+class Outline(BaseModel):
+    """segment_outline output: topic / aspect / one-sentence summary of every 區塊, in order."""
     paragraphs: list[ParagraphTopic] = Field(min_length=1)
 
 

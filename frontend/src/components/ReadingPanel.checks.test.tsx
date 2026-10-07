@@ -79,3 +79,42 @@ describe("working stages", () => {
     expect(screen.getByTestId("working")).toHaveTextContent("正在檢查導讀是否完整忠實");
   });
 });
+
+describe("a topic guided one block at a time", () => {
+  function topic(failedSecond: boolean): SessionView {
+    const s = held({ code: "x", detail: "" });
+    const blocks = [
+      { index: 0, source: "梯度是函數增加最快的方向。", status: "accepted" as const, guide: "梯度指出函數上升最快的方向。" },
+      failedSecond
+        ? { index: 1, source: "沿負梯度更新參數可以降低損失。", status: "failed" as const, guide: "" }
+        : { index: 1, source: "沿負梯度更新參數可以降低損失。", heading: "更新規則", status: "accepted" as const, guide: "往負梯度走一小步，損失就會下降。" },
+    ];
+    const guide = { chinese_text: null, guide: "", key_points: [], check: "為什麼要往負梯度走？", mode: "blocks" as const,
+                    topic_summary: "從梯度的意義談到更新規則。", blocks, partial: failedSecond };
+    return { ...s, reading: { ...s.reading!, guides: { "0": guide }, job: null }, workflow: { ...wfBase, waiting: "student", error: null } };
+  }
+
+  test("source and guide alternate, the self-check comes after the last block", async () => {
+    serve(topic(false));
+    render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
+    const blocks = await screen.findAllByTestId("block");
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toHaveTextContent("原文・第 1/2 塊");
+    expect(blocks[0]).toHaveTextContent("梯度指出函數上升最快的方向");
+    expect(blocks[1]).toHaveTextContent("更新規則");
+    expect(screen.getByTestId("topic-summary")).toHaveTextContent("從梯度的意義談到更新規則");
+    expect(screen.getByTestId("topic")).toHaveTextContent("讀完想一想");
+    expect(screen.queryByTestId("retry-blocks")).toBeNull();
+  });
+
+  test("a block that did not pass shows its source only, and can be regenerated", async () => {
+    serve(topic(true));
+    render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
+    const failed = await screen.findByTestId("block-failed");
+    expect(failed).toHaveTextContent("沒有通過檢查");
+    expect(screen.getAllByTestId("block")[1]).toHaveTextContent("沿負梯度更新參數可以降低損失");
+    expect(screen.getAllByTestId("block-guide")).toHaveLength(1);
+    expect(screen.getByTestId("retry-blocks")).toHaveTextContent("重新產生沒通過的部分");
+    expect(screen.getByRole("button", { name: /下一段|讀完了|出題/ })).toBeTruthy();   // the reader can move on
+  });
+});

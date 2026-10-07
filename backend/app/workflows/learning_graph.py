@@ -54,7 +54,8 @@ from ..models import ModelJudgement
 from ..persistence.repository import DbSink, Repository
 from ..reading import agent as ra
 from ..reading import gates, notes
-from ..reading.contracts import LearningSnapshot, NotesAudit, NotesOutput, QuizAudit, QuizDraft
+from ..reading import topic_guide as tg
+from ..reading.contracts import LearningSnapshot, NotesAudit, NotesOutput, QuizAudit, QuizDraft, TopicOverview
 from ..reading.gates import symbol_like
 from ..reading.pdf_evidence import unit_symbol_evidence
 from ..reading.prompts import render
@@ -253,16 +254,157 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                                                                          t.model_config_hash, ra.READING_WORKFLOW_VERSION,
                                                                          gates.GATE_RULES_VERSION])
 
+    # -- a 主題 written one 區塊 at a time (docs/reading-block-guide-plan.md) -------------------------------------
+    async def topic_overview(sid: str, task: ra.ReadingTaskInput, q: dict, command_id: str | None) -> dict:
+        """主題總摘要, key points and self-check from the 區塊 outlines (cached per outline); a single 區塊 needs none."""
+        chunks = tg.chunks_of(q)
+        if len(chunks) < 2:
+            return {"summary": "", "key_points": [], "check": "", "by": "single"}
+        tmpl = prompts(sid).get("reading_topic")
+        if not tmpl:   # a prompt snapshot from before units-v9
+            return tg.fallback_overview(chunks)
+        key = f"{sid}:topic:{task.unit_id}:" + stable_hash([tg.outline_lines(chunks), tmpl, task.model_config_hash])
+        done = repo.get_artifact(key)
+        if done:
+            return done["payload"]
+        f = ra.task_fields(task)
+        msg = render(tmpl, {"material_title": f["material_title"], "range_label": f["range_label"], "position": f["position"],
+                            "quote_label": f["quote_label"], "count": str(len(chunks)), "chunks": tg.outline_lines(chunks)})
+        b = CallBudget.for_task("topic")
+        b.calls = repo.count_calls(key)
+        c = TaskContext(runtime(sid), b, sink, session_id=sid, command_id=command_id, operation_key=key)
+        schema = TopicOverview.model_json_schema()
+        schema["properties"]["summary"] = {**schema["properties"]["summary"], "maxLength": 200}
+        schema["properties"]["check"] = {**schema["properties"]["check"], "maxLength": 100}
+        schema["properties"]["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 3}
+        try:
+            ov, _ = await run_structured(c, [HumanMessage(content=msg)], TopicOverview, task="topic", node="topic",
+                                         prompt_version=task.prompt_bundle_hash, meta={"step": "reading_topic"},
+                                         source_ids=q["block_ids"], json_schema=schema, min_max_tokens=512,
+                                         min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        except TaskError as e:
+            if e.kind == "unavailable":
+                raise ReadingUnavailable(e.detail) from e
+            return {**tg.fallback_overview(chunks), "note": f"主題總摘要無效，改用區塊摘要：{e.detail[:120]}"}
+        payload = {**ov.model_dump(), "by": "model"}
+        repo.put_artifact(key, kind="topic_overview", status="cached", payload=payload, session_id=sid, unit_id=task.unit_id)
+        return payload
+
+    def block_key(t: ra.ReadingTaskInput) -> str:
+        """An accepted 區塊 guide, reused by a retry of the 主題 and by the guide after a prefetch."""
+        return f"{t.session_id}:block:{t.unit_id}:" + stable_hash([t.source_hash, t.context_hash, t.prompt_bundle_hash,
+                                                                    t.model_config_hash, ra.READING_WORKFLOW_VERSION,
+                                                                    gates.GATE_RULES_VERSION])
+
+    async def run_blocks(sid: str, task: ra.ReadingTaskInput, q: dict, tag: str, command_id: str | None, *,
+                         attempts: dict[int, int] | None = None, keep: dict[int, dict] | None = None,
+                         source_only: bool = False) -> tuple[dict, list]:
+        """(overview, one entry per 區塊). Each 區塊 runs the guided-reading subgraph on its own text, budget and
+        operation key, concurrently (the backend pool limits real parallelism). A model that cannot be reached
+        stops the whole 主題 after the others finished (their results are kept)."""
+        r = row(sid)
+        chunks = tg.chunks_of(q)
+        keep, attempts = keep or {}, attempts or {}
+        overview = tg.fallback_overview(chunks) if source_only else await topic_overview(sid, task, q, command_id)
+
+        async def one(k: int):
+            if k in keep:
+                return keep[k]
+            att = attempts.get(k, task.attempt)
+            ev = symbol_evidence(r, {**q, "block_ids": chunks[k]["block_ids"], "text": chunks[k]["text"]})
+            bt = tg.block_task(task.model_copy(update={"attempt": att}), q, k, overview, ev)
+            hit = None if source_only else repo.get_artifact(block_key(bt))
+            if hit:
+                return {**hit["payload"], "attempt": att}
+            # the reader's context is in the key: a prefetch redone after a question must not reuse the cached steps
+            bop = (f"{sid}:{tag}:{bt.unit_id}:a{att}:{stable_hash([bt.context_hash], 8)}:"
+                   f"{ra.READING_WORKFLOW_VERSION}:{gates.GATE_RULES_VERSION}")
+            # a 區塊 run redone under other gate rules keeps what the earlier run spent: the budget is never refilled
+            spent = repo.count_calls(bop.rsplit(":", 1)[0] + ":") - repo.count_calls(bop + ":")
+            budget = {**CallBudget.for_task("guide").to_dict(), "calls": spent} if spent > 0 else None
+            out = await invoke(reading_graph, guide_initial(bt, bop, command_id, budget, source_only=source_only),
+                               {"configurable": {"thread_id": bop}})
+            if source_only:
+                return out
+            entry = {**tg.block_entry(k, chunks[k], out, att), "by": tag}
+            if entry["status"] == "accepted":
+                repo.put_artifact(block_key(bt), kind="guide_block", status="accepted", payload=entry, session_id=sid,
+                                  unit_id=bt.unit_id)
+            else:
+                repo.put_artifact(f"{bop}:rejected", kind="guide", status="rejected", unit_id=bt.unit_id, session_id=sid,
+                                  payload={"draft": out.get("draft"), "findings": out.get("findings"), "error": out.get("error"),
+                                           "understanding": out.get("understanding"), "gate1": out.get("gate1"),
+                                           "bridges": out.get("bridges"), "symbol_evidence": out.get("symbol_evidence"),
+                                           "budget": out.get("budget")},
+                                  source_hash=bt.source_hash, context_hash=bt.context_hash,
+                                  prompt_version=bt.prompt_bundle_hash, model_config_hash=bt.model_config_hash,
+                                  workflow_version=ra.READING_WORKFLOW_VERSION)
+            return entry
+
+        results = await asyncio.gather(*(one(k) for k in range(len(chunks))), return_exceptions=True)
+        for x in results:
+            if isinstance(x, BaseException):
+                raise x
+        return overview, list(results)
+
+    async def guide_topic(state: WorkflowState, idx: int, q: dict) -> dict:
+        """The guide node for a 主題 with 區塊. A retry_blocks command re-runs only the 區塊 that failed."""
+        sid = state["session_id"]
+        rd = row(sid)["state"]["reading"]
+        existing = rd["guides"].get(str(idx))
+        retry = existing is not None and (state.get("pending_event") or {}).get("type") == "retry_blocks"
+        attempt = (state.get("guide_attempt") or {}).get(q["unit_id"], 1)
+        keep, attempts = {}, {}
+        if retry:
+            keep = {b["index"]: b for b in existing.get("blocks") or [] if b["status"] == "accepted"}
+            attempts = {b["index"]: b["attempt"] + 1 for b in existing.get("blocks") or [] if b["status"] != "accepted"}
+        task = guide_task(sid, idx, attempt)
+        op = f"{sid}:guide:{q['unit_id']}:a{attempt}:{ra.READING_WORKFLOW_VERSION}:{gates.GATE_RULES_VERSION}"
+        try:
+            overview, entries = await run_blocks(sid, task, q, "guide", state.get("pending_event_id"),
+                                                 attempts=attempts, keep=keep)
+        except ReadingUnavailable as e:
+            return {"error": model_error(e), "failed_node": "guide"}
+        art = {**tg.assemble(task, q, overview, entries), "backend": runtime(sid).backend.name,
+               "model": runtime(sid).backend.model}
+        if not any(b["status"] == "accepted" for b in entries):
+            first = next(b for b in entries if b["status"] != "accepted")
+            err = first.get("error") or {"code": "quality_check_failed", "detail": ""}
+            detail = "；".join(f"第 {b['index'] + 1} 塊：{(b.get('error') or {}).get('detail', '')}" for b in entries)[:600]
+            repo.put_artifact(f"{op}:rejected", kind="guide", status="rejected", unit_id=q["unit_id"], session_id=sid,
+                              payload={"error": err, "blocks": entries, "topic_summary": art["topic_summary"]},
+                              source_hash=task.source_hash, context_hash=task.context_hash,
+                              prompt_version=task.prompt_bundle_hash, model_config_hash=task.model_config_hash,
+                              workflow_version=ra.READING_WORKFLOW_VERSION)
+            return {"error": {"code": err["code"], "detail": detail, "retryable": True}, "failed_node": "guide",
+                    "guide_attempt": {**(state.get("guide_attempt") or {}), q["unit_id"]: attempt + 1}}
+
+        def mutate(c: dict, s: dict) -> None:
+            s["reading"]["guides"][str(idx)] = art
+            s["reading"]["presented"] = sorted(set(s["reading"].get("presented") or []) | {idx})   # shown ≠ read
+
+        key = f"{op}:accept" + (f":{state.get('pending_event_id')}" if retry else "")
+        repo.commit(sid, key, kind="guide", payload=art, mutate=mutate, unit_id=q["unit_id"],
+                    meta={"source_hash": task.source_hash, "context_hash": task.context_hash,
+                          "prompt_version": task.prompt_bundle_hash, "model_config_hash": task.model_config_hash,
+                          "workflow_version": ra.READING_WORKFLOW_VERSION})
+        faults.hit("after_commit:guide")
+        workspace(sid).write_guide(q, art)
+        return {"error": None, "failed_node": None}
+
     async def guide(state: WorkflowState, config: RunnableConfig) -> dict:
         sid = state["session_id"]
         r = row(sid)
         content, st = r["content_snapshot"], r["state"]
         rd = st["reading"]
-        if st.get("phase") != "reading" or rd["done"] or str(rd["index"]) in rd["guides"]:
+        retry_blocks = (state.get("pending_event") or {}).get("type") == "retry_blocks"
+        if st.get("phase") != "reading" or rd["done"] or (str(rd["index"]) in rd["guides"] and not retry_blocks):
             return {"error": None, "failed_node": None}
         stage(state, "guide")
         idx = rd["index"]
         q = content["quotes"][idx]
+        if tg.chunks_of(q):
+            return await guide_topic(state, idx, q)
         attempt = (state.get("guide_attempt") or {}).get(q["unit_id"], 1)
         task = guide_task(sid, idx, attempt)
         op = f"{sid}:guide:{q['unit_id']}:a{attempt}:{ra.READING_WORKFLOW_VERSION}:{gates.GATE_RULES_VERSION}"
@@ -675,7 +817,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         t = ev["type"]
         if t == "retry":
             return "ask"
-        return {"ask": "ask", "next": "advance", "finish": "finish", "guide": "finalize"}[t]
+        return {"ask": "ask", "next": "advance", "finish": "finish", "guide": "finalize", "retry_blocks": "guide"}[t]
 
     def from_retry(state: WorkflowState) -> str:
         if state["pending_event"]["type"] == "finish":
@@ -700,7 +842,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
     g.add_conditional_edges("prepare", blocked_or("guide"), ["guide", "finalize"])
     g.add_edge("guide", "finalize")
     g.add_conditional_edges("finalize", after_finalize, ["wait_student", "wait_retry", "wait_answer", END])
-    g.add_conditional_edges("wait_student", from_student, ["ask", "advance", "finish", "finalize"])
+    g.add_conditional_edges("wait_student", from_student, ["ask", "advance", "finish", "finalize", "guide"])
     g.add_conditional_edges("wait_retry", from_retry, ["prepare", "guide", "compact", "generate", "finish"])
     g.add_edge("wait_answer", "assess")
     g.add_edge("ask", "finalize")
@@ -724,6 +866,10 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             return "not_applicable"
         # the next unit's input once the current unit is read: the current guide counts as accepted
         task = guide_task(sid, nxt, 1, guides=rd["guides"], assume_read={rd["index"]})
+        q = content["quotes"][nxt]
+        if tg.chunks_of(q):   # 區塊 are cached one by one; the guide node finds the accepted ones
+            _, entries = await run_blocks(sid, task, q, "prefetch", "prefetch")
+            return "written" if all(b["status"] == "accepted" for b in entries) else                 "partial" if any(b["status"] == "accepted" for b in entries) else "failed"
         key = prefetch_key(task)
         if repo.get_artifact(key):
             return "cached"
@@ -752,6 +898,12 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
 
         async def one(i: int) -> str:
             task = guide_task(sid, i, 1, guides=rd["guides"])
+            q = content["quotes"][i]
+            if tg.chunks_of(q):   # the verified source is per 區塊
+                _, outs = await run_blocks(sid, task, q, "warm", "warm", source_only=True)
+                codes = {{"source_verified": "verified"}.get(o["status"], (o.get("error") or {}).get("code") or o["status"])
+                         for o in outs}
+                return codes.pop() if len(codes) == 1 else "mixed:" + ",".join(sorted(codes))
             key = f"{sid}:warm:{task.unit_id}:" + stable_hash([task.source_hash, task.prompt_bundle_hash,
                                                               task.model_config_hash, gates.GATE_RULES_VERSION])
             out = await invoke(reading_graph, guide_initial(task, key, "warm", source_only=True), {"configurable": {"thread_id": key}})

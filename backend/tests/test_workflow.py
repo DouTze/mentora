@@ -2,6 +2,7 @@
 fault window — business commit before checkpoint, resume before command completion, inside the reading subgraph,
 between planning windows."""
 import io
+import re
 import json
 import subprocess
 import sys
@@ -303,7 +304,8 @@ def test_restart_during_segmentation_and_guide_reuses_finished_work(tmp_path):
     proc(tmp_path, [{"op": "start"}, {"op": "wait"}], fault="after_commit:segment")
     out = proc(tmp_path, WAIT)
     assert out["segmentation"] == "done" and out["guides"] == ["0"] and out["commands"][f"start-{out['sid']}"] == "completed"
-    assert [n for n, _ in out["calls"]].count("segment.w01") == 1
+    names = [n for n, _ in out["calls"]]
+    assert names.count("segment.o01") == 1 and names.count("segment.t01") == 1   # outlines and topics not redone
 
 
 def test_restart_after_quiz_commit_and_after_assess_commit(tmp_path):
@@ -368,8 +370,10 @@ def test_a_question_after_prefetch_invalidates_the_cached_guide(graph_app, monke
     # the guide reflects the Q&A: either a fresh prefetch made after the question, or written on demand by n1
     calls = c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"]
     unit1 = s["reading"]["quotes"][1]["unit_id"]   # the runner may already be prefetching unit 3 by now: ignore it
-    prefetch_calls = [x for x in calls if x["command_id"] == "prefetch" and f":prefetch:{unit1}:" in x["operation_key"]]
-    assert len({x["operation_key"].split(":run")[0] for x in prefetch_calls}) == 2   # before / after the question
+    # a 主題 is prefetched one 區塊 at a time; each 區塊's operation key carries the reader's context
+    runs = {m.group(1) for x in calls if x["command_id"] == "prefetch"
+            for m in [re.search(rf":prefetch:{unit1}-b\d+:a\d+:(\w+):", x["operation_key"])] if m}
+    assert len(runs) == 2   # before / after the question
     assert g.get("prefetched") in (True, None)
 
 
@@ -518,3 +522,70 @@ def test_an_old_flow_record_can_be_deleted(client):
     answer(client, s["id"], "我不知道")
     assert client.delete(f"/api/sessions/{s['id']}").status_code == 200
     assert client.get(f"/api/sessions/{s['id']}").status_code == 404 and client.get("/api/sessions").json() == []
+
+
+# -- a 主題 written one 區塊 at a time (docs/reading-block-guide-plan.md) -----------------------------------
+
+TOPIC = ("# 光合作用\n\n"
+         "光合作用是植物利用光能，把二氧化碳和水轉換成葡萄糖與氧氣的過程，它發生在植物細胞的葉綠體中，是植物累積有機物的主要途徑。\n\n"
+         "光反應發生在類囊體膜上：葉綠素吸收光能後把水分解，釋放出氧氣，並產生 ATP 與 NADPH 供後面的反應使用，這一步把光能轉換成化學能儲存起來。\n\n"
+         "暗反應發生在葉綠體的基質中：它利用光反應產生的 ATP 與 NADPH，把二氧化碳固定成葡萄糖，這個循環稱為卡爾文循環。\n")
+
+
+def failing_draft_for(monkeypatch, marker):
+    """The simulated drafter writes nothing usable for the 區塊 that contains `marker`."""
+    real = MockBackend.generate
+
+    async def gen(self, messages, **kw):
+        m = kw.get("meta") or {}
+        if m.get("step") in ("draft", "revise_body") and marker in (m.get("quote_text") or ""):
+            kw = {**kw, "meta": {**m, "force_invalid_output": True}}
+        return await real(self, messages, **kw)
+
+    monkeypatch.setattr(MockBackend, "generate", gen)
+
+
+def test_a_topic_is_guided_one_block_at_a_time(graph_app):
+    c = graph_app
+    s = start(c, TOPIC)
+    q = s["reading"]["quotes"][0]
+    g = s["reading"]["guides"]["0"]
+    assert len(q["chunks"]) == 3 and g["mode"] == "blocks" and not g["partial"]
+    assert [b["status"] for b in g["blocks"]] == ["accepted"] * 3 and g["topic_summary"] and g["check"]
+    assert [b["source"][:4] for b in g["blocks"]] == ["光合作用", "光反應發", "暗反應發"]
+    ids = [c_["id"] for c_ in g["source_claims"]]
+    assert len(ids) == len(set(ids)) and {c_["block"] for c_ in g["source_claims"]} == {0, 1, 2}   # one numbering
+    assert g["guide"] == "\n\n".join(b["guide"] for b in g["blocks"])
+    calls = c.app_ref.state.repo.list_llm_calls(s["id"])   # with the requests (the trace API leaves them out)
+    drafts = [x for x in calls if x["node"] == "draft"]
+    assert len(drafts) == 3 and len([x for x in calls if x["node"] == "topic"]) == 1
+    second = next(x for x in drafts if "-b2:" in x["operation_key"])["request"]["messages"][0]["content"]
+    assert "▶ 第 2 塊" in second and "只寫第 2 塊原文裡的內容" in second and "暗反應發生在" not in second.split("## 這一段的原文")[1].split("##")[0]
+
+
+def test_a_failed_block_leaves_the_topic_readable_and_only_it_is_retried(graph_app, monkeypatch):
+    c = graph_app
+    failing_draft_for(monkeypatch, "暗反應")
+    s = start(c, TOPIC)
+    g = s["reading"]["guides"]["0"]
+    assert s["workflow"]["waiting"] == "student" and g["partial"]
+    assert [b["status"] for b in g["blocks"]] == ["accepted", "accepted", "failed"]
+    assert all(cl["block"] != 2 for cl in g["source_claims"])           # no claims from a 區塊 not shown as guided
+    monkeypatch.undo()
+    before = len(c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"])
+    s, cmd = run(c, s["id"], "retry_blocks", "rb1")
+    g = s["reading"]["guides"]["0"]
+    assert cmd["status"] == "completed" and not g["partial"] and [b["status"] for b in g["blocks"]] == ["accepted"] * 3
+    calls = c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"][before:]
+    assert calls and all("-b3:" in x["operation_key"] for x in calls if x["task"] == "guide")   # only the failed 區塊
+    assert g["blocks"][2]["attempt"] == 2
+    r = c.post(f"/api/sessions/{s['id']}/events", json={"command_id": "rb2", "type": "retry_blocks"})
+    assert r.status_code == 409 and r.json()["code"] == "not_ready"                            # nothing left to retry
+
+
+def test_a_topic_whose_blocks_all_fail_waits_for_retry(graph_app, monkeypatch):
+    c = graph_app
+    failing_draft_for(monkeypatch, "")                                    # every 區塊
+    s = start(c, TOPIC)
+    assert s["workflow"]["waiting"] == "retry" and "0" not in s["reading"]["guides"]
+    assert "第 1 塊" in s["workflow"]["error"]["detail"] and s["workflow"]["error"]["retryable"]

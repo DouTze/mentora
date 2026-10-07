@@ -42,12 +42,15 @@ class Scripted(LLMBackend):
         return LLMResult(text=out if isinstance(out, str) else json.dumps(out), latency_ms=1)
 
 
-def deps_for(backend):
+def deps_for(backend, outline: bool = False):
+    """Planner deps over the current prompt bundle. Without `outline` the bundle lacks segment_outline, like a
+    session pinned to a snapshot from before units-v9: the buffer planner (segment_blocks …) is what is tested."""
     rt = ModelRuntime(ModelSnapshot("mock", "", "", "", "", 0.2, 512, 8192), BackendPool(build=lambda c: backend))
     sink = ListSink()
     b = load_bundle()
+    prompts = b["prompts"] if outline else {k: v for k, v in b["prompts"].items() if k != "segment_outline"}
     return seg.PlannerDeps(make_ctx=lambda task, key: TaskContext(rt, CallBudget.for_task(task), sink),
-                           prompts=b["prompts"], prompt_version=b["hash"], material_title="t"), sink
+                           prompts=prompts, prompt_version=b["hash"], material_title="t"), sink
 
 
 # -- blocks ---------------------------------------------------------------------------
@@ -602,3 +605,84 @@ async def test_a_new_topic_after_a_heading_starts_at_the_heading():
     deps, _ = deps_for(b)
     plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
     assert groups_of(plan, blocks)[:2] == [list(range(head)), list(range(head, nxt))]
+
+
+# -- units-v9: 區塊 outlines decide the units ------------------------------------------------------
+
+def outline(*topics):
+    return {"paragraphs": [{"topic": t, "aspect": f"第 {k} 段", "summary": f"摘要 {k}"} for k, t in enumerate(topics, 1)]}
+
+
+def paragraphs(n):
+    """n plain paragraphs (no headings), each long enough to be its own 區塊."""
+    lines = []
+    for k in range(1, n + 1):
+        lines += [f"第{k}段：" + "這一段說明某個概念的一個面向，句子寫得夠長，可以自己成為一個區塊。" * 2, ""]
+    return extract_blocks("m", "line", 1, len(lines), lines)[1]
+
+
+def test_chunks_are_paragraphs_a_heading_stays_with_its_first_paragraph():
+    blocks = overview_then_item()
+    chunks = seg.make_chunks(blocks)
+    texts = [[blocks[i].text[:6] for i in c] for c in chunks]
+    assert texts == [["技術演進脈絡", "自然語言處理"], ["第一階段的規"], ["下一節", "下一節的內容"]]
+    lead = extract_blocks("m", "line", 1, 4, ["以下是概覽：", "", "自然語言處理的發展可以分成四個技術階段，每個階段都改變了模型設計的思維。" * 2])[1]
+    assert seg.make_chunks(lead) == [[0, 1]]                       # a one-line lead-in joins the paragraph after it
+
+
+async def test_units_are_decided_from_chunk_outlines_and_carry_their_chunks():
+    blocks = overview_then_item()
+    b = Scripted([outline("技術演進總覽", "規則式方法", "下一節"), {"new_topic_at": [2, 3]}])
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert [r["meta"]["step"] for r in b.requests] == ["segment_outline", "segment_topic"]
+    listing = b.requests[0]["messages"][0]["content"]
+    assert "【P1】\n技術演進脈絡" in listing and "【P3】\n下一節" in listing
+    decide = b.requests[1]["messages"][0]["content"]
+    assert "P2：大主題「規則式方法」｜第 2 段" in decide and "專家手寫" not in decide       # outlines only, never source
+    assert [u.boundary_reason for u in plan.units] == ["技術演進總覽", "規則式方法", "下一節"]
+    assert [[c.summary for c in u.chunks] for u in plan.units] == [["摘要 1"], ["摘要 2"], ["摘要 3"]]
+    by_id = {x.block_id: x for x in blocks}
+    quotes = seg.to_quotes("line", plan, by_id)
+    assert [len(q["chunks"]) for q in quotes] == [1, 1, 1] and quotes[1]["chunks"][0]["text"].startswith("第一階段")
+    assert quotes[1]["chunks"][0]["topic"] == "規則式方法"
+
+
+async def test_an_invalid_outline_or_decision_falls_back_without_losing_text():
+    blocks = overview_then_item()
+    b = Scripted([outline("只有一個"), outline("只有一個"), {"new_topic_at": []}])     # wrong count twice
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert any("區塊摘要無效" in w for w in plan.warnings)
+    assert sum(len(u.block_ids) for u in plan.units) == len(blocks)
+    assert plan.units[0].chunks[0].summary.startswith("技術演進脈絡")        # the opening words stand in
+
+    b = Scripted([outline("總覽", "規則式方法", "規則式方法"), "不是 JSON", "還是不是"])  # decision fails twice
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert any("主題判斷無效" in w for w in plan.warnings)
+    assert [len(u.chunks) for u in plan.units] == [1, 2]                     # cut where the topic wording changes
+
+
+async def test_the_last_topic_of_a_batch_is_judged_again_with_the_next(monkeypatch):
+    monkeypatch.setattr(seg, "TOPIC_BATCH", 3)
+    blocks = paragraphs(6)
+    b = Scripted([outline("A", "A", "B", "B", "B", "C"), {"new_topic_at": [3]}, {"new_topic_at": []}, {"new_topic_at": [2]}])
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    decides = [r["messages"][0]["content"] for r in b.requests[1:]]
+    assert "P1：大主題「B」" in decides[1]            # the second batch opens at the topic that may continue
+    assert "P1：大主題「B」" in decides[2] and "P2：大主題「C」" in decides[2]   # no change seen: overlap one 區塊
+    assert [len(u.chunks) for u in plan.units] == [2, 3, 1]
+
+
+async def test_a_unit_from_outlines_has_no_size_limit(monkeypatch):
+    """Units from 區塊 outlines are where topics change, nothing else: a long topic stays one unit (its guide is
+    written one 區塊 at a time). The buffer planner's size limit used to send such a plan back to the rules."""
+    monkeypatch.setattr(seg, "UNIT_MAX_TOKENS", 50)
+    blocks = paragraphs(4)
+    b = Scripted([outline("A", "A", "A", "A"), {"new_topic_at": []}])
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert plan.planner == "model" and len(plan.units) == 1 and len(plan.units[0].chunks) == 4
+    assert not any("規則切法" in w for w in plan.warnings)

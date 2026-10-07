@@ -26,6 +26,11 @@ def _workflow_lines(view: dict) -> list[str]:
     return lines
 
 
+def excerpt_line(text: str, n: int = 60) -> str:
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
 def _check_line(g: dict) -> str:
     """Which check produced a guide: reading-graph-v2 has a source gate and a body gate; v1 only a review."""
     warn = "、".join(sorted({w["code"] for w in g.get("warnings") or []}))
@@ -65,7 +70,22 @@ def to_markdown(view: dict) -> str:
             lines.append(f"### {q['index'] + 1}. {q['label']}" + (f" · {q['heading']}" if q.get("heading") else ""))
             lines.append(f"> {q['excerpt']}")
             lines.append("")
-            if g:
+            if g and g.get("blocks"):   # a 主題 written one 區塊 at a time: each source 區塊 with its guide
+                if g.get("topic_summary"):
+                    lines += [f"_主題概要：{g['topic_summary']}_", ""]
+                for b in g["blocks"]:
+                    lines += [f"> （第 {b['index'] + 1} 塊）{excerpt_line(b['source'])}", ""]
+                    if b["status"] != "accepted":
+                        lines += ["_（這部分的導讀沒有通過檢查，只有原文）_", ""]
+                        continue
+                    if b.get("chinese_text"):
+                        lines += ["**中文課文**", "", b["chinese_text"], ""]
+                    lines += [b["guide"], ""]
+                if g.get("check"):
+                    lines += [f"**讀完想一想**：{g['check']}", ""]
+                if g.get("review_status"):
+                    lines += [_check_line(g), ""]
+            elif g:
                 if g.get("chinese_text"):
                     lines += ["**中文課文**", "", g["chinese_text"], ""]
                 lines += [g["guide"], ""]

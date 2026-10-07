@@ -171,3 +171,18 @@ def test_a_merged_quotation_counts_only_when_every_piece_is_in_the_guide():
     assert ra.expand_quote(guide, invented) == ""                      # one piece is not in the guide
     hidden = "在均衡價格下，不，消費者想買的數量恰好等於生產者想賣的數量"
     assert ra.expand_quote(guide, hidden) == ""                        # a short inserted piece is checked too
+
+
+def test_an_english_source_pasted_into_the_guide_is_a_program_fact():
+    """qwen3-vl:4b pasted a whole English 區塊 as its guide (and another time pasted it before its own Chinese
+    explanation); the audit found every claim covered by the quoted English. A source sentence in the guide as is
+    is a fact, whatever the audit says; English terms and formulas inside Chinese prose are not."""
+    from app.reading.gates import copied_source
+    src = ("We introduce key elements of the problem's mathematical structure, such as returns, value functions, and "
+           "Bellman equations. Whereas in bandit problems we estimated the value $q_*(a)$ of each action $a$, in MDPs we "
+           "estimate the value of each action in each state.")
+    pasted = copied_source(src, src + "\n\n我們介紹此問題的數學結構。")
+    assert [f.code for f in pasted] == ["source_copied"] and pasted[0].severity == "major" and "2 句" in pasted[0].detail
+    zh = "我們介紹此問題數學結構的關鍵元素，例如回報、價值函數與貝爾曼方程（Bellman equations），以及 $q_*(a)$。"
+    assert copied_source(src, zh) == []
+    assert copied_source("這是中文原文，照抄也不是這項檢查的範圍。", "這是中文原文，照抄也不是這項檢查的範圍。") == []

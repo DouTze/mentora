@@ -323,7 +323,9 @@ def transcription_against_clues(tr, clues: dict) -> list[str]:
         if len(t) == 1 and t.isalpha() and any(x.symbol == t and x.style == "bold" for x in tr.symbols):
             problems.append(f"字型顯示 {t} 為斜體，但轉寫標成粗體")
     for t in clues.get("superscripts") or []:
-        if t.strip() and not re.search(r"\^\s*\{?\s*" + re.escape(t.strip()), text):
+        # a raised number is most often a footnote mark in prose ("…decision processes¹"), which no formula carries;
+        # only a raised letter or symbol must show up as a superscript in the transcription
+        if t.strip() and not t.strip().isdigit() and not re.search(r"\^\s*\{?\s*" + re.escape(t.strip()), text):
             problems.append(f"字型顯示 {t} 是上標，但轉寫沒有寫成上標")
     return problems
 
@@ -757,7 +759,35 @@ def gate2_program(source: str, guide: str, claims: list[SourceClaim], bridges: B
                                      draft_excerpt=body[:80],
                                      detail=f"「補充說明」的內容不屬於任何核准的教學橋梁：{body[:60]}",
                                      suggested_fix="刪除這段「補充說明」；只有核准橋梁的內容可以放進正文"))
+    fs += copied_source(source, guide)
     return fs
+
+
+COPIED_MIN_LETTERS = 30   # a source sentence with at least this many letters, found as is in the guide, was pasted
+
+
+def copied_source(source: str, guide: str) -> list[ra.Finding]:
+    """The 主要正文 of a non-Chinese source is written in Chinese. A small model often pastes the English source
+    into it (a whole 區塊, or before its own explanation); the audit then finds every claim "covered" by the quoted
+    English sentences. A source sentence found word for word in the guide is a program fact, whatever the audit
+    says. Formulas are not counted (they are copied on purpose)."""
+    if is_chinese(source):
+        return []
+    g = re.sub(r"\s+", " ", _strip_formulas(guide or "")).lower()
+    pasted = []
+    for _, s in source_segments(source):
+        t = re.sub(r"\s+", " ", _strip_formulas(s)).strip().lower()
+        if len(re.findall(r"[a-z]", t)) >= COPIED_MIN_LETTERS and t.rstrip(".;:!?") in g:
+            pasted.append(s.strip())
+    if not pasted:
+        return []
+    return [ra.Finding(code="source_copied", severity="major", origin="program", draft_excerpt=pasted[0][:80],
+                       detail=f"主要正文照抄了 {len(pasted)} 句英文原文（例如「{pasted[0][:60]}」），必須用繁體中文寫",
+                       suggested_fix="刪除照抄的英文原文，改用繁體中文完整寫出這些內容")]
+
+
+def _strip_formulas(text: str) -> str:
+    return re.sub(r"\$\$.+?\$\$|\$[^$\n]+\$|`[^`\n]+`", " ", text or "", flags=re.S)
 
 
 def verbatim_covered(c: SourceClaim, guide: str, source: str) -> bool:

@@ -23,7 +23,7 @@ GUIDE_MAX_TOKENS = 2048
 GUIDE_CONTEXT_TOKENS = 8192
 SUPPLEMENT_CONTEXT_TOKENS = 12288
 
-MAJOR = {"wrong_formula", "missing_condition", "unsupported_claim", "missing_key_claim", "meaning_changed",
+MAJOR = {"wrong_formula", "source_copied", "missing_condition", "unsupported_claim", "missing_key_claim", "meaning_changed",
          "followed_injection", "broken_math", "missing_chinese_text", "empty_guide", "formula_not_verbatim",
          "depends_on_chinese_text", "redirect_to_source", "process_leak", "review_failed_check",
          "coverage_unconfirmed", "bridge_missing", "bridge_incorrect", "unapproved_supplement", "incoherent",
@@ -59,6 +59,9 @@ class ReadingTaskInput(BaseModel):
     source_kind: str = "md"                      # md | txt | pdf (decides what counts as symbol evidence)
     depends_on_prev: bool = False                # a protected relation (argument, example …) continues from the previous unit
     symbol_evidence: dict | None = None          # R5: page / region / font evidence of this unit, if any
+    # a 區塊 of a 主題 (docs/reading-block-guide-plan.md): {"summary": 主題總摘要, "chunks": [{"topic", "aspect",
+    # "summary"} …], "index": this 區塊}. Scope and context for teaching only — never content, never checked against
+    topic: dict | None = None
 
     @property
     def source_hash(self) -> str:
@@ -68,7 +71,7 @@ class ReadingTaskInput(BaseModel):
     def context_hash(self) -> str:
         """Everything about the reader the guide depends on (the verified source does not depend on it)."""
         return stable_hash([self.prev_points, [(q.get("question"), q.get("answer")) for q in self.qa_context],
-                            self.learning.hash])
+                            self.learning.hash] + ([self.topic] if self.topic else []))
 
 
 class TeachingPlan(BaseModel):

@@ -13,7 +13,7 @@ import uuid
 
 from ..llm.runtime import stable_hash
 
-EVENT_TYPES = ("guide", "ask", "next", "finish", "answer", "retry")
+EVENT_TYPES = ("guide", "ask", "next", "finish", "answer", "retry", "retry_blocks")
 MAX_TEXT = 4000
 
 
@@ -66,6 +66,11 @@ def validate(row: dict, type_: str, unit_id: str | None, question_id: str | None
     if type_ == "guide":
         if waiting != "student":
             raise CommandError("not_ready", "導讀還在準備中。")
+        return {}
+    if type_ == "retry_blocks":   # a 主題 shown with some 區塊 that did not pass: write those again
+        g = st["reading"]["guides"].get(str(st["reading"]["index"])) if shown else None
+        if waiting != "student" or not g or not g.get("partial"):
+            raise CommandError("not_ready", "這一段沒有需要重試的區塊。")
         return {}
     if type_ == "ask":
         if waiting != "student" or not shown:
