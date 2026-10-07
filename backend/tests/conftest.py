@@ -1,4 +1,10 @@
 import os
+import tempfile
+
+# the home-page shelf must never walk the real home directory or read the real data dir during tests
+os.environ["MENTOR_SHELF_WARMUP"] = "0"
+os.environ["MENTOR_SHELF_ROOTS"] = ""
+os.environ["MENTOR_SHELF_DIR"] = tempfile.mkdtemp(prefix="mentor-shelf-")
 
 import pytest
 from fastapi.testclient import TestClient

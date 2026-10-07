@@ -1,6 +1,7 @@
 """FastAPI entry point. Run: uvicorn app.main:app --reload"""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,8 +16,9 @@ from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
 from .llm import remote
 from .models import (AnswerRequest, AskRequest, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
-                     RemoteEndpointRequest, StartSessionRequest)
+                     RemoteEndpointRequest, ShelfImport, ShelfQuery, StartSessionRequest)
 from .persistence.repository import Repository
+from .shelf.service import ShelfService
 from .tutor.session import SessionError, TutorService
 from .workflows.commands import CommandError
 from .workflows.learning_graph import WorkflowDeps
@@ -30,7 +32,7 @@ def checkpoint_path(db: Database) -> str:
     return ":memory:" if db.path == ":memory:" else str(Path(db.path).with_name("checkpoints.sqlite3"))
 
 
-def create_app(db: Database | None = None, registry: Registry | None = None) -> FastAPI:
+def create_app(db: Database | None = None, registry: Registry | None = None, shelf: ShelfService | None = None) -> FastAPI:
     db = db or Database()
     registry = registry or Registry()
     remote.configure(db)
@@ -44,20 +46,27 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     runner = WorkflowRunner(WorkflowDeps(db=db, repo=repo, pool=pool, svc=svc), checkpoint_path(db))
     workflow = WorkflowService(svc, repo, pool, runner)
     svc.workflow = workflow
+    shelf = shelf or ShelfService(db, registry, pool, materials, config.SHELF_DIR)
 
     @asynccontextmanager
     async def lifespan(_app):
         # The runner owns LangGraph sessions: recover their pending commands now, stop cleanly on shutdown.
         await runner.start()
+        # index the disk and prepare the shelf before the home page asks for it
+        warm = asyncio.create_task(shelf.warmup()) if config.SHELF_WARMUP else None
         try:
             yield
         finally:
+            for t in (warm, shelf.task):
+                if t and not t.done():
+                    t.cancel()
             await runner.stop()
 
     app = FastAPI(title="Mentor prototype", version="0.1.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     app.state.db, app.state.registry, app.state.svc = db, registry, svc
     app.state.repo, app.state.runner, app.state.workflow = repo, runner, workflow
+    app.state.shelf = shelf
 
     @app.exception_handler(SessionError)
     async def _session_error(_, e: SessionError):
@@ -149,6 +158,31 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
         return FileResponse(path, media_type=media, content_disposition_type="inline", filename=m["filename"])
 
     # -- model settings -----------------------------------------------------
+    # -- home-page bookshelf ----------------------------------------------------
+    @app.get("/api/shelf")
+    def shelf_view():
+        return shelf.view()
+
+    @app.get("/api/shelf/search")
+    def shelf_search(q: str = Query("", max_length=200)):
+        return {"books": shelf.quick(q)}
+
+    @app.post("/api/shelf/query")
+    async def shelf_query(req: ShelfQuery):
+        shelf.start(req.text.strip() or None)
+        return await asyncio.to_thread(shelf.view)
+
+    @app.get("/api/shelf/{eid}/cover")
+    def shelf_cover(eid: str):
+        path = shelf.cover(eid)
+        if not path:
+            raise HTTPException(404)
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+    @app.post("/api/shelf/import")
+    def shelf_import(req: ShelfImport):
+        return shelf.import_books(req.ids, req.category_name)
+
     @app.get("/api/settings")
     async def get_settings():
         return {"config": registry.cfg.model_dump(), "active": registry.backend.describe(), "remote": remote.public()}
