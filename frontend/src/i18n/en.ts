@@ -220,6 +220,7 @@ export const en: Dict = {
   "reading.topic.summary": "In this section: ",
   "reading.block.label": "Original · part {n} of {total}",
   "reading.block.failed": "The guided reading for this part didn't pass its checks and isn't shown yet. You can read the original above.",
+  "reading.block.retried": "It was regenerated automatically ({n} attempts in all).",
   "reading.block.retry": "Regenerate the parts that didn't pass",
   "reading.unverified.summary": "{n} spots in this guided reading couldn't be checked automatically; compare with the original",
   "reading.unverified.coverage": "Couldn't confirm the guided reading matches “{source}” in the original",

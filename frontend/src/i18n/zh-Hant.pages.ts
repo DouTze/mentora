@@ -144,6 +144,7 @@ export const pages = {
   "reading.topic.summary": "這一段在講：",
   "reading.block.label": "原文・第 {n}/{total} 塊",
   "reading.block.failed": "這部分的導讀沒有通過檢查，暫時不顯示；可以先讀上面的原文。",
+  "reading.block.retried": "已自動重新產生，共試了 {n} 次。",
   "reading.block.retry": "重新產生沒通過的部分",
   "reading.unverified.summary": "這段導讀有 {n} 處沒能自動核對，建議對照原文閱讀",
   "reading.unverified.coverage": "原文「{source}」在導讀中的寫法沒能自動確認一致",

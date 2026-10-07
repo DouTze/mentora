@@ -86,7 +86,7 @@ describe("a topic guided one block at a time", () => {
     const blocks = [
       { index: 0, source: "梯度是函數增加最快的方向。", status: "accepted" as const, guide: "梯度指出函數上升最快的方向。" },
       failedSecond
-        ? { index: 1, source: "沿負梯度更新參數可以降低損失。", status: "failed" as const, guide: "" }
+        ? { index: 1, source: "沿負梯度更新參數可以降低損失。", status: "failed" as const, guide: "", attempt: 3 }
         : { index: 1, source: "沿負梯度更新參數可以降低損失。", heading: "更新規則", status: "accepted" as const, guide: "往負梯度走一小步，損失就會下降。" },
     ];
     const guide = { chinese_text: null, guide: "", key_points: [], check: "為什麼要往負梯度走？", mode: "blocks" as const,
@@ -112,6 +112,7 @@ describe("a topic guided one block at a time", () => {
     render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
     const failed = await screen.findByTestId("block-failed");
     expect(failed).toHaveTextContent("沒有通過檢查");
+    expect(failed).toHaveTextContent("共試了 3 次");
     expect(screen.getAllByTestId("block")[1]).toHaveTextContent("沿負梯度更新參數可以降低損失");
     expect(screen.getAllByTestId("block-guide")).toHaveLength(1);
     expect(screen.getByTestId("retry-blocks")).toHaveTextContent("重新產生沒通過的部分");

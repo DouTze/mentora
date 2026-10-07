@@ -29,6 +29,25 @@ def fallback_overview(chunks: list[dict]) -> dict:
             "by": "program"}
 
 
+# failures a new run of the same 區塊 cannot fix: the model cannot take the input, the context it needs is missing,
+# or (notation) there is no evidence / no model that can look at the page
+NO_RETRY = {"context_overflow", "context_missing", "model_unavailable"}
+
+
+def worth_retrying(error: dict | None) -> bool:
+    """A failed 區塊 is run again when another sample of the model can pass: a guide that did not pass its checks,
+    an invalid output, a source understanding that did not hold up, a vision reading that disagreed with the font
+    clues. Not when the input itself is the problem."""
+    if not error:
+        return True
+    code, detail = error.get("code") or "", error.get("detail") or ""
+    if code in NO_RETRY:
+        return False
+    if code == "notation_unverified":   # retry a disputed reading, not a missing page or a text-only model
+        return "不一致" in detail
+    return True
+
+
 def block_task(task: ReadingTaskInput, q: dict, k: int, overview: dict, evidence: dict | None) -> ReadingTaskInput:
     """The guide input of 區塊 k: its own text and source blocks (so checks, formulas and the verified-source cache
     are per 區塊), the 主題's position and reader state, and where it sits in the 主題."""

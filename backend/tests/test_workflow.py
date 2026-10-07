@@ -571,6 +571,8 @@ def test_a_failed_block_leaves_the_topic_readable_and_only_it_is_retried(graph_a
     assert s["workflow"]["waiting"] == "student" and g["partial"]
     assert [b["status"] for b in g["blocks"]] == ["accepted", "accepted", "failed"]
     assert all(cl["block"] != 2 for cl in g["source_claims"])           # no claims from a 區塊 not shown as guided
+    n = config.READING_BLOCK_ATTEMPTS                                    # retried automatically before giving up
+    assert g["blocks"][2]["attempt"] == n and len(g["blocks"][2]["failed_attempts"]) == n - 1
     monkeypatch.undo()
     before = len(c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"])
     s, cmd = run(c, s["id"], "retry_blocks", "rb1")
@@ -578,7 +580,7 @@ def test_a_failed_block_leaves_the_topic_readable_and_only_it_is_retried(graph_a
     assert cmd["status"] == "completed" and not g["partial"] and [b["status"] for b in g["blocks"]] == ["accepted"] * 3
     calls = c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"][before:]
     assert calls and all("-b3:" in x["operation_key"] for x in calls if x["task"] == "guide")   # only the failed 區塊
-    assert g["blocks"][2]["attempt"] == 2
+    assert g["blocks"][2]["attempt"] == config.READING_BLOCK_ATTEMPTS + 1   # after the automatic attempts
     r = c.post(f"/api/sessions/{s['id']}/events", json={"command_id": "rb2", "type": "retry_blocks"})
     assert r.status_code == 409 and r.json()["code"] == "not_ready"                            # nothing left to retry
 
@@ -589,3 +591,33 @@ def test_a_topic_whose_blocks_all_fail_waits_for_retry(graph_app, monkeypatch):
     s = start(c, TOPIC)
     assert s["workflow"]["waiting"] == "retry" and "0" not in s["reading"]["guides"]
     assert "第 1 塊" in s["workflow"]["error"]["detail"] and s["workflow"]["error"]["retryable"]
+
+
+def test_a_block_that_fails_once_is_written_again_automatically(graph_app, monkeypatch):
+    real = MockBackend.generate
+    seen = {"draft": 0}
+
+    async def gen(self, messages, **kw):
+        m = kw.get("meta") or {}
+        if m.get("step") in ("draft", "revise_body") and "暗反應" in (m.get("quote_text") or ""):
+            seen["draft"] += 1
+            if seen["draft"] <= 2:                                       # the first attempt's draft and its format fix
+                kw = {**kw, "meta": {**m, "force_invalid_output": True}}
+        return await real(self, messages, **kw)
+
+    monkeypatch.setattr(MockBackend, "generate", gen)
+    s = start(graph_app, TOPIC)
+    g = s["reading"]["guides"]["0"]
+    assert not g["partial"] and [b["status"] for b in g["blocks"]] == ["accepted"] * 3
+    b = g["blocks"][2]
+    assert b["attempt"] == 2 and [f["code"] for f in b["failed_attempts"]] == ["invalid_model_output"]
+
+
+def test_only_failures_a_new_run_can_fix_are_retried():
+    from app.reading.topic_guide import worth_retrying
+    assert worth_retrying({"code": "quality_check_failed", "detail": "主要正文照抄了 2 句英文原文"})
+    assert worth_retrying({"code": "invalid_model_output", "detail": "draft: JSON 解析失敗"})
+    assert worth_retrying({"code": "notation_unverified", "detail": "PDF 符號的視覺判讀與字型線索不一致：…"})
+    assert not worth_retrying({"code": "notation_unverified", "detail": "目前的模型不支援影像輸入，無法看圖核對"})
+    assert not worth_retrying({"code": "context_overflow", "detail": "輸入約 40000 tokens"})
+    assert not worth_retrying({"code": "context_missing", "detail": "前後文讀取失敗"})
