@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useT, type Key } from "../i18n";
 import { api, RequestError } from "../api";
 import type { Category, Library, Material } from "../types";
@@ -9,8 +9,72 @@ import { Icon, KindTag } from "./Icons";
 
 const ACCEPT = ".pdf,.md,.markdown,.txt";
 const UNSORTED = "__unsorted__";
-const DRAG_TYPE = "application/x-mentor-material";
-const DRAG_CATEGORY = "application/x-mentor-category";
+
+/** What is being dragged inside the sidebar: a material (to another category) or a category (to another place). */
+type Dragged = { kind: "material" | "category"; id: string; label: string; tag?: string };
+type DropSpot = { key: string; categoryId: string | null };
+
+/**
+ * Dragging inside the sidebar, done with pointer events instead of HTML5 drag and drop: the cursor turns into a
+ * grabbing hand the moment the button is pressed and stays so for the whole drag (a native drag shows the system's
+ * own cursor), a small label follows the pointer, and nothing depends on the web view's file-drop handling.
+ * A press that does not move more than a few pixels stays a click.
+ */
+function useSidebarDrag(onDrop: (d: Dragged, spot: DropSpot) => void) {
+  const [ghost, setGhost] = useState<{ d: Dragged; x: number; y: number } | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const dragged = useRef(false);
+  const drop = useRef(onDrop);
+  drop.current = onDrop;
+
+  const start = (d: Dragged) => (e: ReactPointerEvent) => {
+    if (e.button !== 0 || e.pointerType === "touch") return;
+    const x0 = e.clientX, y0 = e.clientY;
+    let moving = false;
+    let spot: DropSpot | null = null;
+    const root = document.documentElement;
+    root.classList.add("grabbing");
+    const find = (x: number, y: number): DropSpot | null => {
+      const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-drop-key]");
+      if (!el) return null;
+      const s = { key: el.dataset.dropKey!, categoryId: el.dataset.dropCategory || null };
+      return d.kind === "category" && !s.categoryId ? null : s;   // a category goes among categories only
+    };
+    const move = (ev: PointerEvent) => {
+      if (!moving && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
+      moving = true;
+      spot = find(ev.clientX, ev.clientY);
+      setGhost({ d, x: ev.clientX, y: ev.clientY });
+      setOver(spot?.key ?? null);
+    };
+    const finish = (commit: boolean) => {
+      root.classList.remove("grabbing");
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      document.removeEventListener("keydown", key);
+      setGhost(null);
+      setOver(null);
+      if (moving) {
+        dragged.current = true;   // the click that follows the release is not a click
+        setTimeout(() => (dragged.current = false), 0);
+        if (commit && spot) drop.current(d, spot);
+      }
+    };
+    const up = () => finish(true);
+    const key = (ev: KeyboardEvent) => ev.key === "Escape" && finish(false);
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+    document.addEventListener("keydown", key);
+  };
+
+  const swallowClick = (e: ReactMouseEvent) => {
+    if (dragged.current) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+  return { ghost, over, start, swallowClick };
+}
 
 interface Props {
   library: Library;
@@ -77,15 +141,29 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
     if (target) moveCategory(id, target);
   };
 
+  const drag = useSidebarDrag((d, spot) => {
+    if (d.kind === "category") {
+      if (spot.categoryId && spot.categoryId !== d.id) moveCategory(d.id, spot.categoryId);
+      return;
+    }
+    const m = library.materials.find((x) => x.id === d.id);
+    if (m && (m.category_id ?? null) !== spot.categoryId) {
+      run(() => api.updateMaterial(d.id, { category_id: spot.categoryId }));
+      if (spot.categoryId) setFolded(folded.filter((id) => id !== spot.categoryId));
+    }
+  });
+
   const toggleFold = (id: string) => setFolded(folded.includes(id) ? folded.filter((x) => x !== id) : [...folded, id]);
 
-  // A category row accepts a material dragged from the tree (move it here), files dragged from the desktop (import)
-  // and another category (put that category in this one's place).
+  // Files dragged in from the desktop are imported into the category they are dropped on (HTML5 drop: the web view
+  // hands the files to the page). Materials and categories move with the pointer drag above.
   const dropProps = (key: string, categoryId: string | null) => ({
+    "data-drop-key": key,
+    "data-drop-category": categoryId ?? "",
     onDragOver: (e: DragEvent) => {
-      const types = e.dataTransfer.types;
-      if (types.includes(DRAG_TYPE) || types.includes("Files") || (categoryId && types.includes(DRAG_CATEGORY))) {
+      if (e.dataTransfer.types.includes("Files")) {
         e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
         setDropTarget(key);
       }
     },
@@ -93,14 +171,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
     onDrop: (e: DragEvent) => {
       e.preventDefault();
       setDropTarget(null);
-      const draggedCategory = e.dataTransfer.getData(DRAG_CATEGORY);
-      if (draggedCategory) {
-        if (categoryId) moveCategory(draggedCategory, categoryId);
-        return;
-      }
-      const materialId = e.dataTransfer.getData(DRAG_TYPE);
-      if (materialId) run(() => api.updateMaterial(materialId, { category_id: categoryId }));
-      else importFiles([...e.dataTransfer.files], categoryId);
+      importFiles([...e.dataTransfer.files], categoryId);
     },
   });
 
@@ -127,7 +198,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
   ];
 
   return (
-    <aside className="sidebar" aria-label={t("nav.label")}>
+    <aside className="sidebar" aria-label={t("nav.label")} onClickCapture={drag.swallowClick}>
       <div className="side-head">
         <span className="brand">Mentor</span>
         <button className="icon-btn" onClick={onToggle} aria-label={t("side.collapse")} title={t("side.collapse")}>
@@ -181,7 +252,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
           if (!category && items.length === 0 && library.categories.length > 0) return null;
           const open = !folded.includes(key);
           return (
-            <div key={key} className={`group ${dropTarget === key ? "drop" : ""}`} {...dropProps(key, category?.id ?? null)}>
+            <div key={key} className={`group ${dropTarget === key || drag.over === key ? "drop" : ""}`} {...dropProps(key, category?.id ?? null)}>
               <CategoryRow
                 name={category?.name ?? t("side.unsorted")}
                 count={items.length}
@@ -192,7 +263,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
                 onDelete={category ? () => run(() => api.deleteCategory(category.id)) : undefined}
                 onMove={category ? (step) => nudgeCategory(category.id, step) : undefined}
                 canMove={category ? [library.categories[0]?.id !== category.id, library.categories.at(-1)?.id !== category.id] : [false, false]}
-                dragId={category?.id}
+                onDragStart={category ? drag.start({ kind: "category", id: category.id, label: category.name }) : undefined}
               />
               {open &&
                 (items.length === 0 ? (
@@ -202,8 +273,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
                     <button
                       key={m.id}
                       className={`side-item leaf ${route.page === "material" && route.id === m.id ? "active" : ""}`}
-                      draggable
-                      onDragStart={(e) => e.dataTransfer.setData(DRAG_TYPE, m.id)}
+                      onPointerDown={drag.start({ kind: "material", id: m.id, label: m.title, tag: m.kind })}
                       onClick={() => onNavigate({ page: "material", id: m.id })}
                       title={m.filename}
                     >
@@ -216,6 +286,13 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
           );
         })}
       </div>
+
+      {drag.ghost && (
+        <div className="drag-ghost" style={{ left: drag.ghost.x + 14, top: drag.ghost.y + 10 }} aria-hidden="true">
+          {drag.ghost.d.tag && <KindTag kind={drag.ghost.d.tag} />}
+          <span>{drag.ghost.d.label}</span>
+        </div>
+      )}
 
       <div className="side-foot">
         <CompanionDock companion={companion} conn={conn} compact={false} onOpenSettings={onOpenSettings} />
@@ -230,7 +307,7 @@ const NAV: { page: "home" | "learn" | "history"; label: Key; icon: ReactNode }[]
   { page: "history", label: "nav.history", icon: <Icon.history /> },
 ];
 
-function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete, onMove, canMove, dragId }: {
+function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete, onMove, canMove, onDragStart }: {
   name: string;
   count: number;
   open: boolean;
@@ -242,7 +319,7 @@ function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete
   /** [can move up, can move down] */
   canMove: [boolean, boolean];
   /** a real category can be dragged to another place in the list */
-  dragId?: string;
+  onDragStart?: (e: ReactPointerEvent) => void;
 }) {
   const t = useT();
   const [menu, setMenu] = useState(false);
@@ -284,11 +361,7 @@ function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete
         className="side-item cat"
         onClick={onToggle}
         aria-expanded={open}
-        draggable={!!dragId}
-        onDragStart={dragId ? (e) => {
-          e.dataTransfer.setData(DRAG_CATEGORY, dragId);
-          e.dataTransfer.effectAllowed = "move";
-        } : undefined}
+        onPointerDown={onDragStart}
       >
         <span className={`chev ${open ? "open" : ""}`}>
           <Icon.chevron />

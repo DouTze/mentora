@@ -110,6 +110,9 @@ pub fn run() {
                 .min_inner_size(900.0, 600.0)
                 // without decorations Windows still draws the drop shadow and the rounded corners (Windows 11)
                 .decorations(!custom_titlebar)
+                // Tauri's own file-drop handler swallows the page's HTML5 drag events (on Windows entirely), which
+                // breaks moving materials between categories; the page reads dropped files from the drop event itself
+                .disable_drag_drop_handler()
                 // exports (Content-Disposition: attachment) land in Downloads and are shown in Finder / Explorer
                 .on_download(|webview, event| {
                     match event {
