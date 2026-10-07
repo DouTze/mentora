@@ -38,6 +38,25 @@ cd frontend && bun install && bun run dev
 
 預設是**示範模式**（`mock`）：用關鍵字規則模擬模型輸出，畫面會明確標示「模擬」。模型連線失敗時只會顯示錯誤並保留輸入，不會自動改用模擬。
 
+### 桌面版（Tauri，macOS／Windows）
+
+桌面版把前端放進原生視窗（[Tauri v2](https://v2.tauri.app/)），後端照舊是 Python：用 PyInstaller 打包成單一執行檔（sidecar），由 App 啟動與關閉。另外需要 Rust（`rustup`）。
+
+```bash
+bun install               # 安裝 Tauri CLI（根目錄）
+bun run desktop:dev       # 開發：開視窗載入 bun dev server；後端照 bun run dev 從原始碼跑，可熱更新
+bun run desktop:build     # 打包：前端 build → sidecar → .app/.dmg（macOS）或 .msi/.exe（Windows）
+bun run desktop:sidecar   # 只重建 sidecar（src-tauri/binaries/mentor-backend-<target>）
+```
+
+- PyInstaller 不能跨平台編譯：macOS 版在 Mac 上打包，Windows 版在 Windows 上打包。`.github/workflows/desktop.yml` 在兩個 runner 上各打包一次（手動觸發或推 `v*` tag）。
+- 打包後的 App 每次啟動挑一個空的 localhost port 給後端，並在頁面載入前設定 `window.__MENTOR_API__`；瀏覽器與 dev server 仍走 `/api`。
+- 資料（SQLite、匯入的教材、導讀檔）放在使用者的 App 資料夾，不在安裝目錄：macOS `~/Library/Application Support/app.mentora.desktop/`，Windows `%APPDATA%\app.mentora.desktop\`。後端輸出記在 App 的 log 資料夾的 `backend.log`（macOS `~/Library/Logs/app.mentora.desktop/`）。
+- 第一次啟動時 sidecar 要先解壓縮，大約 15 秒；之後約 2～3 秒。頁面會等後端回應再送出請求。
+- 匯出的 Markdown／JSON 存到「下載」資料夾，並在 Finder／檔案總管中標出。
+- Ollama 不在安裝包裡，要另外安裝；OpenVINO 後端不包含在桌面版。
+- 尚未簽章：macOS 第一次開啟要在 Finder 按右鍵 →「打開」；要發佈給別人，需要 Apple Developer 憑證做 codesign 與 notarize（sidecar 也要簽）。
+
 ## 畫面
 
 左側是可收合的側邊欄（收合鈕在右上角，或按 `Cmd/Ctrl + \`），上半是首頁／進行中的學習／學習紀錄，中間是教材樹，最下方的齒輪開啟設定視窗（「偏好」：語系、介面色彩；「伴讀」：挑選角色，每個角色綁一個本地模型，進階設定裡調生成參數）。教材樹：
@@ -134,6 +153,8 @@ app 本身要用遠端模型時，見「接真實模型 → 遠端 Qwen」。評
 | `backend/app/tutor/reading.py` | 導讀共用的小工具：初始閱讀狀態、中文判斷、節錄、問答歷史 |
 | `backend/app/tutor/reading_agent.py` | session 的 Markdown 鏡像檔（`data/reading/<session>/`） |
 | `backend/app/tutor/generate.py` | 出題結果轉成與內建教材相同的結構 |
+| `src-tauri/` | 桌面版外殼（Rust）：啟動 Python sidecar、注入 API 位址、處理下載 |
+| `backend/desktop_main.py`、`backend/mentor-backend.spec` | sidecar 的進入點與 PyInstaller 設定 |
 | `agent/` | pi 閱讀 agent（舊版流程使用，目前沒有接上） |
 | `backend/app/content/*.json` | 內建示範教材：概念、解釋、例子、題目、評分依據、提示 |
 | `backend/app/strategies/*.json` | 教學規則參數（提示次數、追問次數、帶入模型的近期輪數） |
