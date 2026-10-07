@@ -56,6 +56,7 @@ bun run desktop:sidecar   # 只重建 sidecar（src-tauri/binaries/mentor-backen
 - 匯出的 Markdown／JSON 存到「下載」資料夾，並在 Finder／檔案總管中標出。
 - Ollama 不在安裝包裡，要另外安裝；OpenVINO 後端不包含在桌面版。
 - 尚未簽章：macOS 第一次開啟要在 Finder 按右鍵 →「打開」；要發佈給別人，需要 Apple Developer 憑證做 codesign 與 notarize（sidecar 也要簽）。
+- 在 Mac 上開發、要測 Windows 版時，可以用 `scripts/win-remote.sh` 透過 SSH 在一台 Windows 測試機上打包、開啟 App、截圖與看 log，設定方式見 [docs/windows-remote-test.md](docs/windows-remote-test.md)。
 
 ## 畫面
 
