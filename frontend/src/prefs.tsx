@@ -2,6 +2,7 @@
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { I18nContext, translate, type Locale } from "./i18n";
 import { useStored } from "./route";
+import { syncWindowTheme } from "./desktop";
 
 export type Theme = "system" | "light" | "dark";
 
@@ -26,6 +27,12 @@ export function PrefsProvider({ children }: { children: ReactNode }) {
     const root = document.documentElement;
     if (theme === "system") delete root.dataset.theme;
     else root.dataset.theme = theme;
+    // the desktop window's title bar follows too, also when "system" flips between light and dark
+    syncWindowTheme(theme);
+    const scheme = window.matchMedia?.("(prefers-color-scheme: dark)");
+    const onScheme = () => syncWindowTheme(theme);
+    scheme?.addEventListener("change", onScheme);
+    return () => scheme?.removeEventListener("change", onScheme);
   }, [theme]);
 
   useEffect(() => {

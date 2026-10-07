@@ -134,6 +134,11 @@ pub fn run() {
                     }
                     true
                 });
+            // macOS 26+: the standard title bar is translucent and takes its tint from whatever scrolls under it. A
+            // transparent one shows the window's own background instead, which the page keeps at its --bg colour for
+            // the chosen light / dark theme (frontend/src/prefs.tsx), so the bar stays one steady colour.
+            #[cfg(target_os = "macos")]
+            let window = window.title_bar_style(tauri::TitleBarStyle::Transparent);
             // what the page needs to know before it loads; both values are plain ASCII, so their Debug form ("...") is
             // a valid JS string literal
             let mut script = format!(
