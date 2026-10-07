@@ -310,6 +310,9 @@ button.block { width: 100%; padding: 9px 14px; }
 .guide ul, .guide ol { margin: 0 0 var(--s4); padding-left: 1.4em; }
 .guide .check { margin-top: var(--s5); padding: var(--s3) var(--s4); border: 1px dashed var(--check-dash); border-radius: 8px; color: var(--ink); font-size: var(--t-body); }
 .guide .check .label { color: var(--accent); }
+.reading .skipped { margin: var(--s2) 0 var(--s3); color: var(--muted); font-size: var(--t-small); }
+.reading .skipped details { margin: var(--s2) 0 0 var(--s4); }
+.reading .skipped .source-text { margin-top: var(--s2); white-space: pre-wrap; }
 .topic .block { margin-top: var(--s5); }
 .topic .block-heading { margin: 0 0 var(--s2); font-size: var(--t-h3); }
 .topic .block .guide { margin-top: var(--s3); }

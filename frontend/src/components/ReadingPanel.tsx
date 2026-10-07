@@ -134,6 +134,20 @@ export function ReadingPanel({ session, onSession }: Props) {
           </span>
         )}
       </div>
+      {rd.index === 0 && (rd.segmentation?.skipped?.length ?? 0) > 0 && (
+        <details className="skipped" data-testid="skipped">
+          <summary>{t("reading.skipped.summary", { n: rd.segmentation!.skipped!.length })}</summary>
+          {rd.segmentation!.skipped!.map((x, i) => (
+            <details key={i}>
+              <summary>
+                {t(`reading.skipped.role.${x.role}` as Key)}
+                <span className="muted"> · {x.label}</span>
+              </summary>
+              <div className="source-text">{x.text}</div>
+            </details>
+          ))}
+        </details>
+      )}
       {quote.heading && <h2 className="reading-heading">{quote.heading}</h2>}
 
       {guide?.blocks ? (
