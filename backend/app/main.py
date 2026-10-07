@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,17 +10,21 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from . import config, export
+import json
+
+from . import config, export, pdf_worker
 from .db import Database
 from .llm.registry import Registry
 from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
 from .llm import remote
 from .models import (AnswerRequest, AskRequest, CategoryOrder, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
-                     RemoteEndpointRequest, ShelfImport, ShelfQuery, ShelfScope, StartSessionRequest)
+                     ReaderAsk, ReaderLearn, RemoteEndpointRequest, ShelfImport, ShelfQuery, ShelfScope, StartSessionRequest)
 from .persistence.repository import Repository
+from .reading.study import StudyService
 from .shelf.service import ShelfService
 from .tutor.session import SessionError, TutorService
+from .llm.tasks import TaskError
 from .workflows.commands import CommandError
 from .workflows.learning_graph import WorkflowDeps
 from .workflows.runner import WorkflowRunner
@@ -46,6 +51,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     runner = WorkflowRunner(WorkflowDeps(db=db, repo=repo, pool=pool, svc=svc), checkpoint_path(db))
     workflow = WorkflowService(svc, repo, pool, runner)
     svc.workflow = workflow
+    study = StudyService(db, registry, pool, materials, repo, workflow)
     shelf = shelf or ShelfService(db, registry, pool, materials, config.SHELF_DIR)
 
     @asynccontextmanager
@@ -61,12 +67,13 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
                 if t and not t.done():
                     t.cancel()
             await runner.stop()
+            pdf_worker.shutdown()
 
     app = FastAPI(title="Mentor prototype", version="0.1.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     app.state.db, app.state.registry, app.state.svc = db, registry, svc
     app.state.repo, app.state.runner, app.state.workflow = repo, runner, workflow
-    app.state.shelf = shelf
+    app.state.shelf, app.state.study = shelf, study
 
     @app.exception_handler(SessionError)
     async def _session_error(_, e: SessionError):
@@ -151,6 +158,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     @app.delete("/api/materials/{mid}")
     async def delete_material(mid: str):
         materials.delete(mid)
+        study.forget(mid)
         return {"ok": True}
 
     @app.get("/api/materials/{mid}/cover")
@@ -159,6 +167,64 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         if not path:
             raise HTTPException(404)
         return FileResponse(path, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+    @app.get("/api/materials/{mid}/pages")
+    async def material_pages(mid: str):
+        """[width, height] in points of every page (the reader lays the pages out before their images arrive)."""
+        pdf = materials.pdf_of(mid)
+        if not pdf:
+            return {"sizes": []}
+        cache = materials.sizes_cache(mid)
+        if cache.exists():
+            return {"sizes": json.loads(cache.read_text())}
+        sizes = await pdf_worker.run("pages", pdf_worker.page_sizes, str(pdf))
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sizes))
+        return {"sizes": sizes}
+
+    @app.get("/api/materials/{mid}/pages/{n}")
+    async def material_page(mid: str, n: int, w: int = Query(960, ge=200, le=4000)):
+        t = materials.page_target(mid, n, w)
+        if not t:
+            raise HTTPException(404, "沒有這一頁")
+        pdf, out = t
+        if not out.exists():
+            try:
+                await pdf_worker.run("pages", pdf_worker.render_page, str(pdf), n, int(out.stem.split("-")[1]), str(out))
+            except Exception as e:  # noqa: BLE001 — a page MuPDF cannot draw
+                raise HTTPException(404, f"這一頁無法顯示：{e}") from e
+        return FileResponse(out, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+    # -- the reader: the companion's whole-material study, questions, 導讀 from where the reader is ----------
+    @app.get("/api/materials/{mid}/study")
+    def material_study(mid: str):
+        return study.view(mid)
+
+    @app.post("/api/materials/{mid}/study/{action}")
+    async def material_study_action(mid: str, action: Literal["focus", "leave", "pause", "resume", "cancel"]):
+        """focus (also the reader's heartbeat) / leave: the person opened or left the book; pause / resume / cancel:
+        their own choice about the companion's whole-material study."""
+        materials.get(mid, with_units=False)
+        if action == "leave":
+            await study.leave(mid)
+            return study.view(mid)
+        return await getattr(study, action)(mid)
+
+    @app.get("/api/materials/{mid}/questions")
+    def reader_questions(mid: str):
+        return study.questions(mid)
+
+    @app.post("/api/materials/{mid}/ask")
+    async def reader_ask(mid: str, req: ReaderAsk):
+        try:
+            return await study.ask(mid, req.at, req.question.strip())
+        except TaskError as e:
+            raise HTTPException(503 if e.kind == "unavailable" else 502, e.detail) from e
+
+    @app.post("/api/materials/{mid}/learn")
+    async def reader_learn(mid: str, req: ReaderLearn):
+        row = workflow.start_at(study, mid, req.at, req.strategy_id)
+        return svc.view(row["id"])
 
     @app.get("/api/materials/{mid}/file")
     async def material_file(mid: str):

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MaterialPage } from "./Material";
@@ -6,83 +6,132 @@ import { mockFetch, session } from "../test/fixtures";
 import { I18nContext, translate } from "../i18n";
 
 const material = { id: "m1", category_id: null, title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 4, created_at: "", units: ["# 光合作用", "", "植物利用陽光製造葡萄糖。", "葉綠體是進行光合作用的地方。"] };
+const study = { status: "ready", session_id: "study1", planner: "model", progress: 1, error: null, parts: [{ index: 0, from: 1, to: 4, heading: "光合作用" }] };
 
+beforeEach(() => localStorage.clear());
 afterEach(cleanup);
 
 function setup(routes: Parameters<typeof mockFetch>[0] = {}) {
-  const calls = mockFetch({ "GET /api/materials/m1": () => ({ json: material }), "GET /api/sessions": () => ({ json: [] }), ...routes });
-  let opened = "";
-  render(<MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={(id) => (opened = id)} />);
-  return { calls, opened: () => opened };
+  const calls = mockFetch({
+    "GET /api/materials/m1": () => ({ json: material }),
+    "GET /api/materials/m1/study": () => ({ json: study }),
+    "POST /api/materials/m1/study/focus": () => ({ json: study }),
+    "POST /api/materials/m1/study/leave": () => ({ json: study }),
+    "GET /api/materials/m1/questions": () => ({ json: [] }),
+    ...routes,
+  });
+  const opened: { id: string; quiz?: boolean }[] = [];
+  render(<MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={(id, o) => opened.push({ id, quiz: o?.quiz })} />);
+  return { calls, opened };
 }
 
-describe("MaterialPage", () => {
-  test("two clicks mark a line range, and learning starts on exactly that range", async () => {
-    const { calls, opened } = setup({ "POST /api/sessions": () => ({ json: session({ id: "s9" }) }) });
-    const units = await screen.findAllByTestId("unit");
-    expect(screen.getByRole("button", { name: "開始學習" })).toHaveProperty("disabled", true); // nothing selected yet
-
-    await userEvent.click(units[0]);
-    await userEvent.click(units[2]);
-    expect(screen.getByTestId("range-summary")).toHaveTextContent("第 1–3 行");
-    expect(units.map((u) => u.className.includes("selected"))).toEqual([true, true, true, false]);
-
-    await userEvent.click(screen.getByRole("button", { name: "開始學習" }));
-    await waitFor(() => expect(opened()).toBe("s9"));
-    expect(calls.find((c) => c.key === "POST /api/sessions")?.body).toEqual({ material_id: "m1", start: 1, end: 3, strategy_id: "rules-v1" });
+describe("MaterialPage · reader", () => {
+  test("sets Markdown as an article, without the parsed-text unit list or the range tool", async () => {
+    setup();
+    expect(await screen.findByRole("heading", { name: "光合作用" })).toBeTruthy();
+    expect(screen.getByText("植物利用陽光製造葡萄糖。 葉綠體是進行光合作用的地方。".split(" ")[0], { exact: false })).toBeTruthy();
+    expect(screen.queryByTestId("unit")).toBeNull();
+    expect(screen.queryByRole("button", { name: "開始學習" })).toBeNull();
+    expect(await screen.findByText("導師已讀完全書")).toBeTruthy();
   });
 
-  test("shows the backend's reason when questions cannot be generated", async () => {
-    setup({ "POST /api/sessions": () => ({ status: 502, json: { code: "model_unavailable", detail: "Ollama 連線失敗", retryable: true } }) });
-    await userEvent.click((await screen.findAllByTestId("unit"))[3]);
-    await userEvent.click(screen.getByRole("button", { name: "開始學習" }));
+  test("a question is sent with the line being read and its answer shown above the box", async () => {
+    const { calls } = setup({
+      "POST /api/materials/m1/ask": () => ({
+        json: { id: "rq1", unit_no: 1, question: "葡萄糖從哪來？", answer: "由**光合作用**產生。", label: "第 1–4 行", unit_ids: ["u1"], used_guide: true, created_at: "" },
+      }),
+    });
+    const box = await screen.findByRole("textbox", { name: "向導師提問" });
+    await userEvent.type(box, "葡萄糖從哪來？{Enter}");
+    expect(await screen.findByText("產生。", { exact: false })).toBeTruthy();
+    expect(screen.getByText("參考了這段的導讀", { exact: false })).toBeTruthy();
+    expect(calls.find((c) => c.key === "POST /api/materials/m1/ask")?.body).toEqual({ at: 1, question: "葡萄糖從哪來？" });
+    expect((box as HTMLTextAreaElement).value).toBe("");
+  });
+
+  test("a failed question stays in the box with the reason", async () => {
+    setup({ "POST /api/materials/m1/ask": () => ({ status: 503, json: { detail: "Ollama 連線失敗" } }) });
+    const box = await screen.findByRole("textbox", { name: "向導師提問" });
+    await userEvent.type(box, "這段在說什麼？{Enter}");
     expect(await screen.findByRole("alert")).toHaveTextContent("Ollama 連線失敗");
-    expect(screen.getByTestId("range-summary")).toHaveTextContent("第 4 行"); // selection kept for retry
+    expect((box as HTMLTextAreaElement).value).toBe("這段在說什麼？");
+  });
+
+  test("導讀 and 出題 start the reading at the current position; 出題 asks for the questions", async () => {
+    const { calls, opened } = setup({ "POST /api/materials/m1/learn": () => ({ json: session({ id: "s9" }) }) });
+    await userEvent.click(await screen.findByRole("button", { name: /導讀/ }));
+    await waitFor(() => expect(opened).toEqual([{ id: "s9", quiz: false }]));
+    expect(calls.find((c) => c.key === "POST /api/materials/m1/learn")?.body).toEqual({ at: 1 });
+    cleanup();
+    const second = setup({ "POST /api/materials/m1/learn": () => ({ json: session({ id: "s9" }) }) });
+    await userEvent.click(await screen.findByRole("button", { name: /出題/ }));
+    await waitFor(() => expect(second.opened).toEqual([{ id: "s9", quiz: true }]));
+  });
+
+  test("the study's progress is shown while the companion reads", async () => {
+    const reading = { ...study, status: "reading", progress: 0.42, parts: [] };
+    setup({ "GET /api/materials/m1/study": () => ({ json: reading }), "POST /api/materials/m1/study/focus": () => ({ json: reading }) });
+    expect(await screen.findByText("導師正在讀全書 · 42%")).toBeTruthy();
   });
 });
 
-describe("MaterialPage · 範圍輸入", () => {
-  test("typing a smaller end value does not drag the start along until the field is committed", async () => {
+describe("MaterialPage · study progress and zoom", () => {
+  test("hovering the study shows the pass and the batch the companion is on", async () => {
+    const reading = { ...study, status: "reading", progress: 0.12, parts: [], step: { phase: "outline", current: 3, total: 12, approx: false } };
+    setup({ "GET /api/materials/m1/study": () => ({ json: reading }), "POST /api/materials/m1/study/focus": () => ({ json: reading }) });
+    await userEvent.hover(await screen.findByText("導師正在讀全書 · 12%"));
+    const card = await screen.findByRole("tooltip");
+    expect(card).toHaveTextContent("逐段摘要");
+    expect(card).toHaveTextContent("第 3 段，共 12 段");
+  });
+
+  test("the companion's reading is paused from the card, and resumed", async () => {
+    const reading = { ...study, status: "reading", progress: 0.3, parts: [], step: { phase: "outline", current: 2, total: 9, approx: false } };
+    const { calls } = setup({
+      "GET /api/materials/m1/study": () => ({ json: reading }),
+      "POST /api/materials/m1/study/focus": () => ({ json: reading }),
+      "POST /api/materials/m1/study/pause": () => ({ json: { ...reading, paused: true, by_user: true } }),
+    });
+    await userEvent.hover(await screen.findByText("導師正在讀全書 · 30%"));
+    await userEvent.click(await screen.findByRole("button", { name: "暫停" }));
+    expect((await screen.findAllByText("已暫停全文學習 · 30%")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "繼續" })).toBeTruthy();
+    expect(calls.some((c) => c.key === "POST /api/materials/m1/study/pause")).toBe(true);
+  });
+
+  test("opening the book tells the server the companion may read it", async () => {
+    const { calls } = setup();
+    await screen.findByText("導師已讀完全書");
+    expect(calls.some((c) => c.key === "POST /api/materials/m1/study/focus")).toBe(true);
+  });
+
+  test("ctrl + wheel (a trackpad pinch) is taken by the reader, not the window", async () => {
     setup();
-    const units = await screen.findAllByTestId("unit");
-    await userEvent.click(units[1]);
-    await userEvent.click(units[3]);
-    expect(screen.getByTestId("range-summary")).toHaveTextContent("第 2–4 行");
-    const end = screen.getByLabelText("結束行") as HTMLInputElement;
-    await userEvent.clear(end);
-    await userEvent.type(end, "1"); // half-typed: start must stay 2
-    expect(screen.getByTestId("range-summary")).toHaveTextContent("第 2–4 行");
-    await userEvent.type(end, "{Enter}"); // committed as 1 → the two ends are simply sorted
-    expect(screen.getByTestId("range-summary")).toHaveTextContent("第 1–2 行");
-    const start = screen.getByLabelText("起始行") as HTMLInputElement;
-    await userEvent.clear(start);
-    await userEvent.type(start, "3");
-    await userEvent.tab(); // blur commits; 3 > end 2 → sorted to 2–3
-    expect(screen.getByTestId("range-summary")).toHaveTextContent("第 2–3 行");
+    await screen.findByText("100%");
+    // the test DOM drops ctrlKey from a WheelEvent's init, so it is set on the event itself
+    const e = new WheelEvent("wheel", { deltaY: -40, clientX: 400, clientY: 300, cancelable: true });
+    Object.defineProperty(e, "ctrlKey", { value: true });
+    window.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(true);
   });
 });
 
 describe("MaterialPage · English", () => {
-  for (const unit of ["page", "line"] as const) {
-    test(`uses English word order and singular/plural ${unit} labels`, async () => {
-      mockFetch({
-        "GET /api/materials/m1": () => ({ json: { ...material, unit, kind: unit === "page" ? "pdf" : "md" } }),
-        "GET /api/sessions": () => ({ json: [] }),
-      });
-      render(
-        <I18nContext.Provider value={{ locale: "en", t: (key, vars) => translate("en", key, vars) }}>
-          <MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={() => {}} />
-        </I18nContext.Provider>,
-      );
-      const units = await screen.findAllByTestId("unit");
-      expect(screen.getByText(`4 ${unit}s`)).toBeTruthy();
-      expect(screen.getByLabelText(`Start ${unit}`).closest("label")?.textContent).toBe(`Start ${unit}`);
-      expect(screen.getByLabelText(`End ${unit}`).closest("label")?.textContent).toBe(`End ${unit}`);
-      await userEvent.click(units[0]);
-      expect(screen.getByTestId("range-summary")).toHaveTextContent(`1 ${unit} ·`);
-      await userEvent.click(units[2]);
-      expect(screen.getByTestId("range-summary")).toHaveTextContent(`${unit}s 1–3`);
-      expect(screen.getByTestId("range-summary")).toHaveTextContent(`3 ${unit}s ·`);
+  test("labels the box and actions in English", async () => {
+    mockFetch({
+      "GET /api/materials/m1": () => ({ json: material }),
+      "GET /api/materials/m1/study": () => ({ json: study }),
+      "POST /api/materials/m1/study/focus": () => ({ json: study }),
+      "POST /api/materials/m1/study/leave": () => ({ json: study }),
+      "GET /api/materials/m1/questions": () => ({ json: [] }),
     });
-  }
+    render(
+      <I18nContext.Provider value={{ locale: "en", t: (key, vars) => translate("en", key, vars) }}>
+        <MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={() => {}} />
+      </I18nContext.Provider>,
+    );
+    expect(await screen.findByPlaceholderText("Questions about Line 1? Ask your tutor")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Guide me/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Quiz me/ })).toBeTruthy();
+  });
 });

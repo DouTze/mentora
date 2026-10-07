@@ -64,6 +64,18 @@ class StartSessionRequest(BaseModel):
     reader_background: str | None = Field(default=None, max_length=500)
 
 
+class ReaderAsk(BaseModel):
+    """A question typed in the reader: `at` is the page (PDF) or line (md / txt) being read."""
+
+    at: int = Field(ge=1)
+    question: str = Field(min_length=1, max_length=4000)
+
+
+class ReaderLearn(BaseModel):
+    at: int = Field(ge=1)
+    strategy_id: str = "rules-v1"
+
+
 class CategoryRequest(BaseModel):
     name: str = Field(min_length=1, max_length=60)
 

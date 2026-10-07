@@ -78,6 +78,7 @@ class WorkflowRunner:
         self._prefetch: dict[str, asyncio.Task] = {}
         self.prefetch_log: list[tuple[str, str]] = []   # (session, outcome), for tests / diagnostics
         self._warm: dict[str, asyncio.Task] = {}
+        self._held: set[str] = set()   # sessions told to wait (a study whose book is not being read): not run now
         self.warm_log: list[tuple[str, list[str]]] = []  # (session, outcome per unit)
         deps.on_units_ready = self.schedule_warm
         self._beat: asyncio.Task | None = None
@@ -156,13 +157,37 @@ class WorkflowRunner:
         for t in threads:
             await self.saver.adelete_thread(t)
 
+    # -- holding a session ---------------------------------------------------------------------
+    def hold(self, session_id: str) -> None:
+        """Do not start the session's work until release(); what is running now goes on (see pause)."""
+        self._held.add(session_id)
+
+    async def pause(self, session_id: str) -> None:
+        """Stop the session's work now and hold it. The running command keeps its `running` row and its last
+        checkpoint, exactly as after a shutdown, so release() continues it where it stopped (finished segmentation
+        buffers and guides are kept); nothing about the command changes."""
+        self._held.add(session_id)
+        tasks = [t for t in (self._tasks.pop(session_id, None), self._prefetch.pop(session_id, None),
+                             self._warm.pop(session_id, None)) if t and not t.done()]
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def release(self, session_id: str) -> None:
+        self._held.discard(session_id)
+        if self.repo.active_commands(session_id):
+            self.notify(session_id)
+
+    def held(self, session_id: str) -> bool:
+        return session_id in self._held
+
     # -- scheduling ------------------------------------------------------------------------
     def schedule_warm(self, session_id: str) -> None:
         """With 並行數量 > 1, verify the sources of the coming units in the background (parallel - 1 at a time, one
         slot stays for the reader's own guide). Read-only for the session, so it never waits for or blocks commands;
         it only shares the model's slots."""
         slots = self.deps.pool.parallel - 1
-        if not self.active or slots < 1 or not config.READING_PREFETCH:
+        if not self.active or slots < 1 or not config.READING_PREFETCH or session_id in self._held:
             return
         w = self._warm.get(session_id)
         if w is None or w.done():
@@ -179,7 +204,7 @@ class WorkflowRunner:
         self.warm_log.append((session_id, outcome))
 
     def notify(self, session_id: str) -> None:
-        if not self.active:
+        if not self.active or session_id in self._held:
             return
         p = self._prefetch.get(session_id)
         if p and not p.done():
@@ -203,7 +228,7 @@ class WorkflowRunner:
             if p and not p.done():
                 await asyncio.wait({p})   # a kept prefetch (see notify) finishes first; its guide is then adopted
             await self._execute(pending[0])
-        if self.active and config.READING_PREFETCH:
+        if self.active and config.READING_PREFETCH and session_id not in self._held:
             row = self.deps.db.get_session(session_id)
             if row and (row.get("workflow_status") or {}).get("waiting") == "student":
                 self._prefetch[session_id] = asyncio.create_task(self._run_prefetch(session_id))

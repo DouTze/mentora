@@ -9,6 +9,9 @@ import { CommandRefused, isGraph, useCommands } from "../workflow";
 interface Props {
   session: SessionView;
   onSession: (s: SessionView) => void;
+  /** 出題 from the reader: send `finish` (the same as 提前出題) once the current guide is shown */
+  autoFinish?: boolean;
+  onAutoFinished?: () => void;
 }
 
 const POLL_MS = 2000;
@@ -29,7 +32,7 @@ const ERROR_HEADLINE: Record<string, Key> = {
   quiz_unverified: "reading.error.quiz_unverified",
 };
 
-export function ReadingPanel({ session, onSession }: Props) {
+export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }: Props) {
   const t = useT();
   const rd = session.reading!;
   const quote = rd.quotes[rd.index];
@@ -97,6 +100,13 @@ export function ReadingPanel({ session, onSession }: Props) {
     setConfirmFinish(false);
     await command("finish");
   };
+
+  useEffect(() => {
+    if (!autoFinish || readOnly || !guide || busy || cmds.running || wf?.waiting !== "student") return;
+    onAutoFinished?.();
+    command("finish");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFinish, guide, busy, cmds.running, wf?.waiting]);
 
   const askRetry = async (target: string) => {
     setAsking(true);

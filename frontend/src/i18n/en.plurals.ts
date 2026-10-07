@@ -5,6 +5,7 @@ import type { Key } from "./index";
 export const enPlurals: Partial<Record<Key, { variable: string; one?: string; other?: string }>> = {
   "material.unit.page": { variable: "count", other: "pages" },
   "material.unit.line": { variable: "count", other: "lines" },
+  "reader.study.parts": { variable: "count", one: "Divided into {count} reading part" },
   "shelf.pages": { variable: "count", one: "{count} page" },
   "shelf.parts": { variable: "count", one: "{count} chapter" },
   "shelf.area.prefix": { variable: "count", one: "Group {count} book in" },

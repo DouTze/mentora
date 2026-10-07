@@ -55,9 +55,12 @@ export function App() {
       ? (library.materials.find((m) => m.id === route.id)?.title ?? "")
       : t(route.page === "learn" ? "nav.learn" : route.page === "history" ? "nav.history" : "nav.home");
 
-  const openSession = (id: string) => {
+  // 出題 from the reader: the learning page goes on to the questions once the first guide is shown
+  const [quizFor, setQuizFor] = useState<string | null>(null);
+  const openSession = (id: string, opts?: { quiz?: boolean }) => {
     localStorage.setItem("mentor.sessionId", id);
     setSessionId(id);
+    setQuizFor(opts?.quiz ? id : null);
     navigate({ page: "learn" });
   };
 
@@ -86,7 +89,7 @@ export function App() {
         )}
         {route.page === "learn" && (
           <div className="doc">
-            <LearnPage sessionId={sessionId} onSessionChange={openSession} onOpenMaterial={(id) => navigate({ page: "material", id })} />
+            <LearnPage sessionId={sessionId} onSessionChange={openSession} autoQuiz={!!sessionId && quizFor === sessionId} onAutoQuizDone={() => setQuizFor(null)} onOpenMaterial={(id) => navigate({ page: "material", id })} />
           </div>
         )}
         {route.page === "history" && (

@@ -15,9 +15,12 @@ interface Props {
   sessionId: string | null;
   onSessionChange: (id: string) => void;
   onOpenMaterial?: (id: string) => void;
+  /** opened by 出題 in the reader: go on to the questions as soon as the first guide is shown */
+  autoQuiz?: boolean;
+  onAutoQuizDone?: () => void;
 }
 
-export function LearnPage({ sessionId, onSessionChange, onOpenMaterial }: Props) {
+export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz, onAutoQuizDone }: Props) {
   const t = useT();
   const [session, setSession] = useState<SessionView | null>(null);
   const [answer, setAnswer] = useState("");
@@ -152,7 +155,7 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial }: Props)
       </div>
 
       {session.reading && !session.reading.done ? (
-        <ReadingPanel session={session} onSession={setSession} />
+        <ReadingPanel session={session} onSession={setSession} autoFinish={autoQuiz} onAutoFinished={onAutoQuizDone} />
       ) : session.status === "completed" && session.summary ? (
         <div className="panel" data-testid="summary">
           <h2>{t("learn.summary.title", { verdict: t(session.summary.verdict === "passed" ? "learn.summary.allPassed" : "learn.summary.needsReview") })}</h2>

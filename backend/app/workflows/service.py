@@ -49,8 +49,22 @@ class WorkflowService:
             await self.runner.drop_checkpoints(sid)
         shutil.rmtree(self.svc.reading_dir / sid, ignore_errors=True)
 
+    def start_at(self, study, material_id: str, n: int, strategy_id: str) -> dict:
+        """The reader's 導讀: what choosing pages and pressing 開始學習 did, with the pages of the part (from the
+        companion's whole-material study) that covers page or line `n` — the page alone while the study is not
+        segmented yet. An unfinished reading of the same range is taken up again instead of starting another."""
+        found = study.part_at(material_id, n)
+        start, end = (found[2]["from"], found[2]["to"]) if found else (n, n)
+        for s in self.db.list_sessions():
+            src = s["content_snapshot"].get("source") or {}
+            if (s["status"] != "completed" and s.get("workflow_runner") == "langgraph" and not (s.get("workflow_meta") or {}).get("study")
+                    and src.get("material_id") == material_id and (src.get("start"), src.get("end")) == (start, end)):
+                return s
+        return self.start_from_material(material_id, start, end, strategy_id)
+
     def start_from_material(self, material_id: str, start: int, end: int, strategy_id: str, *, depth: str | None = None,
-                            goal: str | None = None, background: str | None = None) -> dict:
+                            goal: str | None = None, background: str | None = None,
+                            extra_meta: dict | None = None, notify: bool = True) -> dict:
         from ..tutor.session import SessionError
         strategy = self.svc.strategies.get(strategy_id)
         if not strategy:
@@ -89,14 +103,14 @@ class WorkflowService:
                 "reading_workflow_version": READING_WORKFLOW_VERSION, "prompt_bundle": bundle,
                 "model_snapshot": {k: v for k, v in model.items() if k in ModelSnapshot.__dataclass_fields__},
                 "model_config_hash": msnap.config_hash, "snapshot_id": snap["snapshot_id"], "planner": planner,
-                "extraction_version": snap["extraction_version"]}
+                "extraction_version": snap["extraction_version"], **(extra_meta or {})}
         row = self.db.create_session(content, strategy, model, reading.initial_state(content),
                                      workflow_runner="langgraph", workflow_meta=meta)
         sid = row["id"]
         ReadingWorkspace(self.svc.reading_dir, sid).init(content)
         cid = f"start-{sid}"
         self.repo.insert_command(sid, cid, "start", {}, payload_hash("start", None, None, {}), None, client_supplied=False)
-        if self.runner:
+        if self.runner and notify:   # notify=False: called off the event loop; the caller notifies the runner
             self.runner.notify(sid)
         return row
 
