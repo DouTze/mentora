@@ -100,11 +100,16 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let api_base = if tauri::is_dev() { None } else { Some(start_sidecar(&handle)?) };
+            // Windows: the page draws its own title bar (frontend/src/components/TitleBar.tsx) so it matches the app,
+            // like Word does. MENTOR_CUSTOM_TITLEBAR=1 turns it on elsewhere too, to work on it from a Mac.
+            let custom_titlebar = cfg!(windows) || std::env::var_os("MENTOR_CUSTOM_TITLEBAR").is_some_and(|v| v == "1");
 
-            let mut window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Mentora")
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(900.0, 600.0)
+                // without decorations Windows still draws the drop shadow and the rounded corners (Windows 11)
+                .decorations(!custom_titlebar)
                 // exports (Content-Disposition: attachment) land in Downloads and are shown in Finder / Explorer
                 .on_download(|webview, event| {
                     match event {
@@ -126,11 +131,16 @@ pub fn run() {
                     }
                     true
                 });
+            // what the page needs to know before it loads; both values are plain ASCII, so their Debug form ("...") is
+            // a valid JS string literal
+            let mut script = format!(
+                "window.__MENTOR_DESKTOP__ = {{ platform: {:?}, customTitlebar: {custom_titlebar} }};",
+                std::env::consts::OS
+            );
             if let Some(base) = api_base {
-                // the URL is plain ASCII, so its Debug form ("...") is a valid JS string literal
-                window = window.initialization_script(&format!("window.__MENTOR_API__ = {base:?};"));
+                script += &format!("window.__MENTOR_API__ = {base:?};");
             }
-            window.build()?;
+            window.initialization_script(&script).build()?;
             Ok(())
         })
         .build(tauri::generate_context!())

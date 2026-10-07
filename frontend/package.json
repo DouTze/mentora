@@ -10,6 +10,7 @@
     "i18n:translate": "bun scripts/i18n-translate.ts"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.12",
     "katex": "^0.18.7",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

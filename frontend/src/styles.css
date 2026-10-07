@@ -138,8 +138,39 @@ label.field > * { margin-top: 4px; }
 .doc { max-width: 820px; margin: 0 auto; padding: 44px 32px 80px; }
 .doc.wide { max-width: 1240px; }
 
+/* ---------- window title bar (desktop app on Windows, components/TitleBar.tsx) ----------
+   The page scrolls inside .shell instead of the window, so the scrollbar starts below the bar. The bar uses the same
+   columns as .shell: the sidebar colour and its border run up to the top edge, the page title sits over the content. */
+:root.has-titlebar { --titlebar-h: 32px; }
+:root.has-titlebar body { height: 100vh; overflow: hidden; }
+:root.has-titlebar .shell { height: calc(100vh - var(--titlebar-h)); min-height: 0; overflow-y: auto; }
+:root.has-titlebar .scrim { top: var(--titlebar-h); }
+.titlebar {
+  position: relative; z-index: 60; display: grid; grid-template-columns: 268px minmax(0, 1fr) auto; height: var(--titlebar-h);
+  background: var(--bg); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); user-select: none;
+  transition: grid-template-columns .18s ease;
+}
+.titlebar.collapsed { grid-template-columns: 48px minmax(0, 1fr) auto; }
+.tb-side { display: flex; align-items: center; gap: 8px; min-width: 0; padding-left: 14px; background: var(--side); border-right: 1px solid var(--line); }
+.titlebar.collapsed .tb-side { justify-content: center; padding-left: 0; }
+.titlebar.collapsed .tb-app { display: none; }
+.tb-logo { width: 16px; height: 16px; border-radius: 4px; pointer-events: none; }
+.tb-app { font-family: var(--serif); font-weight: 700; font-size: 13px; color: var(--ink); pointer-events: none; }
+.tb-main { display: flex; align-items: center; justify-content: center; min-width: 0; padding: 0 12px; }
+.tb-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+.tb-controls { display: flex; }
+.tb-btn {
+  width: 46px; height: 100%; padding: 0; border: none; border-radius: 0; background: transparent; color: var(--ink);
+  font: 10px/1 "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+}
+.tb-btn:hover { background: var(--side-hover); }
+.tb-btn:active { background: var(--line-strong); }
+.tb-btn.close:hover { background: #c42b1c; color: #ffffff; }
+.tb-btn.close:active { background: #b3271c; color: #ffffff; }
+.tb-btn:focus-visible { outline-offset: -2px; }
+
 .sidebar {
-  position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; min-width: 0;
+  position: sticky; top: 0; height: calc(100vh - var(--titlebar-h, 0px)); display: flex; flex-direction: column; min-width: 0;
   background: var(--side); border-right: 1px solid var(--line); font-size: 14px; user-select: none;
 }
 .sidebar.rail { align-items: center; gap: 2px; padding: 10px 0; }
@@ -285,14 +316,17 @@ button.block { width: 100%; padding: 9px 14px; }
 }
 @media (max-width: 760px) {
   .shell, .shell.collapsed { grid-template-columns: 48px minmax(0, 1fr); }
-  .shell:not(.collapsed) .sidebar { position: fixed; z-index: 10; width: min(300px, 86vw); box-shadow: 0 0 40px var(--shadow); }
+  .titlebar, .titlebar.collapsed { grid-template-columns: 48px minmax(0, 1fr) auto; }
+  .titlebar .tb-side { justify-content: center; padding-left: 0; }
+  .titlebar .tb-app { display: none; }
+  .shell:not(.collapsed) .sidebar { position: fixed; top: var(--titlebar-h, 0px); z-index: 10; width: min(300px, 86vw); box-shadow: 0 0 40px var(--shadow); }
   .shell:not(.collapsed) .main { grid-column: 2; }
   .doc { padding: 28px 16px 64px; }
   .doc-title { font-size: 26px; }
   .dropzone { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .shell, .chev { transition: none; }
+  .shell, .titlebar, .chev { transition: none; }
 }
 
 /* 導讀 */
