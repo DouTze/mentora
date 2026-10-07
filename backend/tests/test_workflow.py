@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import child_env
 from fastapi.testclient import TestClient
 
 from app import config
@@ -251,9 +252,9 @@ def test_generate_failure_keeps_preparing_and_retry_uses_same_scope(graph_app, m
 # -- restarts (fresh processes, file SQLite) ------------------------------------------------------------
 
 def proc(tmp_path, steps, fault=None):
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)} | ({"MENTOR_FAULT": fault} if fault else {})
+    env = child_env(HOME=str(tmp_path), **({"MENTOR_FAULT": fault} if fault else {}))
     p = subprocess.run([sys.executable, str(HELPERS / "workflow_proc.py"), str(tmp_path), json.dumps(steps)],
-                       capture_output=True, text=True, env=env, timeout=120)
+                       capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
     if fault:
         assert p.returncode == 77, (p.returncode, p.stderr[-2000:])
         return None
@@ -419,9 +420,9 @@ def test_a_guide_interrupted_under_older_gate_rules_is_rechecked_not_resumed(tmp
     runner now restarts such a run from the start, under the new rules, keeping what it already spent."""
     proc(tmp_path, START, fault="before:draft")              # unit 0: understood and verified, cut before draft
     proc_env = {"GATE_RULES": "gate1-test-next"}
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)} | proc_env
+    env = child_env(HOME=str(tmp_path), **proc_env)
     p = subprocess.run([sys.executable, str(HELPERS / "workflow_proc.py"), str(tmp_path), json.dumps(WAIT)],
-                       capture_output=True, text=True, env=env, timeout=120)
+                       capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
     assert p.returncode == 0, p.stderr[-3000:]
     out = json.loads(p.stdout.strip().splitlines()[-1])
     assert out["guides"] == ["0"] and out["guide_rules"] == {"0": "gate1-test-next"}

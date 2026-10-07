@@ -7,13 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from conftest import child_env
+
 HELPER = Path(__file__).parent / "helpers" / "graph_spike.py"
 
 
 def run(tmp_path, cmd, crash=None):
-    env = {"PATH": "/usr/bin:/bin"} | ({"CRASH": crash} if crash else {})
+    env = child_env(**({"CRASH": crash} if crash else {}))
     p = subprocess.run([sys.executable, str(HELPER), str(tmp_path / "cp.sqlite3"), str(tmp_path / "log"), cmd],
-                       capture_output=True, text=True, env=env, timeout=60)
+                       capture_output=True, text=True, encoding="utf-8", env=env, timeout=60)
     return p.returncode, (json.loads(p.stdout.strip().splitlines()[-1]) if p.returncode == 0 else p.stderr)
 
 
