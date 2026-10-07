@@ -203,6 +203,8 @@ export interface SessionListItem {
   backend: string;
   simulated: boolean;
   verdict: string | null;
+  /** reading quote `read` of `total`, or past the reading and answering questions */
+  progress: { stage: "reading" | "quiz"; read: number; total: number };
 }
 
 export interface ModelConfig {
@@ -228,6 +230,8 @@ export interface ActiveBackend {
   backend: string;
   model: string;
   simulated: boolean;
+  /** Ollama / remote: the server's address */
+  host?: string;
 }
 
 export interface ApiError {
@@ -311,7 +315,17 @@ export interface ShelfView {
   books: ShelfBook[];
   interests: string[];
   simulated: boolean;
+  /** who chose this shelf: the model, or keywords and the topic lexicon (no model, or the model failed) */
+  mode: "model" | "keywords";
   indexed: number;
+  /** false when no folder may be searched */
+  scoped: boolean;
+}
+
+export interface ShelfScope {
+  /** `library`: the Mentora library folder (~/.mentora), where every import is copied */
+  roots: { path: string; label: string; enabled: boolean; cloud: boolean; exists: boolean; library: boolean }[];
+  exclude: { path: string; label: string }[];
 }
 
 export interface Library {

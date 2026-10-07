@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MaterialPage } from "./Material";
 import { mockFetch, session } from "../test/fixtures";
+import { I18nContext, translate } from "../i18n";
 
 const material = { id: "m1", category_id: null, title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 4, created_at: "", units: ["# 光合作用", "", "植物利用陽光製造葡萄糖。", "葉綠體是進行光合作用的地方。"] };
 
@@ -59,4 +60,29 @@ describe("MaterialPage · 範圍輸入", () => {
     await userEvent.tab(); // blur commits; 3 > end 2 → sorted to 2–3
     expect(screen.getByTestId("range-summary")).toHaveTextContent("第 2–3 行");
   });
+});
+
+describe("MaterialPage · English", () => {
+  for (const unit of ["page", "line"] as const) {
+    test(`uses English word order and singular/plural ${unit} labels`, async () => {
+      mockFetch({
+        "GET /api/materials/m1": () => ({ json: { ...material, unit, kind: unit === "page" ? "pdf" : "md" } }),
+        "GET /api/sessions": () => ({ json: [] }),
+      });
+      render(
+        <I18nContext.Provider value={{ locale: "en", t: (key, vars) => translate("en", key, vars) }}>
+          <MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={() => {}} />
+        </I18nContext.Provider>,
+      );
+      const units = await screen.findAllByTestId("unit");
+      expect(screen.getByText(`4 ${unit}s`)).toBeTruthy();
+      expect(screen.getByLabelText(`Start ${unit}`).closest("label")?.textContent).toBe(`Start ${unit}`);
+      expect(screen.getByLabelText(`End ${unit}`).closest("label")?.textContent).toBe(`End ${unit}`);
+      await userEvent.click(units[0]);
+      expect(screen.getByTestId("range-summary")).toHaveTextContent(`1 ${unit} ·`);
+      await userEvent.click(units[2]);
+      expect(screen.getByTestId("range-summary")).toHaveTextContent(`${unit}s 1–3`);
+      expect(screen.getByTestId("range-summary")).toHaveTextContent(`3 ${unit}s ·`);
+    });
+  }
 });

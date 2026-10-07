@@ -21,11 +21,12 @@ def small_files(monkeypatch):
     monkeypatch.setattr(shelf_index, "MIN_BYTES", {"pdf": 100, "md": 10, "txt": 10})
 
 
-def pdf(path, title, pages=3):
+def pdf(path, title, pages=3, body="Sample reading text"):
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
-    for i in range(pages):
-        doc.new_page().insert_text((72, 72), f"Sample reading text, page {i + 1}.")
+    words = ["agents", "rewards", "policies", "values", "models", "planning", "exploration", "returns"]
+    for i in range(pages):   # different text on every page: a line repeated on all pages is a running header
+        doc.new_page().insert_text((72, 72), f"{body}: on {words[i % len(words)]} and {words[(i + 3) % len(words)]}.")
     doc.set_metadata({"title": title, "author": "Tester"})
     doc.save(path)
 
@@ -109,7 +110,8 @@ def test_quick_search_needs_no_model(client):
     client.post("/api/shelf/query", json={"text": ""})   # first run builds the index
     wait_ready(client)
     titles = [b["title"] for b in client.get("/api/shelf/search", params={"q": "reinforcement"}).json()["books"]]
-    assert titles == ["Reinforcement Learning: An Introduction"]
+    # the PDF's own title matches first; the lexicon carries the English wish over to the Chinese notes
+    assert titles == ["Reinforcement Learning: An Introduction", "強化學習筆記"]
 
 
 def test_query_runs_scout_saves_interest_and_imports_into_a_reading_area(client):
@@ -166,3 +168,84 @@ def test_wishes_are_remembered_newest_first_and_can_be_forgotten(client):
     assert wait_ready(client)["interests"] == ["小說", "強化學習"]
     r = client.request("DELETE", "/api/shelf/interests", json={"text": "小說"})
     assert r.json()["interests"] == ["強化學習"]
+
+
+def test_without_a_model_wishes_are_widened_by_the_topic_lexicon(client):
+    client.post("/api/shelf/query", json={"text": ""})
+    v = wait_ready(client)
+    assert v["mode"] == "keywords"            # the simulated backend never pretends to have judged the books
+    assert all(b["reason"] == "" for b in v["books"])
+    titles = [b["title"] for b in client.get("/api/shelf/search", params={"q": "RL"}).json()["books"]]
+    assert "Reinforcement Learning: An Introduction" in titles    # RL → reinforcement, through the lexicon
+
+
+def test_opening_text_is_searched_and_short_terms_match_whole_words(client, books):
+    pdf(books / "Books" / "scan_0042.pdf", "Untitled", body="Markov decision processes and the Bellman equation")
+    pdf(books / "Books" / "world_atlas.pdf", "Atlas", body="Maps of the world")
+    client.post("/api/shelf/query", json={"text": ""})
+    wait_ready(client)
+    titles = [b["title"] for b in client.get("/api/shelf/search", params={"q": "bellman"}).json()["books"]]
+    assert titles == ["scan 0042"]
+    titles = [b["title"] for b in client.get("/api/shelf/search", params={"q": "rl"}).json()["books"]]
+    assert "Atlas" not in titles and "world atlas" not in titles     # "rl" is not inside "world"
+
+
+def test_scope_starts_with_the_offered_folders_and_rejects_unknown_ones(client, books):
+    sc = client.get("/api/shelf/scope").json()
+    assert [(r["path"], r["enabled"]) for r in sc["roots"]] == [(str(books), True)] and sc["exclude"] == []
+    r = client.put("/api/shelf/scope", json={"roots": [{"path": str(books / "nope"), "enabled": True}]})
+    assert r.status_code == 400
+
+
+def test_excluding_a_folder_removes_its_books_covers_and_text(client, books, tmp_path):
+    client.post("/api/shelf/query", json={"text": "reinforcement"})
+    v = wait_ready(client)
+    rl = next(b for b in v["books"] if b["title"].startswith("Reinforcement"))
+    assert client.get(f"/api/shelf/{rl['id']}/cover").status_code == 200
+    r = client.put("/api/shelf/scope", json={"roots": [{"path": str(books), "enabled": True}], "exclude": [str(books / "Books")]})
+    assert r.status_code == 200, r.text
+    assert [x["label"] for x in r.json()["exclude"]] == [str((books / "Books").resolve())]
+    v = wait_ready(client)
+    assert all(b["folder"] != "Books" for b in v["books"])
+    assert client.get(f"/api/shelf/{rl['id']}/cover").status_code == 404
+    shelf_dir = tmp_path / "shelf"
+    assert not any(f.name.startswith(rl["id"]) for f in (shelf_dir / "covers").iterdir())
+    assert rl["id"] not in (shelf_dir / "meta.json").read_text(encoding="utf-8")
+    assert client.get("/api/shelf/search", params={"q": "reinforcement"}).json()["books"] == []
+
+
+def test_switching_every_folder_off_empties_the_shelf(client, books):
+    client.put("/api/shelf/scope", json={"roots": [{"path": str(books), "enabled": False}]})
+    v = wait_ready(client)
+    assert v["books"] == [] and v["indexed"] == 0 and v["scoped"] is False
+
+
+def test_imported_pdf_has_a_cover_and_sessions_report_progress(client):
+    client.post("/api/shelf/query", json={"text": "reinforcement"})
+    book = next(b for b in wait_ready(client)["books"] if b["kind"] == "pdf")
+    r = client.post("/api/shelf/import", json={"ids": [book["id"]]})
+    assert r.status_code == 200, r.text
+    m = r.json()["materials"][0]
+    cover = client.get(f"/api/materials/{m['id']}/cover")
+    assert cover.status_code == 200 and cover.headers["content-type"] == "image/png"
+    r = client.post("/api/sessions", json={"content_id": "correlation-causation", "strategy_id": "rules-v1"})
+    assert r.status_code == 200
+    assert client.get("/api/sessions").json()[0]["progress"]["stage"] in ("reading", "quiz")
+
+
+def test_every_import_leaves_a_copy_in_the_library_folder(client, tmp_path):
+    lib = tmp_path / "library"
+    client.app.state.svc.materials.library_dir = lib    # the store behind /api/materials
+    r = client.post("/api/materials", files={"file": ("notes.txt", "第一行\n第二行\n".encode(), "text/plain")})
+    assert r.status_code == 200
+    assert (lib / "notes.txt").read_text(encoding="utf-8") == "第一行\n第二行\n"
+    client.post("/api/materials", files={"file": ("notes.txt", "第一行\n第二行\n".encode(), "text/plain")})
+    client.post("/api/materials", files={"file": ("notes.txt", "另一份\n".encode(), "text/plain")})
+    assert sorted(p.name for p in lib.iterdir()) == ["notes (2).txt", "notes.txt"]   # same file once; another name for a different one
+
+
+def test_categories_can_be_reordered(client):
+    ids = [client.post("/api/categories", json={"name": n}).json()["id"] for n in ("甲", "乙", "丙")]
+    r = client.put("/api/categories/order", json={"ids": [ids[2], ids[0]]})
+    assert [c["name"] for c in r.json()] == ["丙", "甲", "乙"]
+    assert [c["name"] for c in client.get("/api/library").json()["categories"]] == ["丙", "甲", "乙"]

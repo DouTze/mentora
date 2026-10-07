@@ -2,6 +2,7 @@
 import { createContext, useContext } from "react";
 import { zh } from "./zh-Hant";
 import { en } from "./en";
+import { enPlurals } from "./en.plurals";
 
 export type Locale = "zh-Hant" | "en";
 export type Key = keyof typeof zh;
@@ -15,9 +16,15 @@ export const LOCALES: { id: Locale; label: string }[] = [
 ];
 
 const DICTS: Record<Locale, Dict> = { "zh-Hant": zh, en };
+const englishPlurals = new Intl.PluralRules("en");
 
 export function translate(locale: Locale, key: Key, vars?: Vars): string {
-  const text = DICTS[locale][key] ?? zh[key] ?? key;
+  let text = DICTS[locale][key] ?? zh[key] ?? key;
+  const forms = locale === "en" ? enPlurals[key] : undefined;
+  const count = forms && vars?.[forms.variable];
+  if (forms && typeof count === "number") {
+    text = (englishPlurals.select(count) === "one" ? forms.one : forms.other) ?? text;
+  }
   return vars ? text.replace(/\{(\w+)\}/g, (m, name) => (name in vars ? String(vars[name]) : m)) : text;
 }
 

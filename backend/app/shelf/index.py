@@ -25,7 +25,7 @@ NOISE_NAMES = re.compile(r"^(readme|changelog|license|licence|contributing|code_
 # below these a file is a note, a config or an export, not something to read through
 MIN_BYTES = {"pdf": 120_000, "md": 6_000, "txt": 12_000}
 MAX_BYTES = 400_000_000
-INDEX_VERSION = 2   # bump when the walk's rules change, so an index.json from older rules is not reused
+INDEX_VERSION = 3   # bump when the walk's rules change, so an index.json from older rules is not reused
 MAX_DEPTH = 6
 MAX_DIRS = 6_000
 TIME_BUDGET_S = 3.0
@@ -37,16 +37,28 @@ def is_cloud_placeholder(st: os.stat_result) -> bool:
     return bool(getattr(st, "st_flags", 0) & SF_DATALESS or getattr(st, "st_file_attributes", 0) & WIN_CLOUD_ATTRS)
 
 
-def default_roots() -> list[Path]:
+def candidate_roots() -> list[tuple[Path, bool, bool]]:
+    """Folders offered in the shelf's scope settings, as (path, is a cloud drive, starts switched on). Only the
+    library folder (~/.mentora, where every import is copied) starts on: the shelf looks nowhere else until the
+    person says so. The usual book folders and cloud drives are offered, switched off."""
     env = os.environ.get("MENTOR_SHELF_ROOTS")
     if env is not None:
-        return [Path(p).expanduser() for p in env.split(os.pathsep) if p.strip()]
+        return [(Path(p).expanduser(), False, True) for p in env.split(os.pathsep) if p.strip()]
+    from .. import config
     home = Path.home()
-    roots = [home / n for n in ("Books", "Documents", "Downloads", "Desktop")]
+    roots = [(config.LIBRARY_DIR, False, True)] + [(home / n, False, False) for n in ("Books", "Documents", "Downloads", "Desktop")]
     if sys.platform == "darwin":
-        roots.append(home / "Library" / "Mobile Documents" / "com~apple~CloudDocs")   # iCloud Drive
-    roots += [home / n for n in ("OneDrive", "Dropbox", "Google Drive")]
-    return [r for r in roots if r.is_dir()]
+        roots.append((home / "Library" / "Mobile Documents" / "com~apple~CloudDocs", True, False))   # iCloud Drive
+    roots += [(home / n, True, False) for n in ("OneDrive", "Dropbox", "Google Drive")]
+    return [r for r in roots if r[2] or r[0].is_dir()]
+
+
+def default_roots() -> list[Path]:
+    return [r for r, _, on in candidate_roots() if on]
+
+
+def _under(path: str, folders: list[str]) -> bool:
+    return any(path == f or path.startswith(f.rstrip(os.sep) + os.sep) for f in folders)
 
 
 @dataclass
@@ -125,9 +137,11 @@ def clean_title(stem: str) -> str:
     return s or stem
 
 
-def scan(roots: list[Path], *, budget_s: float = TIME_BUDGET_S, max_dirs: int = MAX_DIRS) -> list[Entry]:
-    """Breadth-first, so the shallow folders people actually browse are covered before the budget runs out."""
+def scan(roots: list[Path], *, exclude: list[Path] = (), budget_s: float = TIME_BUDGET_S, max_dirs: int = MAX_DIRS) -> list[Entry]:
+    """Breadth-first, so the shallow folders people actually browse are covered before the budget runs out.
+    `exclude`: folders the person keeps out of the app; nothing under them is listed, not even its name."""
     t0, seen_dirs, out = time.monotonic(), 0, []
+    excluded = [os.path.realpath(p) for p in exclude]
     # (folder, depth, inside a code project): a project's docs/ and notes/ are its own, not reading material
     queue: list[tuple[Path, int, bool]] = [(r, 0, False) for r in roots]
     visited: set[str] = set()
@@ -135,7 +149,7 @@ def scan(roots: list[Path], *, budget_s: float = TIME_BUDGET_S, max_dirs: int = 
         folder, depth, in_project = queue.pop(0)
         try:
             real = os.path.realpath(folder)
-            if real in visited:
+            if real in visited or _under(real, excluded):
                 continue
             visited.add(real)
             with os.scandir(folder) as it:
@@ -174,9 +188,10 @@ class ShelfIndex:
 
     MAX_AGE_S = 15 * 60
 
-    def __init__(self, directory: Path, roots: list[Path] | None = None):
+    def __init__(self, directory: Path, roots: list[Path] | None = None, exclude: list[Path] | None = None):
         self.dir = directory
         self.roots = roots if roots is not None else default_roots()
+        self.exclude = exclude or []
         self.entries: list[Entry] = []
         self.scanned_at = 0.0
         self._load()
@@ -185,24 +200,32 @@ class ShelfIndex:
     def file(self) -> Path:
         return self.dir / "index.json"
 
+    def _scope(self) -> dict:
+        return {"roots": [str(r) for r in self.roots], "exclude": [str(p) for p in self.exclude]}
+
     def _load(self) -> None:
         try:
             d = json.loads(self.file.read_text(encoding="utf-8"))
-            if d.get("version") == INDEX_VERSION and d.get("roots") == [str(r) for r in self.roots]:
+            if d.get("version") == INDEX_VERSION and d.get("scope") == self._scope():
                 self.entries = [Entry(**e) for e in d["entries"]]
                 self.scanned_at = float(d["scanned_at"])
         except (OSError, ValueError, KeyError, TypeError):
             pass
+
+    def configure(self, roots: list[Path], exclude: list[Path]) -> None:
+        """A new scope: the old index no longer describes what may be shown, so it is dropped until the next walk."""
+        self.roots, self.exclude = roots, exclude
+        self.entries, self.scanned_at = [], 0.0
 
     @property
     def fresh(self) -> bool:
         return bool(self.scanned_at) and time.time() - self.scanned_at < self.MAX_AGE_S
 
     def rescan(self) -> list[Entry]:
-        self.entries = scan(self.roots)
+        self.entries = scan(self.roots, exclude=self.exclude)
         self.scanned_at = time.time()
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.file.write_text(json.dumps({"version": INDEX_VERSION, "roots": [str(r) for r in self.roots], "scanned_at": self.scanned_at,
+        self.file.write_text(json.dumps({"version": INDEX_VERSION, "scope": self._scope(), "scanned_at": self.scanned_at,
                                          "entries": [asdict(e) for e in self.entries]}, ensure_ascii=False), encoding="utf-8")
         return self.entries
 

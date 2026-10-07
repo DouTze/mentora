@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from .index import Entry, ShelfIndex
+from .index import Entry, ShelfIndex, series_files
 
 BOOKISH_FOLDER = re.compile(r"book|書|ebook|epub|paper|論文|reading|閱讀|讀書|library|kindle|textbook|教材|課本|講義|notes?|筆記", re.I)
 _CJK = re.compile(r"[㐀-鿿]")
@@ -31,6 +31,17 @@ def keywords_of(text: str) -> list[str]:
     return list(dict.fromkeys(t for t in out if t not in stop))
 
 
+_SHORT_LATIN = re.compile(r"^[a-z0-9+#.\-]{1,4}$")
+
+
+def hit(k: str, text: str) -> bool:
+    """Substring match, except that a short Latin term must be a whole word: "rl" is not in "world", "art" not in
+    "start". `k` and `text` are lower-case."""
+    if _SHORT_LATIN.match(k):
+        return re.search(rf"(?<![a-z0-9]){re.escape(k)}(?![a-z0-9])", text) is not None
+    return k in text
+
+
 def weights(keywords: list[str]) -> dict[str, float]:
     """A 2-char piece cut from a longer Chinese term counts half: it is a fallback for a looser wording."""
     return {k: .5 if _CJK.match(k) and len(k) == 2 and any(len(o) > 2 and k in o for o in keywords) else 1.0 for k in keywords}
@@ -39,13 +50,16 @@ def weights(keywords: list[str]) -> dict[str, float]:
 def score(e: Entry, weighted: dict[str, float], now: float, info: dict | None = None) -> float:
     info = info or {}
     name, folder, path = f"{e.name} {info.get('title') or ''}".lower(), e.folder.lower(), e.path.lower()
+    head = info.get("head") or ""
     s = 0.0
     for k, w in weighted.items():
-        if k in name:
+        if hit(k, name):
             s += 3 * w
-        elif k in folder:
+        elif hit(k, folder):
             s += 1.5 * w
-        elif k in path:
+        elif hit(k, head):   # the opening pages: a book about it often says so before its file name does
+            s += 1.0 * w
+        elif hit(k, path):
             s += .5 * w
     if weighted and s == 0:
         return 0.0
@@ -85,8 +99,13 @@ def _imported(e: Entry, exclude: set[str]) -> bool:
     return Path(e.path).name.lower() in exclude or e.name.lower() in exclude
 
 
+META_VERSION = 2   # bump when what is read from a file changes (2: the opening text, `head`)
+HEAD_CHARS = 1500
+
+
 class BookMeta:
-    """Title / author / pages / cover aspect per entry, cached in meta.json and invalidated by the file's mtime."""
+    """Title / author / pages / cover aspect / opening text per entry, cached in meta.json and invalidated by the
+    file's mtime. The opening text is what lets the shelf search without a model reach past file names."""
 
     def __init__(self, index: ShelfIndex):
         self.index = index
@@ -100,14 +119,15 @@ class BookMeta:
 
     def get(self, e: Entry) -> dict:
         c = self.cache.get(e.id)
-        if c and c.get("mtime") == e.mtime:
+        if c and c.get("mtime") == e.mtime and c.get("v") == META_VERSION:
             return c
         if e.cloud:   # never trigger a download just to show a title
             return {}
-        if e.parts:   # a series is titled by its chapters' shared name
-            c = {"mtime": e.mtime}
+        if e.parts:   # a series is titled by its chapters' shared name; its first chapter is its opening
+            first = series_files(e.path)[:1]
+            c = {"mtime": e.mtime, "v": META_VERSION, "head": _text_meta(first[0]).get("head") if first else None}
         else:
-            c = {"mtime": e.mtime, **(_pdf_meta(e.path) if e.kind == "pdf" else _text_meta(e.path))}
+            c = {"mtime": e.mtime, "v": META_VERSION, **(_pdf_meta(e.path) if e.kind == "pdf" else _text_meta(e.path))}
         with self._lock:
             self.cache[e.id] = c
         return c
@@ -124,6 +144,16 @@ class BookMeta:
             if time.monotonic() - t0 > budget_s:
                 break
             self.get(e)
+        self.save()
+
+    def keep_only(self, ids: set[str]) -> None:
+        """Forget files outside the current scope: their metadata, opening text and cover images."""
+        with self._lock:
+            self.cache = {k: v for k, v in self.cache.items() if k in ids}
+        if self.covers.is_dir():
+            for f in self.covers.iterdir():
+                if f.name.split("-", 1)[0] not in ids:
+                    f.unlink(missing_ok=True)
         self.save()
 
     def save(self) -> None:
@@ -175,8 +205,10 @@ def _pdf_meta(path: str) -> dict:
         with pymupdf.open(path) as doc:
             md = doc.metadata or {}
             r = doc[0].rect if doc.page_count else None
+            head = " ".join(doc[i].get_text() for i in range(min(3, doc.page_count)))
             return {"title": _good_title(md.get("title")), "author": (md.get("author") or "").strip()[:60] or None,
-                    "pages": doc.page_count, "aspect": round(r.width / r.height, 3) if r and r.height else None}
+                    "pages": doc.page_count, "aspect": round(r.width / r.height, 3) if r and r.height else None,
+                    "head": _squash(head)}
     except Exception:
         return {}
 
@@ -188,4 +220,8 @@ def _text_meta(path: str) -> dict:
     except OSError:
         return {}
     m = re.search(r"^#\s+(.+)$", head, re.M) or re.search(r"^title:\s*[\"']?(.+?)[\"']?\s*$", head, re.M | re.I)
-    return {"title": _good_title(m.group(1)) if m else None}
+    return {"title": _good_title(m.group(1)) if m else None, "head": _squash(head)}
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()[:HEAD_CHARS]

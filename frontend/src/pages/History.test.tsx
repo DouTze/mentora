@@ -9,7 +9,7 @@ afterEach(cleanup);
 
 const item = (id: string, title: string): SessionListItem => ({
   id, status: "completed", created_at: "2026-10-05T10:00:00", updated_at: "", content_title: title, content_version: "1",
-  strategy_id: "rules-v1", source: null, backend: "mock", simulated: true, verdict: "passed",
+  strategy_id: "rules-v1", source: null, backend: "mock", simulated: true, verdict: "passed", progress: { stage: "quiz", read: 0, total: 0 },
 });
 
 describe("HistoryPage", () => {

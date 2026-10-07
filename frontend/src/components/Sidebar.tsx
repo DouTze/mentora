@@ -1,19 +1,22 @@
 import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { useT, type Key } from "../i18n";
 import { api, RequestError } from "../api";
-import type { ActiveBackend, Category, Library, Material } from "../types";
+import type { Category, Library, Material } from "../types";
+import type { CompanionId } from "../companions";
 import { useStored, type Route } from "../route";
-import { BackendBadge } from "./BackendBadge";
+import { CompanionDock, type Connection } from "./CompanionDock";
 import { Icon, KindTag } from "./Icons";
 
 const ACCEPT = ".pdf,.md,.markdown,.txt";
 const UNSORTED = "__unsorted__";
 const DRAG_TYPE = "application/x-mentor-material";
+const DRAG_CATEGORY = "application/x-mentor-category";
 
 interface Props {
   library: Library;
   route: Route;
-  active: ActiveBackend | null;
+  companion: CompanionId;
+  conn: Connection;
   hasSession: boolean;
   collapsed: boolean;
   onToggle: () => void;
@@ -22,7 +25,7 @@ interface Props {
   onOpenSettings: () => void;
 }
 
-export function Sidebar({ library, route, active, hasSession, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
+export function Sidebar({ library, route, companion, conn, hasSession, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
   const t = useT();
   const [folded, setFolded] = useStored<string[]>("mentor.foldedCategories", []);
   const [error, setError] = useState<string | null>(null);
@@ -59,12 +62,29 @@ export function Sidebar({ library, route, active, hasSession, collapsed, onToggl
     fileInput.current?.click();
   };
 
+  /** Move category `id` to where `target` is (after it when moving down, before it when moving up). */
+  const moveCategory = (id: string, target: string) => {
+    const ids = library.categories.map((c) => c.id);
+    const from = ids.indexOf(id), to = ids.indexOf(target);
+    if (from < 0 || to < 0 || from === to) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, id);
+    run(() => api.reorderCategories(ids));
+  };
+  const nudgeCategory = (id: string, step: -1 | 1) => {
+    const ids = library.categories.map((c) => c.id);
+    const target = ids[ids.indexOf(id) + step];
+    if (target) moveCategory(id, target);
+  };
+
   const toggleFold = (id: string) => setFolded(folded.includes(id) ? folded.filter((x) => x !== id) : [...folded, id]);
 
-  // A category row accepts both a material dragged from the tree (move) and files dragged from the desktop (import).
+  // A category row accepts a material dragged from the tree (move it here), files dragged from the desktop (import)
+  // and another category (put that category in this one's place).
   const dropProps = (key: string, categoryId: string | null) => ({
     onDragOver: (e: DragEvent) => {
-      if (e.dataTransfer.types.includes(DRAG_TYPE) || e.dataTransfer.types.includes("Files")) {
+      const types = e.dataTransfer.types;
+      if (types.includes(DRAG_TYPE) || types.includes("Files") || (categoryId && types.includes(DRAG_CATEGORY))) {
         e.preventDefault();
         setDropTarget(key);
       }
@@ -73,6 +93,11 @@ export function Sidebar({ library, route, active, hasSession, collapsed, onToggl
     onDrop: (e: DragEvent) => {
       e.preventDefault();
       setDropTarget(null);
+      const draggedCategory = e.dataTransfer.getData(DRAG_CATEGORY);
+      if (draggedCategory) {
+        if (categoryId) moveCategory(draggedCategory, categoryId);
+        return;
+      }
       const materialId = e.dataTransfer.getData(DRAG_TYPE);
       if (materialId) run(() => api.updateMaterial(materialId, { category_id: categoryId }));
       else importFiles([...e.dataTransfer.files], categoryId);
@@ -91,9 +116,7 @@ export function Sidebar({ library, route, active, hasSession, collapsed, onToggl
           </button>
         ))}
         <span className="spacer" />
-        <button className="icon-btn" onClick={onOpenSettings} aria-label={t("side.settings")} title={t("side.settings")}>
-          <Icon.gear />
-        </button>
+        <CompanionDock companion={companion} conn={conn} compact onOpenSettings={onOpenSettings} />
       </aside>
     );
   }
@@ -167,6 +190,9 @@ export function Sidebar({ library, route, active, hasSession, collapsed, onToggl
                 onImport={() => pickFiles(category?.id ?? null)}
                 onRename={category ? (name) => run(() => api.renameCategory(category.id, name)) : undefined}
                 onDelete={category ? () => run(() => api.deleteCategory(category.id)) : undefined}
+                onMove={category ? (step) => nudgeCategory(category.id, step) : undefined}
+                canMove={category ? [library.categories[0]?.id !== category.id, library.categories.at(-1)?.id !== category.id] : [false, false]}
+                dragId={category?.id}
               />
               {open &&
                 (items.length === 0 ? (
@@ -192,10 +218,7 @@ export function Sidebar({ library, route, active, hasSession, collapsed, onToggl
       </div>
 
       <div className="side-foot">
-        <BackendBadge active={active} />
-        <button className="icon-btn" onClick={onOpenSettings} aria-label={t("side.settings")} title={t("side.settings")}>
-          <Icon.gear />
-        </button>
+        <CompanionDock companion={companion} conn={conn} compact={false} onOpenSettings={onOpenSettings} />
       </div>
     </aside>
   );
@@ -207,7 +230,7 @@ const NAV: { page: "home" | "learn" | "history"; label: Key; icon: ReactNode }[]
   { page: "history", label: "nav.history", icon: <Icon.history /> },
 ];
 
-function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete }: {
+function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete, onMove, canMove, dragId }: {
   name: string;
   count: number;
   open: boolean;
@@ -215,10 +238,19 @@ function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete
   onImport: () => void;
   onRename?: (name: string) => void;
   onDelete?: () => void;
+  onMove?: (step: -1 | 1) => void;
+  /** [can move up, can move down] */
+  canMove: [boolean, boolean];
+  /** a real category can be dragged to another place in the list */
+  dragId?: string;
 }) {
   const t = useT();
   const [menu, setMenu] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => {
+    if (!menu) setConfirming(false);
+  }, [menu]);
   const row = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -248,7 +280,16 @@ function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete
 
   return (
     <div className="cat-row" ref={row}>
-      <button className="side-item cat" onClick={onToggle} aria-expanded={open}>
+      <button
+        className="side-item cat"
+        onClick={onToggle}
+        aria-expanded={open}
+        draggable={!!dragId}
+        onDragStart={dragId ? (e) => {
+          e.dataTransfer.setData(DRAG_CATEGORY, dragId);
+          e.dataTransfer.effectAllowed = "move";
+        } : undefined}
+      >
         <span className={`chev ${open ? "open" : ""}`}>
           <Icon.chevron />
         </span>
@@ -270,8 +311,16 @@ function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete
           <button role="menuitem" onClick={() => { setMenu(false); setRenaming(true); }}>
             {t("side.rename")}
           </button>
-          <button role="menuitem" className="danger" onClick={() => { setMenu(false); onDelete?.(); }}>
-            {t("side.deleteCategory")}
+          <button role="menuitem" disabled={!canMove[0]} onClick={() => { setMenu(false); onMove?.(-1); }}>
+            {t("side.moveUp")}
+          </button>
+          <button role="menuitem" disabled={!canMove[1]} onClick={() => { setMenu(false); onMove?.(1); }}>
+            {t("side.moveDown")}
+          </button>
+          <div className="menu-sep" role="separator" />
+          {/* deleting asks once more, in place */}
+          <button role="menuitem" className="danger" onClick={() => (confirming ? (setMenu(false), onDelete?.()) : setConfirming(true))}>
+            {t(confirming ? "side.deleteConfirm" : "side.deleteCategory", { name })}
             <small>{t("side.deleteCategoryHint")}</small>
           </button>
         </div>

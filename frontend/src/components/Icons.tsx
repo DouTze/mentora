@@ -76,6 +76,13 @@ export const Icon = {
       <path d="m11.2 14.6.8 1 .8-1" />
     </Svg>
   ),
+  /** 書櫃: spines on a shelf, the last one leaning */
+  shelf: () => (
+    <Svg>
+      <path d="M3.5 20h17M6 19.5V6.5h3v13M10 19.5V9h3v10.5" />
+      <path d="m15 19.4 3-11.1 2.6.7-3 11.1" />
+    </Svg>
+  ),
   close: () => (
     <Svg>
       <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />

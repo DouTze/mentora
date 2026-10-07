@@ -139,7 +139,8 @@ class TutorService:
                         "strategy_id": r["strategy_snapshot"]["id"],
                         "backend": r["model_config"].get("backend"), "simulated": r["model_config"].get("simulated"),
                         "workflow_runner": r.get("workflow_runner") or "legacy",
-                        "verdict": (r["summary"] or {}).get("verdict")})
+                        "verdict": (r["summary"] or {}).get("verdict"),
+                        "progress": _progress(r)})
         return out
 
     # -- one turn -----------------------------------------------------------
@@ -263,3 +264,12 @@ class TutorService:
                 break
         return {"source_session_id": sid, "session": self.view(new.id).model_dump(),
                 "replayed_answers": replayed, "total_answers": len(answers), "error": error}
+
+
+def _progress(row: dict) -> dict:
+    """Where a session stands, for the home page: reading quote k of n, or past the reading and into the questions."""
+    state, total = row["state"] or {}, len(row["content_snapshot"].get("quotes") or [])
+    reading = state.get("reading") or {}
+    if state.get("phase") == "reading" and total:
+        return {"stage": "reading", "read": min(int(reading.get("index") or 0), total), "total": total}
+    return {"stage": "quiz", "read": total, "total": total}
