@@ -1,18 +1,28 @@
 # Build the desktop app on this Windows machine and open it on its desktop. Meant to be run over SSH from the
 # dev machine (scripts/win-remote.sh deploy), but works the same from a local terminal.
-#   deploy.ps1                      check out win-deploy (pushed by win-remote.sh), build, run target\release\mentora.exe
+#   deploy.ps1 -Ref <commit> -Fetch  fetch origin, check out that commit (detached), build, run target\release\mentora.exe
 #   deploy.ps1 -Ref origin/develop -Fetch
-#   deploy.ps1 -Install             build the NSIS installer, install it silently and run the installed app
-#   deploy.ps1 -NoBuild             just restart the last build
+#   deploy.ps1                       build and run the current checkout
+#   deploy.ps1 -Install              build the NSIS installer, install it silently and run the installed app
+#   deploy.ps1 -NoBuild              just restart the last build
 param(
-  [string]$Ref = 'win-deploy', # branch, tag or commit to check out (detached); '' keeps the current checkout
-  [switch]$Fetch,              # git fetch origin first (for refs such as origin/develop)
+  [string]$Ref = '',  # branch, tag or commit to check out (detached); '' keeps the current checkout
+  [switch]$Fetch,     # git fetch origin first; commits only reach this machine through origin
   [switch]$Install,
   [switch]$NoBuild,
   [switch]$NoLaunch
 )
 . "$PSScriptRoot\common.ps1"
 # no global ErrorActionPreference=Stop: in Windows PowerShell 5.1 it turns progress that git/bun print on stderr into errors
+
+if (Test-Elevated) {
+  # Over SSH this runs elevated, where scoop/uv tools cannot be found (see common.ps1): redo it on the desktop,
+  # unelevated, which also gives git the user's GitHub credentials
+  $fwd = @()
+  if ($Ref) { $fwd += "-Ref $Ref" }
+  foreach ($s in 'Fetch', 'Install', 'NoBuild', 'NoLaunch') { if ((Get-Variable $s -ValueOnly).IsPresent) { $fwd += "-$s" } }
+  exit (Invoke-OnDesktop -Script $PSCommandPath -Arguments ($fwd -join ' '))
+}
 
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
 Set-Location $root
@@ -39,6 +49,8 @@ if ($Ref) {
   if (git status --porcelain --untracked-files=no) {
     throw "Uncommitted changes in $root; commit or stash them on this machine first."
   }
+  git rev-parse --verify --quiet "$Ref^{commit}" | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "$Ref is not in this repo; push it to origin first (and pass -Fetch)." }
   Invoke-Native git checkout --quiet --detach $Ref
 }
 Write-Host "Commit: $(git log -1 --format='%h %s (%cr)')"

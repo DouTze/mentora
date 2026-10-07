@@ -1,6 +1,9 @@
 # Helpers shared by the scripts that the dev machine runs over SSH (deploy.ps1, screenshot.ps1).
 # A process started from an SSH session lives in a non-interactive session and never shows on screen,
 # so anything that must appear on the desktop is started through a scheduled task in the logged-on user's session.
+# An administrator's SSH session is also elevated, and elevated processes do not follow junctions that a normal user
+# created, such as scoop's apps\<app>\current or uv's Python links: git, bun, uv and cargo are "not found" there.
+# deploy.ps1 therefore does its work in the desktop session too (Invoke-OnDesktop).
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
@@ -27,11 +30,12 @@ function Test-DesktopSession {
 
 function Start-OnDesktop {
   # Starts $Exe on the logged-on user's desktop and returns right away
-  param([Parameter(Mandatory)][string]$Exe, [string]$Arguments = '', [string]$WorkingDirectory = (Split-Path $Exe))
+  param([Parameter(Mandatory)][string]$Exe, [string]$Arguments = '', [string]$WorkingDirectory = (Split-Path $Exe),
+    [string]$Name = [IO.Path]::GetFileNameWithoutExtension($Exe)) # tasks with different names can run side by side
   if (-not (Test-DesktopSession)) {
     throw "$env:USERNAME is not logged on to the desktop of this machine; log on (a locked screen is fine) and retry."
   }
-  $name = 'mentora-remote-' + [IO.Path]::GetFileNameWithoutExtension($Exe)
+  $name = "mentora-remote-$Name"
   $action = if ($Arguments) {
     New-ScheduledTaskAction -Execute $Exe -Argument $Arguments -WorkingDirectory $WorkingDirectory
   } else {
@@ -49,5 +53,50 @@ function Start-HiddenScriptOnDesktop {
   param([Parameter(Mandatory)][string]$Script, [string]$Arguments = '')
   $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
   Start-OnDesktop -Exe "$env:SystemRoot\System32\conhost.exe" -WorkingDirectory (Split-Path $Script) `
+    -Name ([IO.Path]::GetFileNameWithoutExtension($Script)) `
     -Arguments "--headless `"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$Script`" $Arguments"
+}
+
+function Test-Elevated {
+  ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Invoke-OnDesktop {
+  # Runs a PowerShell script in the user's desktop session with a normal (non-elevated) token, streams its output
+  # here while it runs and returns its exit code. $Arguments must not contain double quotes.
+  param([Parameter(Mandatory)][string]$Script, [string]$Arguments = '')
+  $base = "$env:TEMP\mentora-remote-$([IO.Path]::GetFileNameWithoutExtension($Script))"
+  $log = "$base.log"; $exitFile = "$base.exit"; $bat = "$base.cmd"
+  Remove-Item $log, $exitFile -ErrorAction SilentlyContinue
+  # a batch file sidesteps nested quoting, and %errorlevel% is expanded per line there
+  Set-Content -Path $bat -Encoding ascii -Value @(
+    '@echo off'
+    "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$Script`" $Arguments > `"$log`" 2>&1"
+    "> `"$exitFile`" echo %errorlevel%"
+  )
+  Start-OnDesktop -Exe "$env:SystemRoot\System32\conhost.exe" -Arguments "--headless cmd.exe /c `"$bat`"" `
+    -WorkingDirectory (Split-Path $Script) -Name ([IO.Path]::GetFileNameWithoutExtension($Script))
+
+  $pos = 0
+  $decoder = [Text.Encoding]::UTF8.GetDecoder() # keeps characters split across two reads intact
+  $bytes = New-Object byte[] 65536
+  $chars = New-Object char[] 65536
+  while ($true) {
+    $done = Test-Path $exitFile # checked before reading, so the last read sees everything written before the exit
+    if (Test-Path $log) {
+      $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+      [void]$fs.Seek($pos, 'Begin')
+      while (($n = $fs.Read($bytes, 0, $bytes.Length)) -gt 0) {
+        $pos += $n
+        $c = $decoder.GetChars($bytes, 0, $n, $chars, 0)
+        [Console]::Out.Write($chars, 0, $c)
+      }
+      $fs.Close()
+    }
+    if ($done) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  [Console]::Out.Flush()
+  [int](Get-Content $exitFile -Raw).Trim()
 }
