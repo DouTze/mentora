@@ -18,12 +18,12 @@ function Invoke-Native {
 }
 
 function Test-DesktopSession {
-  # True when this user has a desktop session that is logged on (explorer.exe running outside session 0)
-  $me = "$env:USERDOMAIN\$env:USERNAME"
+  # True when this user has a desktop session that is logged on (explorer.exe running outside session 0).
+  # Compared by SID: an SSH session has no USERDOMAIN variable to build "domain\user" from.
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   foreach ($p in Get-CimInstance Win32_Process -Filter "Name='explorer.exe'") {
     if ($p.SessionId -eq 0) { continue }
-    $o = Invoke-CimMethod -InputObject $p -MethodName GetOwner
-    if ("$($o.Domain)\$($o.User)" -eq $me) { return $true }
+    if ((Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid).Sid -eq $me) { return $true }
   }
   return $false
 }
@@ -41,7 +41,7 @@ function Start-OnDesktop {
   } else {
     New-ScheduledTaskAction -Execute $Exe -WorkingDirectory $WorkingDirectory
   }
-  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+  $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
   Register-ScheduledTask -TaskName $name -TaskPath '\mentora\' -Action $action -Principal $principal `
     -Settings $settings -Force -ErrorAction Stop | Out-Null
