@@ -23,3 +23,6 @@ backend/dist/
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/gen/
+
+# Windows 遠端測試機的連線設定（scripts/win-remote.sh）
+win-remote.env
