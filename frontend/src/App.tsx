@@ -8,6 +8,9 @@ import { MaterialPage } from "./pages/Material";
 import { LearnPage } from "./pages/Learn";
 import { HistoryPage } from "./pages/History";
 import { SettingsModal } from "./components/SettingsModal";
+import { TitleBar } from "./components/TitleBar";
+import { customTitlebar } from "./desktop";
+import { useT } from "./i18n";
 
 export function App() {
   const [route, navigate] = useRoute();
@@ -36,6 +39,12 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [collapsed]);
 
+  const t = useT();
+  const pageTitle =
+    route.page === "material"
+      ? (library.materials.find((m) => m.id === route.id)?.title ?? "")
+      : t(route.page === "learn" ? "nav.learn" : route.page === "history" ? "nav.history" : "nav.home");
+
   const openSession = (id: string) => {
     localStorage.setItem("mentor.sessionId", id);
     setSessionId(id);
@@ -43,6 +52,8 @@ export function App() {
   };
 
   return (
+    <>
+    {customTitlebar && <TitleBar title={pageTitle} collapsed={collapsed} />}
     <div className={`shell ${collapsed ? "collapsed" : ""}`}>
       <Sidebar
         library={library}
@@ -73,5 +84,6 @@ export function App() {
       </main>
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} onBackendChanged={refreshBackend} />}
     </div>
+    </>
   );
 }

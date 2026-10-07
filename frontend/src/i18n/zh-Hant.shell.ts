@@ -25,6 +25,12 @@ export const shell = {
   "side.deleteCategoryHint": "裡面的教材會移到「未分類」",
   "side.settings": "設定",
 
+  // window title bar (desktop app on Windows)
+  "titlebar.minimize": "最小化",
+  "titlebar.maximize": "最大化",
+  "titlebar.restore": "還原",
+  "titlebar.close": "關閉",
+
   // settings modal
   "settings.title": "設定",
   "settings.close": "關閉設定",
