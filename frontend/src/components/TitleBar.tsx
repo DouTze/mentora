@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useT } from "../i18n";
-import owl from "../assets/companions/owl.webp";
+import appIcon from "../assets/app-icon.png";
 
 const APP_NAME = "Mentora";
 
@@ -37,7 +37,7 @@ export function TitleBar({ title, collapsed }: { title: string; collapsed: boole
   return (
     <header className={`titlebar ${collapsed ? "collapsed" : ""}`} data-tauri-drag-region>
       <div className="tb-side" data-tauri-drag-region>
-        <img className="tb-logo" src={owl} alt="" />
+        <img className="tb-logo" src={appIcon} alt="" />
         <span className="tb-app">{APP_NAME}</span>
       </div>
       <div className="tb-main" data-tauri-drag-region>

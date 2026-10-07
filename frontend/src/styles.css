@@ -154,7 +154,7 @@ label.field > * { margin-top: 4px; }
 .tb-side { display: flex; align-items: center; gap: 8px; min-width: 0; padding-left: 14px; background: var(--side); border-right: 1px solid var(--line); }
 .titlebar.collapsed .tb-side { justify-content: center; padding-left: 0; }
 .titlebar.collapsed .tb-app { display: none; }
-.tb-logo { width: 16px; height: 16px; border-radius: 4px; pointer-events: none; }
+.tb-logo { width: 18px; height: 18px; pointer-events: none; }
 .tb-app { font-family: var(--serif); font-weight: 700; font-size: 13px; color: var(--ink); pointer-events: none; }
 .tb-main { display: flex; align-items: center; justify-content: center; min-width: 0; padding: 0 12px; }
 .tb-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
