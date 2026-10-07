@@ -19,6 +19,13 @@ use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
+/// The app's own pages: the bundled frontend, the bun dev server and the sidecar all live on this machine. Anything
+/// else the page navigates to (a link in a PDF) opens in the system browser instead of replacing the app.
+fn is_app_url(url: &tauri::Url) -> bool {
+    matches!(url.scheme(), "tauri" | "asset" | "about" | "blob" | "data")
+        || matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "tauri.localhost" | "[::1]"))
+}
+
 /// The running sidecar; taken out and killed on exit.
 struct Sidecar(Mutex<Option<CommandChild>>);
 
@@ -113,6 +120,16 @@ pub fn run() {
                 // Tauri's own file-drop handler swallows the page's HTML5 drag events (on Windows entirely), which
                 // breaks moving materials between categories; the page reads dropped files from the drop event itself
                 .disable_drag_drop_handler()
+                // web addresses (links in a PDF) open in the system browser; the app window stays on the app
+                .on_navigation(|url| {
+                    if is_app_url(url) {
+                        return true;
+                    }
+                    if matches!(url.scheme(), "http" | "https" | "mailto") {
+                        let _ = tauri_plugin_opener::open_url(url.as_str(), None::<&str>);
+                    }
+                    false
+                })
                 // exports (Content-Disposition: attachment) land in Downloads and are shown in Finder / Explorer
                 .on_download(|webview, event| {
                     match event {

@@ -96,6 +96,35 @@ def test_pdf_pages_render(c, tmp_path):
     assert c.get(f"/api/materials/{m['id']}/pages/3").status_code == 404
 
 
+def test_pdf_info_layer_image_and_attachment(c):
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=400)
+    page.insert_text((40, 60), "Read the documentation online.")
+    page.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(40, 48, 220, 64), "uri": "https://example.org"})
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False)
+    pix.clear_with(90)
+    page.insert_image(pymupdf.Rect(40, 100, 80, 140), pixmap=pix)
+    doc.embfile_add("data.csv", b"a,b\n1,2\n", filename="資料.csv")
+    doc.set_toc([[1, "Only chapter", 1]])
+    m = c.post("/api/materials", files={"file": ("info.pdf", io.BytesIO(doc.tobytes()))}).json()
+    info = c.get(f"/api/materials/{m['id']}/info").json()
+    assert info["page_count"] == 1 and info["outline"][0]["title"] == "Only chapter"
+    assert info["counts"]["links"] == 1 and info["attachments"][0]["name"] == "資料.csv"
+    layer = c.get(f"/api/materials/{m['id']}/pages/1/layer").json()
+    assert " ".join(r["t"] for r in layer["lines"][0]["runs"]) == "Read the documentation online."
+    assert layer["links"] == [{"rect": [40, 48, 220, 64], "kind": "uri", "uri": "https://example.org"}]
+    assert c.get(f"/api/materials/{m['id']}/pages/1/layer").json() == layer       # served from the cache
+    img = c.get(f"/api/materials/{m['id']}/images/{layer['images'][0]['xref']}")
+    assert img.status_code == 200 and img.headers["content-type"].startswith("image/")
+    att = c.get(f"/api/materials/{m['id']}/attachments/0")
+    assert att.content == b"a,b\n1,2\n" and "%E8%B3%87%E6%96%99.csv" in att.headers["content-disposition"]
+    assert c.get(f"/api/materials/{m['id']}/pages/2/layer").status_code == 404
+    assert c.get(f"/api/materials/{m['id']}/attachments/1").status_code == 404
+    md = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
+    assert c.get(f"/api/materials/{md['id']}/info").status_code == 404
+
+
 def test_progress_counts_the_saved_segmentation_batches(c):
     m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
     v = ready(c, m["id"])

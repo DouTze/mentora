@@ -292,6 +292,66 @@ export interface MaterialDetail extends Material {
   units: string[];
 }
 
+/** Rectangles of a PDF page in view space: points, origin at the top-left of the page as shown, y down. */
+export type PdfRect = [number, number, number, number];
+
+/** A bookmark of the PDF's outline; `page` is 1-based, `y` where on that page it points (view space). */
+export interface PdfOutlineItem {
+  title: string;
+  page: number | null;
+  y?: number;
+  children: PdfOutlineItem[];
+}
+
+/** What a PDF holds besides its pages (backend app/pdfdoc/inspect.py). */
+export interface PdfInfo {
+  title: string | null;
+  author: string | null;
+  subject: string | null;
+  keywords: string | null;
+  creator: string | null;
+  producer: string | null;
+  created: string | null;
+  modified: string | null;
+  pdf_version: string | null;
+  encrypted: boolean;
+  tagged: boolean;
+  has_javascript: boolean;
+  page_count: number;
+  pages: [number, number][];
+  /** the document's own page labels (i, ii, 1, 2…); null when they are just the page numbers */
+  labels: string[] | null;
+  outline: PdfOutlineItem[];
+  attachments: { name: string; description: string | null; size: number | null }[];
+  fields: { name: string; kind: string; value: string | null; page: number }[];
+  layers: { name: string; visible: boolean }[];
+  fonts: { name: string; kind: string; embedded: boolean; subset: boolean }[];
+  counts: { links: number; images: number; annotations: number; attachments: number; fields: number };
+  warnings: string[];
+}
+
+/** A link on a page: to a page of the same file, a web address, or something the reader does not follow. */
+export type PdfLink = { rect: PdfRect } & (
+  | { kind: "page"; page: number; y?: number }
+  | { kind: "uri"; uri: string }
+  | { kind: "file"; file: string; page: number }
+  | { kind: "launch"; file: string }
+  | { kind: "other"; name: string }
+);
+
+/** One page laid over its image: text runs in reading order, links, images and comments (app/pdfdoc/layer.py). */
+export interface PdfPageLayer {
+  page: number;
+  label: string;
+  size: [number, number];
+  /** the text runs this many quarter turns clockwise from left-to-right (1: downwards) */
+  quarter: number;
+  lines: { block: number; runs: { t: string; rect: PdfRect; sp?: boolean }[] }[];
+  links: PdfLink[];
+  images: { rect: PdfRect; xref: number; width: number | null; height: number | null }[];
+  annotations: { index: number; type: string; rect: PdfRect; quads: PdfRect[]; content: string | null; author: string | null; color: string | null }[];
+}
+
 /** 導師全文學習: the whole material read once through the learning flow; its parts locate the reader's page. */
 export interface StudyView {
   /** off: not started (or cancelled) — the companion reads only while the book is open */

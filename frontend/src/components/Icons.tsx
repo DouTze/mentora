@@ -142,6 +142,19 @@ export const Icon = {
       <circle cx="18" cy="12" r="1.1" fill="currentColor" stroke="none" />
     </Svg>
   ),
+  toc: () => (
+    <Svg>
+      <path d="M9 6.5h10.5M9 12h10.5M9 17.5h10.5" />
+      <circle cx="5" cy="6.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
+      <circle cx="5" cy="17.5" r="1" fill="currentColor" stroke="none" />
+    </Svg>
+  ),
+  download: () => (
+    <Svg>
+      <path d="M12 4.5v10.5M7.5 11l4.5 4.5 4.5-4.5M5 19.5h14" />
+    </Svg>
+  ),
   trash: () => (
     <Svg>
       <path d="M4 6.5h16M9.5 6.5v-2h5v2" />

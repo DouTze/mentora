@@ -539,13 +539,26 @@ button.block { width: 100%; padding: 9px 14px; }
 
 /* ---------- material page: the reader ---------- */
 /* the page reads like a book on a desk: the paper column in the middle, a quiet bar on top, the question box below */
-.reader-page { position: relative; min-height: 100%; display: flex; flex-direction: column; background: var(--reader-bg); overflow-x: clip; }
-:root { --reader-bg: #f6f5f2; --paper: #ffffff; --paper-edge: rgb(55 53 47 / .09); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --reader-bg: #141414; --paper: #1e1e1e; --paper-edge: rgb(255 255 255 / .06); } }
-:root[data-theme="dark"] { --reader-bg: #141414; --paper: #1e1e1e; --paper-edge: rgb(255 255 255 / .06); }
+/* the reader fills the window and scrolls inside .reader-body, so its scrollbar starts below the top bar */
+.reader-page { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--reader-bg); overflow: hidden; }
+:root.has-titlebar .reader-page { height: calc(100vh - var(--titlebar-h)); }
+:root {
+  --reader-bg: #f6f5f2; --paper: #ffffff; --paper-edge: rgb(55 53 47 / .09);
+  --scroll-thumb: rgb(55 53 47 / .2); --scroll-thumb-hover: rgb(55 53 47 / .38);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --reader-bg: #141414; --paper: #1e1e1e; --paper-edge: rgb(255 255 255 / .06);
+    --scroll-thumb: rgb(255 255 255 / .16); --scroll-thumb-hover: rgb(255 255 255 / .32);
+  }
+}
+:root[data-theme="dark"] {
+  --reader-bg: #141414; --paper: #1e1e1e; --paper-edge: rgb(255 255 255 / .06);
+  --scroll-thumb: rgb(255 255 255 / .16); --scroll-thumb-hover: rgb(255 255 255 / .32);
+}
 
 .reader-head {
-  position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: var(--s3); padding: 10px var(--s5);
+  position: relative; flex: none; z-index: 6; display: flex; align-items: center; gap: var(--s3); padding: 10px var(--s5);
   background: var(--bg); border-bottom: 1px solid var(--line);
 }
 .reader-title { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
@@ -616,7 +629,17 @@ button.block { width: 100%; padding: 9px 14px; }
 .reader-menu-confirm button { width: auto; display: inline-block; border: 1px solid var(--line); }
 .reader-page-error { max-width: 760px; margin: var(--s3) auto 0; }
 
-.reader-body { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: safe center; padding: var(--s6) var(--s5) 200px; overflow-x: auto; }
+.reader-body {
+  flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: safe center;
+  padding: var(--s6) var(--s5) 200px; overflow: auto; overscroll-behavior: contain;
+}
+/* a quiet scrollbar in the reader's colours: a thin rounded thumb on no track, darker under the pointer */
+.reader-body::-webkit-scrollbar { width: 12px; height: 12px; }
+.reader-body::-webkit-scrollbar-track, .reader-body::-webkit-scrollbar-corner { background: transparent; }
+.reader-body::-webkit-scrollbar-thumb { min-height: 40px; border: 3px solid transparent; border-radius: 999px; background: var(--scroll-thumb) padding-box; }
+.reader-body::-webkit-scrollbar-thumb:hover { border-width: 2px; background-color: var(--scroll-thumb-hover); }
+/* the standard properties only where ::-webkit-scrollbar is unknown (Firefox): Chromium would let them replace it */
+@supports not selector(::-webkit-scrollbar) { .reader-body { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; } }
 .reader-body > .prose-reader { width: 100%; }
 /* PDF: each page a sheet of paper, placed before its image arrives so the column never jumps */
 .pdf-pages { display: grid; gap: var(--s6); flex: none; }
@@ -631,6 +654,36 @@ button.block { width: 100%; padding: 9px 14px; }
 :root[data-theme="dark"] .paper img { filter: brightness(.88) contrast(1.05); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .paper img { filter: brightness(.88) contrast(1.05); } }
 .paper figcaption { position: absolute; left: 0; right: 0; top: 100%; padding-top: 8px; text-align: center; font: 11px var(--mono); color: var(--unit-no); }
+/* over the page image (components/PdfLayer.tsx): invisible text to select and copy, links, images to save. The spaces and
+   line breaks between runs (there for copying) stay in the flow: font-size 0 keeps them from showing as a selected block */
+.pdf-layer { position: absolute; inset: 0; overflow: hidden; border-radius: 3px; contain: strict; }
+.pdf-pages.zooming .pdf-layer { display: none; }   /* PdfReader: hidden while the size changes */
+.pdf-text { position: absolute; inset: 0; z-index: 2; font-size: 0; line-height: 1; white-space: pre; color: transparent; cursor: text; user-select: text; }
+.pdf-line { white-space: pre; }
+.pdf-run { position: absolute; transform-origin: 0 0; font-family: sans-serif; font-size: calc(var(--k) * var(--fs) * 1px); white-space: pre; }
+.pdf-text ::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); color: transparent; }
+.pdf-link { position: absolute; z-index: 3; border-radius: 2px; cursor: pointer; }
+.pdf-link:hover, .pdf-link:focus-visible { background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); outline: none; }
+.pdf-link.off { cursor: not-allowed; }
+.pdf-link.off:hover { background: color-mix(in srgb, var(--muted) 12%, transparent); box-shadow: none; }
+.pdf-note { position: absolute; z-index: 3; cursor: help; }
+.pdf-image { position: absolute; z-index: 1; }
+.pdf-image-save {
+  position: absolute; top: 6px; right: 6px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px;
+  background: var(--panel); color: var(--ink); box-shadow: 0 2px 8px var(--shadow); opacity: 0; transition: opacity .15s ease;
+}
+.pdf-image:hover .pdf-image-save, .pdf-image-save:focus-visible { opacity: 1; }
+.pdf-image-save svg { width: 16px; height: 16px; }
+/* the outline: one line per bookmark, the section being read marked */
+.reader-toc { width: 340px; max-height: min(70vh, 560px); overflow-y: auto; }
+.reader-toc button { display: flex; align-items: baseline; gap: 10px; font-size: var(--t-small); line-height: 1.45; }
+.reader-toc button.current { background: var(--accent-soft); color: var(--accent); }
+.reader-toc .toc-title { flex: 1; min-width: 0; }
+.reader-toc .toc-page { flex: none; font: 11px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.reader-attachments { display: grid; gap: 2px; padding: 2px 6px 6px; font-size: var(--t-meta); color: var(--muted); }
+.reader-attachments a { display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--ink); text-decoration: none; padding: 3px 0; }
+.reader-attachments a:hover { color: var(--accent); }
+.reader-attachments svg { width: 14px; height: 14px; flex: none; }
 /* Markdown and text: set as an article in the reading face */
 .prose-reader {
   max-width: calc(720px * var(--zoom, 1)); margin: 0 auto; padding: var(--s7); background: var(--paper); border-radius: 4px;
@@ -650,7 +703,7 @@ button.block { width: 100%; padding: 9px 14px; }
 
 /* the question box: floats over the foot of the page, the answers open above it */
 .reader-dock {
-  position: sticky; bottom: 0; z-index: 7; width: 100%; margin-top: -168px; padding: 48px var(--s4) var(--s5);
+  position: absolute; left: 0; right: 12px; bottom: 0; z-index: 7; padding: 48px var(--s4) var(--s5);   /* right: clear of the scrollbar */
   background: linear-gradient(to bottom, transparent, var(--reader-bg) 46px); pointer-events: none;
 }
 .reader-dock-inner { display: grid; gap: var(--s2); max-width: 720px; margin: 0 auto; pointer-events: auto; }
