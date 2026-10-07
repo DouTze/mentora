@@ -244,3 +244,4 @@ GET  /api/sessions/{id}/export?format=json|md
 
 介面字串集中在 `frontend/src/i18n/`：`zh-Hant.shell.ts`（側邊欄、設定視窗、角色）與 `zh-Hant.pages.ts`（各頁面）是來源，`en.ts` 由 codex 翻譯產生。新增或修改中文字串後在 `frontend/` 跑 `bun run i18n:translate`，只會把缺少或中文已變動的 key 送去翻譯（`--all` 全部重翻），翻譯前後會檢查 `{placeholder}` 是否一致。英文缺 key 時自動退回中文。後端回傳的內容（錯誤訊息、模型輸出、教材）不受語系影響。
 
+英文採美式拼字、簡潔的介面語氣，可直接在 `en.ts` 人工潤飾；一般增量翻譯不會覆蓋中文未變的項目。數量字串的單複數差異放在 `en.plurals.ts`，由 `t()` 依指定的數值變數選擇；修改這些字串時須一併檢查單複數版本，翻譯腳本也會列出需要檢查的 key。教材頁的頁／行單位可用 `t(unitKey, { count })` 取得正確形式。

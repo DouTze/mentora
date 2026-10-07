@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zh } from "../src/i18n/zh-Hant";
 import { en } from "../src/i18n/en";
+import { enPlurals } from "../src/i18n/en.plurals";
 
 type Dict = Record<string, string>;
 const SRC = join(import.meta.dir, "../src/i18n");
@@ -26,17 +27,25 @@ console.log(`translating ${Object.keys(todo).length} keys with codex…`);
 
 const work = mkdtempSync(join(tmpdir(), "mentor-i18n-"));
 const out = join(work, "en.json");
-const prompt = `You are localizing the UI of "Mentor", a local AI study app (students import PDFs/notes, a tutor companion guides reading 導讀, asks questions, gives hints, keeps learning records).
-Translate the Traditional Chinese UI strings in the JSON below into natural, concise product English (Notion-like UI tone: sentence case for labels and buttons, no trailing period on short labels, keep the same level of formality).
+const prompt = `You are localizing the UI of "Mentor", an AI study app (students import PDFs/notes, a study companion guides reading 導讀, asks questions, gives hints, and tracks learning sessions).
+Translate the Traditional Chinese UI strings in the JSON below into natural, concise American English. Use a warm, clear tone, sentence case for labels and buttons, no trailing period on short labels, and periods on complete explanatory sentences. Translate the intent in context rather than word for word.
 Rules:
 - Keep every key; output values only in English.
 - Keep {placeholders} exactly as written.
 - Keys ending in .before/.link/.after (or .from/.to, .open/.close) are fragments of one sentence around an inline element — translate them so they read correctly when concatenated (quote brackets 「」 become curly quotes “ ”; list separators 、 and ； become ", " and "; ").
-- Keep technical tokens as-is: pdf, md, txt, Markdown, JSON, Ollama, OpenVINO, temperature, max_tokens, context tokens, mock.
+- Preserve product names, paths, and code identifiers where needed: Markdown, JSON, Ollama, OpenVINO, REMOTE_JOBS, OLLAMA_NUM_PARALLEL. In file picker hints, use "PDF, Markdown, or text files". Prefer clear labels such as "Maximum response length (tokens)" over internal parameter names.
 - Companion names (keys companion.*.name) are character names: romanize them nicely (墨羽 → Moyu, 小栗 → Kuri, 汐 → Shio); creatures: owl / red fox / sea otter.
-- 導讀 → "guided reading", 伴讀 → "Companion", 教材 → "materials", 學習紀錄 → "learning records", 示範模式 → "demo mode".
+- Use "guided reading" for the activity and "reading guide" for the generated explanation. Use "section" for a reading segment and "part" for a group of sections or a block within a guide.
+- 伴讀 → "companion" (lowercase within sentences); 教材 → "materials" for the library as a whole, "document" for one imported file, or "source text" for its contents. Never use "Materials name" or "Delete materials" for a single document.
+- 學習紀錄 → "Learning history" for the screen, "session" for one entry; 進行中的學習 → "Current session"; 閱讀區 → "reading collection"; 書櫃範圍 → "Book folders"; 示範模式 → "demo mode"; 示範教材 → "sample lesson".
+- Use "practice" or "practice questions" for the question phase (e.g. "Start practice"), "Check your understanding" for diagnostic questions, and "Apply what you’ve learned" for transfer questions.
+- Counted messages use the plural by default; singular overrides are maintained separately in en.plurals.ts. Bare unit labels material.unit.page and material.unit.line must stay singular ("page", "line"); their plural forms are also in en.plurals.ts. Avoid "(s)" and ambiguous noun fragments. Do not invent claims or change what an action does.
 Write ONLY a JSON object mapping each key to its English string to the file ${out} (UTF-8), then stop. Do not modify any other file.
 
+Existing English for context (revise to reflect any changed Chinese meaning while preserving terminology):
+${JSON.stringify(Object.fromEntries(Object.keys(todo).filter((k) => k in current).map((k) => [k, current[k]])), null, 2)}
+
+Traditional Chinese source:
 ${JSON.stringify(todo, null, 2)}`;
 
 const proc = Bun.spawnSync(["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write", "-C", work, "-"], {
@@ -70,3 +79,5 @@ writeFileSync(
 );
 writeFileSync(STAMP, JSON.stringify(Object.fromEntries(Object.keys(merged).map((k) => [k, source[k]])), null, 2) + "\n");
 console.log(`wrote ${Object.keys(translated).length} translations to src/i18n/en.ts`);
+const pluralKeys = Object.keys(todo).filter((k) => k in enPlurals);
+if (pluralKeys.length) console.log(`Review the corresponding forms in src/i18n/en.plurals.ts: ${pluralKeys.join(", ")}`);
