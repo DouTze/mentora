@@ -135,7 +135,12 @@ class ShelfScout:
             tendencies = [{"label": w[:16], "keywords": keywords_of(w)} for w in ([s["query"]] if s.get("query") else []) + (s.get("interests") or [])[:3]]
         if s.get("query") and not any(set(keywords_of(s["query"])) & {k.lower() for k in t["keywords"]} for t in tendencies[:1]):
             tendencies.insert(0, {"label": s["query"][:16], "keywords": keywords_of(s["query"])})
-        return {"tendencies": [t for t in tendencies if t["keywords"]][:4], "model_failures": s["model_failures"]}
+        unique, seen = [], set()
+        for t in tendencies:   # a small model may repeat a label; the first one stays
+            if t["keywords"] and t["label"].lower() not in seen:
+                seen.add(t["label"].lower())
+                unique.append(t)
+        return {"tendencies": unique[:4], "model_failures": s["model_failures"]}
 
     async def _search(self, s: ScoutState) -> ScoutState:
         return {"candidates": await asyncio.to_thread(self._candidates, s)}

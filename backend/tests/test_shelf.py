@@ -158,3 +158,11 @@ def test_text_files_have_no_rendered_cover(client):
     md = next(b for b in v["books"] if b["kind"] == "md")
     assert md["title"] == "機器學習導論"     # the first # heading
     assert client.get(f"/api/shelf/{md['id']}/cover").status_code == 404
+
+
+def test_wishes_are_remembered_newest_first_and_can_be_forgotten(client):
+    for w in ("小說", "強化學習", "小說"):
+        client.post("/api/shelf/query", json={"text": w})
+    assert wait_ready(client)["interests"] == ["小說", "強化學習"]
+    r = client.request("DELETE", "/api/shelf/interests", json={"text": "小說"})
+    assert r.json()["interests"] == ["強化學習"]

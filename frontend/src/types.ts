@@ -293,6 +293,8 @@ export interface ShelfBook {
   author: string;
   kind: "pdf" | "md" | "txt";
   pages: number | null;
+  /** a serial: number of chapter files read as one book */
+  parts: number | null;
   folder: string;
   /** cover width / height (PDF first page); text files get a drawn cover */
   aspect: number;

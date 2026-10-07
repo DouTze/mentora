@@ -83,6 +83,7 @@ export const api = {
   shelfSearch: (q: string) => call<{ books: ShelfBook[] }>(`/shelf/search?q=${encodeURIComponent(q)}`),
   /** saves the wish (if any) and starts a scout run in the background */
   shelfQuery: (text: string) => call<ShelfView>("/shelf/query", { method: "POST", body: JSON.stringify({ text }) }),
+  shelfForget: (text: string) => call<{ interests: string[] }>("/shelf/interests", { method: "DELETE", body: JSON.stringify({ text }) }),
   shelfImport: (ids: string[], categoryName: string | null) =>
     call<{ category: Category | null; materials: Material[] }>("/shelf/import", { method: "POST", body: JSON.stringify({ ids, category_name: categoryName }) }),
   shelfCoverUrl: (id: string) => `${API_BASE}/shelf/${id}/cover`,

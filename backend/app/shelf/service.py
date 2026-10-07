@@ -60,6 +60,10 @@ class ShelfService:
         if text:
             self.db.set_setting(INTERESTS_KEY, [text] + [x for x in self.interests() if x != text][:MAX_INTERESTS - 1])
 
+    def forget(self, text: str) -> list[str]:
+        self.db.set_setting(INTERESTS_KEY, [x for x in self.interests() if x != text])
+        return self.interests()
+
     def _exclude(self) -> set[str]:
         """Books already in the library stay off the shelf (matched by file name and by title)."""
         return {s.lower() for m in self.materials.list() for s in (m["filename"], m["title"])}

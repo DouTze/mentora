@@ -172,6 +172,10 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         shelf.start(req.text.strip() or None)
         return await asyncio.to_thread(shelf.view)
 
+    @app.delete("/api/shelf/interests")
+    def shelf_forget(req: ShelfQuery):
+        return {"interests": shelf.forget(req.text)}
+
     @app.get("/api/shelf/{eid}/cover")
     def shelf_cover(eid: str):
         path = shelf.cover(eid)

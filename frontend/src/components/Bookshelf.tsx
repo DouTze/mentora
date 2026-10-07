@@ -2,7 +2,7 @@
 // the same height and its own proportion, so a slim paperback, an A4 handout and a drawn cover for a text file sit
 // together on one baseline. A PDF shows its first page; text files (and cloud files that must not be downloaded
 // for a picture) get a cloth-bound cover drawn from a small, muted palette.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { ShelfBook } from "../types";
 import { Icon } from "./Icons";
@@ -46,7 +46,7 @@ function Book({ book, index, selected, onToggle }: { book: ShelfBook; index: num
   const [failed, setFailed] = useState(false);
   const aspect = book.kind === "pdf" && !book.cloud && !failed ? Math.min(Math.max(book.aspect, 0.62), 0.8) : 0.68;
   const width = Math.round(COVER_H * aspect);
-  const meta = book.reason || (book.pages ? t("shelf.pages", { count: book.pages }) : book.folder);
+  const meta = book.reason || (book.pages ? t("shelf.pages", { count: book.pages }) : book.parts ? t("shelf.parts", { count: book.parts }) : book.folder);
   return (
     <li className="book-slot" style={{ width, animationDelay: `${index * 60}ms` }}>
       <button
@@ -76,8 +76,19 @@ function Book({ book, index, selected, onToggle }: { book: ShelfBook; index: num
 const GHOSTS = [0.66, 0.74, 0.62, 0.7, 0.78, 0.64];
 
 export function Bookshelf({ books, loading, selected, onToggle }: { books: ShelfBook[]; loading: boolean; selected: Set<string>; onToggle: (id: string) => void }) {
+  // the shelf waits below the first screen; its books come in one by one when it scrolls into view
+  const ref = useRef<HTMLDivElement>(null);
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || seen) return;
+    if (typeof IntersectionObserver === "undefined") return setSeen(true);
+    const io = new IntersectionObserver(([e]) => e.isIntersecting && setSeen(true), { threshold: 0.25 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [seen]);
   return (
-    <div className="shelf">
+    <div ref={ref} className={`shelf ${seen ? "seen" : ""}`}>
       <ul className="shelf-row">
         {books.length === 0 && loading
           ? GHOSTS.map((a, i) => (

@@ -5,7 +5,7 @@
 // typing filters the shelf at once with a plain keyword search, Enter saves the wish and lets the scout choose
 // again in the background. Nothing waits on the model: the shelf always shows something, and while the scout
 // works the companion only murmurs that it is getting ready. Files can still be dropped or picked by hand.
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, RequestError } from "../api";
 import type { Library, SessionListItem, ShelfBook, ShelfView } from "../types";
 import type { Route } from "../route";
@@ -67,14 +67,16 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [hi, setHi] = useState(-1);
   const fileInput = useRef<HTMLInputElement>(null);
+  const askInput = useRef<HTMLInputElement>(null);
+  const below = useRef<HTMLDivElement>(null);
 
-  // the page scrolls the window, or .shell under the desktop title bar; either one lifts the veil
+  // the hint at the foot of the first screen goes once the page moves (the window, or .shell under the desktop title bar)
   useEffect(() => {
-    const onScroll = (e: Event) => {
-      const top = e.target instanceof Element ? e.target.scrollTop : window.scrollY;
-      setScrolled(top > 24);
-    };
+    // read the page's own position, not the event's target: sideways scrolling on the shelf reports scrollTop 0 too
+    const onScroll = () => setScrolled(Math.max(window.scrollY, document.querySelector(".shell")?.scrollTop ?? 0) > 8);
     document.addEventListener("scroll", onScroll, { capture: true, passive: true });
     return () => document.removeEventListener("scroll", onScroll, { capture: true });
   }, []);
@@ -140,6 +142,9 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
   const ask = async (wish: string) => {
     const q = wish.trim();
     if (!q) return;
+    setText(q);
+    setFocused(false);
+    askInput.current?.blur();
     try {
       setView(await api.shelfQuery(q));
     } catch (e) {
@@ -147,9 +152,33 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
     }
   };
 
+  // past wishes, newest first: all of them on an empty box, the ones containing what is typed otherwise
+  const q = text.trim();
+  const history = (view?.interests ?? []).filter((x) => !q || (x !== q && x.toLowerCase().includes(q.toLowerCase()))).slice(0, 6);
+  const showHistory = focused && history.length > 0;
+  useEffect(() => setHi(-1), [q, focused]);
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    ask(text);
+    ask(hi >= 0 && showHistory ? history[hi] : text);
+  };
+
+  const onAskKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (!showHistory) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const n = history.length;
+      setHi((i) => (e.key === "ArrowDown" ? (i + 1) % n : (i - 1 + n) % n));
+    } else if (e.key === "Escape") {
+      setFocused(false);
+    }
+  };
+
+  const forget = async (wish: string) => {
+    try {
+      const r = await api.shelfForget(wish);
+      setView((v) => v && { ...v, interests: r.interests });
+    } catch {}
   };
 
   const importFiles = async (files: File[]) => {
@@ -192,9 +221,12 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
   const empty = library.materials.length === 0;
   const shelfLabel = typed && typed.length > 0 ? t("shelf.label.matching", { q: text.trim() }) : view?.query ? t("shelf.label.wish", { q: view.query }) : t("shelf.label.forYou");
 
+  const searching = q.length > 0;
+  const moreHint = books.length > 0 ? t("home.more.books", { count: books.length }) : active.length > 0 ? t("home.more.resume") : null;
+
   return (
     <div
-      className="home"
+      className={`home ${searching ? "searching" : ""} ${scrolled ? "scrolled" : ""}`}
       onDragOver={(e) => {
         e.preventDefault();
         setOver(true);
@@ -208,119 +240,153 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
         importFiles([...e.dataTransfer.files]);
       }}
     >
-      <h1 className="home-title">{t(empty ? "home.title.empty" : "home.title")}</h1>
+      {/* the first screen holds only the question and the box; the shelf and the unfinished readings wait below */}
+      <section className="home-hero">
+        <div className="home-hero-inner">
+          <h1 className="home-title">{t(empty ? "home.title.empty" : "home.title")}</h1>
 
-      <form className={`home-ask ${over ? "over" : ""}`} onSubmit={submit}>
-        <button type="button" className="home-ask-btn" title={t("home.attach")} aria-label={t("home.attach")} disabled={busy} onClick={() => fileInput.current?.click()}>
-          <Icon.attach />
-        </button>
-        <input
-          className="home-ask-input"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={over ? t("home.drop.release") : t("home.ask.placeholder")}
-          aria-label={t("home.ask.label")}
-          maxLength={200}
-        />
-        <button type="submit" className="home-ask-send" aria-label={t("home.ask.send")} disabled={!text.trim()}>
-          <Icon.arrowUp />
-        </button>
-        <input ref={fileInput} type="file" accept=".pdf,.md,.markdown,.txt" multiple hidden onChange={(e) => { importFiles([...(e.target.files ?? [])]); e.target.value = ""; }} />
-      </form>
-
-      <div className="home-status">
-        {busy ? (
-          <span className="murmur">
-            <span className="murmur-dot" aria-hidden="true" />
-            <span className="murmur-text">{t("home.importing")}</span>
-          </span>
-        ) : preparing || !view ? (
-          <Murmur />
-        ) : view.tendencies.length > 0 ? (
-          <span className="tendencies">
-            {view.tendencies.map((x) => (
-              <button
-                key={x}
-                type="button"
-                className="chip"
-                onClick={() => {
-                  setText(x);
-                  ask(x);
-                }}
-              >
-                {x}
+          <div className="home-ask-wrap">
+            <form className={`home-ask ${over ? "over" : ""} ${showHistory ? "with-history" : ""}`} onSubmit={submit}>
+              <button type="button" className="home-ask-btn" title={t("home.attach")} aria-label={t("home.attach")} disabled={busy} onClick={() => fileInput.current?.click()}>
+                <Icon.attach />
               </button>
-            ))}
-          </span>
-        ) : null}
-      </div>
+              <input
+                ref={askInput}
+                className="home-ask-input"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                onKeyDown={onAskKey}
+                placeholder={over ? t("home.drop.release") : t("home.ask.placeholder")}
+                aria-label={t("home.ask.label")}
+                aria-expanded={showHistory}
+                aria-controls="home-history"
+                aria-activedescendant={hi >= 0 ? `home-history-${hi}` : undefined}
+                role="combobox"
+                autoComplete="off"
+                maxLength={200}
+              />
+              <button type="submit" className="home-ask-send" aria-label={t("home.ask.send")} disabled={!q}>
+                <Icon.arrowUp />
+              </button>
+              <input ref={fileInput} type="file" accept=".pdf,.md,.markdown,.txt" multiple hidden onChange={(e) => { importFiles([...(e.target.files ?? [])]); e.target.value = ""; }} />
+            </form>
+            {showHistory && (
+              // mousedown keeps the focus in the box, so a click lands before the list closes
+              <ul id="home-history" className="home-history" role="listbox" aria-label={t("home.history")} onMouseDown={(e) => e.preventDefault()}>
+                {!q && <li className="home-history-head">{t("home.history")}</li>}
+                {history.map((x, i) => (
+                  <li key={x} id={`home-history-${i}`} role="option" aria-selected={i === hi} className={i === hi ? "active" : ""} onMouseEnter={() => setHi(i)}>
+                    <button type="button" className="home-history-item" onClick={() => ask(x)}>
+                      <Icon.history />
+                      <span className="grow">{x}</span>
+                    </button>
+                    <button type="button" className="home-history-forget" aria-label={t("home.history.forget", { q: x })} title={t("home.history.forget", { q: x })} onClick={() => forget(x)}>
+                      <Icon.close />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
-      {error && (
-        <div className="error" role="alert">
-          {error}
-        </div>
-      )}
+          <div className="home-status">
+            {busy ? (
+              <span className="murmur">
+                <span className="murmur-dot" aria-hidden="true" />
+                <span className="murmur-text">{t("home.importing")}</span>
+              </span>
+            ) : preparing || !view ? (
+              <Murmur />
+            ) : null}
+          </div>
 
-      {(books.length > 0 || preparing || !view) && (
-        <section className="home-shelf">
-          <h2 className="home-label">{shelfLabel}</h2>
-          <Bookshelf books={books} loading={preparing || !view} selected={selected} onToggle={toggle} />
-        </section>
-      )}
-
-      {chosen.length > 0 && (
-        <div className="shelf-bar" role="region" aria-label={t("shelf.bar.label")}>
-          {chosen.length === 1 ? (
-            <span className="shelf-bar-text grow">{chosen[0].title}</span>
-          ) : (
-            <label className="shelf-bar-area grow">
-              <span>{t("shelf.area.prefix", { count: chosen.length })}</span>
-              <input value={areaName} onChange={(e) => setAreaName(e.target.value)} maxLength={40} aria-label={t("shelf.area.name")} />
-            </label>
+          {error && (
+            <div className="error" role="alert">
+              {error}
+            </div>
           )}
-          <button type="button" className="ghost" onClick={() => setSelected(new Set())} disabled={busy}>
-            {t("common.cancel")}
-          </button>
-          <button type="button" className="primary" onClick={importChosen} disabled={busy}>
-            {t(chosen.length === 1 ? "shelf.bar.read" : "shelf.bar.area")}
-          </button>
         </div>
-      )}
 
-      {empty && !preparing && view && books.length === 0 && (
-        <p className="home-hint">
-          {t("home.empty.before")}
-          <button className="link" onClick={() => onNavigate({ page: "learn" })}>
-            {t("home.empty.link")}
+        {moreHint && (
+          <button type="button" className="home-more" onClick={() => below.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+            <span>{moreHint}</span>
+            <Icon.chevron />
           </button>
-          {t("home.empty.after")}
-        </p>
-      )}
+        )}
+      </section>
 
-      {active.length > 0 && (
-        <section className="home-resume">
-          <h2 className="home-label">{t("home.active")}</h2>
-          <ul>
-            {active.map((s) => (
-              <li key={s.id}>
-                <button onClick={() => onOpenSession(s.id)}>
-                  <span className="grow">
-                    <span className="home-resume-title">{s.source ? s.source.material_title : s.content_title}</span>
-                    <span className="home-resume-meta">
-                      {s.source ? `${s.source.label} · ` : ""}
-                      {ago(s.updated_at, locale)}
+      <div ref={below} className="home-below">
+        {(books.length > 0 || preparing) && (
+          <section className="home-shelf">
+            <div className="home-shelf-head">
+              <h2 className="home-label">{shelfLabel}</h2>
+              {!searching && view && view.tendencies.length > 0 && (
+                <span className="tendencies">
+                  {view.tendencies.map((x) => (
+                    <button key={x} type="button" className="chip" onClick={() => ask(x)}>
+                      {x}
+                    </button>
+                  ))}
+                </span>
+              )}
+            </div>
+            <Bookshelf books={books} loading={preparing} selected={selected} onToggle={toggle} />
+          </section>
+        )}
+
+        {chosen.length > 0 && (
+          <div className="shelf-bar" role="region" aria-label={t("shelf.bar.label")}>
+            {chosen.length === 1 ? (
+              <span className="shelf-bar-text grow">{chosen[0].title}</span>
+            ) : (
+              <label className="shelf-bar-area grow">
+                <span>{t("shelf.area.prefix", { count: chosen.length })}</span>
+                <input value={areaName} onChange={(e) => setAreaName(e.target.value)} maxLength={40} aria-label={t("shelf.area.name")} />
+              </label>
+            )}
+            <button type="button" className="ghost" onClick={() => setSelected(new Set())} disabled={busy}>
+              {t("common.cancel")}
+            </button>
+            <button type="button" className="primary" onClick={importChosen} disabled={busy}>
+              {t(chosen.length === 1 ? "shelf.bar.read" : "shelf.bar.area")}
+            </button>
+          </div>
+        )}
+
+        {empty && !preparing && view && books.length === 0 && (
+          <p className="home-hint">
+            {t("home.empty.before")}
+            <button className="link" onClick={() => onNavigate({ page: "learn" })}>
+              {t("home.empty.link")}
+            </button>
+            {t("home.empty.after")}
+          </p>
+        )}
+
+        {active.length > 0 && (
+          <section className="home-resume">
+            <h2 className="home-label">{t("home.active")}</h2>
+            <ul>
+              {active.map((s) => (
+                <li key={s.id}>
+                  <button onClick={() => onOpenSession(s.id)}>
+                    <span className="grow">
+                      <span className="home-resume-title">{s.source ? s.source.material_title : s.content_title}</span>
+                      <span className="home-resume-meta">
+                        {s.source ? `${s.source.label} · ` : ""}
+                        {ago(s.updated_at, locale)}
+                      </span>
                     </span>
-                  </span>
-                  <Icon.chevron />
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {/* on arrival only the box stands out; what lies below fades into the page until the reader scrolls or picks */}
-      <div className={`home-veil ${scrolled || selected.size > 0 ? "lifted" : ""}`} aria-hidden="true" />
+                    <Icon.chevron />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </div>
     </div>
   );
 }

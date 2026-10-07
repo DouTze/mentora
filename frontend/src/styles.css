@@ -258,15 +258,22 @@ button.block { width: 100%; padding: 9px 14px; }
 .rows button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 6px; border: none; border-radius: 0; background: transparent; text-align: left; }
 .rows button:hover { background: var(--side); }
 /* ---------- home: a wish box, a bookshelf, and the readings left unfinished ---------- */
-/* the title and box sit at the middle of the window (91px: from the title's top to the box's middle) */
-.home { position: relative; max-width: 760px; margin: 0 auto; padding: max(40px, calc((100vh - var(--titlebar-h, 0px)) / 2 - 91px)) 32px 40vh; }
-.home-veil {
-  position: sticky; bottom: 0; height: 42vh; margin: -42vh -32px 0; pointer-events: none;
-  background: linear-gradient(to bottom, transparent, var(--bg) 78%);
-  transition: opacity .6s ease;
+/* First screen: the question and the box in the middle, everything else below it. The box is sticky inside the
+   first screen, so scrolling down first draws the books up towards it; once the gap is down to the screen's bottom
+   padding the box scrolls away with the page. While typing, the box glides to the top so what matches rises into view. */
+.home {
+  --screen-h: calc(100vh - var(--titlebar-h, 0px));
+  --hero-top: max(40px, calc(var(--screen-h) / 2 - 91px));   /* 91px: from the title's top to the box's middle */
+  position: relative; max-width: 760px; margin: 0 auto; padding: 0 32px 96px;
 }
-.home-veil.lifted { opacity: 0; }
-.home-title { margin: 0 0 var(--s5); text-align: center; font: 600 32px/1.3 var(--serif); letter-spacing: .02em; color: var(--ink); }
+.home.searching { --hero-top: max(32px, 7vh); }
+.home-hero {
+  position: relative; min-height: var(--screen-h); padding: var(--hero-top) 0 var(--s4);
+  transition: min-height .55s cubic-bezier(.2, .7, .2, 1), padding-top .55s cubic-bezier(.2, .7, .2, 1);
+}
+.home.searching .home-hero { min-height: 0; }
+.home-hero-inner { position: sticky; top: var(--hero-top); z-index: 4; transition: top .55s cubic-bezier(.2, .7, .2, 1); }
+.home-title { margin: 0 0 var(--s5); text-align: center; transition: opacity .3s ease; font: 600 32px/1.3 var(--serif); letter-spacing: .02em; color: var(--ink); }
 .home-ask {
   display: flex; align-items: center; gap: var(--s1); max-width: 620px; margin: 0 auto; padding: 6px;
   border: 1px solid var(--line-strong); border-radius: 18px; background: var(--field);
@@ -289,8 +296,45 @@ button.block { width: 100%; padding: 9px 14px; }
 .home-ask-send:disabled { opacity: 0; transform: scale(.8); cursor: default; }
 .home .error { max-width: 620px; margin: var(--s3) auto 0; }
 
+/* recent searches: a panel that grows out of the box */
+.home-ask-wrap { position: relative; z-index: 5; width: 100%; max-width: 620px; margin: 0 auto; }
+.home-ask.with-history { border-radius: 18px 18px 0 0; border-bottom-color: transparent; box-shadow: 0 1px 2px var(--shadow); }
+.home-history {
+  position: absolute; left: 0; right: 0; top: 100%; margin: 0; padding: 4px 6px 8px; list-style: none;
+  border: 1px solid var(--accent); border-top: 1px solid var(--line); border-radius: 0 0 18px 18px; background: var(--field);
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 18px 36px -18px var(--shadow); animation: history-in .18s ease both;
+}
+.home-history-head { padding: 8px 10px 4px; font-size: var(--t-meta); font-weight: 600; letter-spacing: .08em; color: var(--muted); }
+.home-history li[role="option"] { display: flex; align-items: center; border-radius: 10px; }
+.home-history li.active { background: var(--hover); }
+.home-history-item {
+  display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 8px 10px; border: none; background: transparent;
+  text-align: left; font-size: var(--t-body); color: var(--ink);
+}
+.home-history-item:hover:not(:disabled) { border: none; background: transparent; }
+.home-history-item .icon { color: var(--muted); }
+.home-history-item .grow { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.home-history-forget {
+  display: grid; place-items: center; width: 28px; height: 28px; margin-right: 4px; padding: 0; border: none; border-radius: 8px;
+  background: transparent; color: var(--muted); opacity: 0; transition: opacity .15s ease;
+}
+.home-history li.active .home-history-forget, .home-history-forget:focus-visible { opacity: 1; }
+.home-history-forget:hover:not(:disabled) { border: none; background: var(--side-hover); color: var(--ink); }
+.home-history-forget .icon { width: 13px; height: 13px; }
+
+/* the one line at the foot of the first screen that says what is below */
+.home-more {
+  position: absolute; left: 50%; bottom: 24px; display: inline-flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 6px 12px; border: none; background: transparent; font-size: var(--t-small); color: var(--muted);
+  transform: translateX(-50%); transition: opacity .3s ease, color .2s ease; animation: fade-in 1s .4s ease both;
+}
+.home-more:hover:not(:disabled) { border: none; background: transparent; color: var(--ink); }
+.home-more .icon { transform: rotate(90deg); animation: nudge 2.4s ease-in-out infinite; }
+.home.searching .home-more, .home.scrolled .home-more { opacity: 0; pointer-events: none; }
+
 /* the companion's murmur while the scout works; the reader's tendencies once it is done */
 .home-status { display: flex; justify-content: center; min-height: 28px; margin: var(--s3) 0 0; }
+.home-hero .error { width: 100%; }
 .murmur { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--t-small); color: var(--muted); }
 .murmur-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: breathe 1.8s ease-in-out infinite; }
 .murmur-text { animation: murmur-in .6s ease both; }
@@ -299,11 +343,14 @@ button.block { width: 100%; padding: 9px 14px; }
 .chip:hover:not(:disabled) { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
 
 /* the shelf: covers of one height on one baseline, a thin wooden line beneath */
-.home-shelf { margin-top: var(--s6); }
+.home-shelf { margin-top: var(--s5); }
+.home-shelf-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s1); }
+.home-shelf-head .home-label { margin: 0; }
+.home-shelf-head .tendencies { justify-content: flex-end; }
 .shelf { position: relative; margin: 0 -32px; }
 .shelf-row {
   display: flex; align-items: flex-start; gap: 26px; margin: 0; padding: 14px 32px 4px; list-style: none;
-  overflow-x: auto; scroll-snap-type: x proximity; scroll-padding-inline: 32px; scrollbar-width: none;
+  overflow-x: auto; scrollbar-width: none;
   mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 32px), transparent);
 }
 .shelf-row::-webkit-scrollbar { display: none; }
@@ -311,7 +358,8 @@ button.block { width: 100%; padding: 9px 14px; }
   content: ""; position: absolute; left: 32px; right: 32px; top: 182px; height: 1px;
   background: linear-gradient(90deg, transparent, var(--line-strong) 12%, var(--line-strong) 88%, transparent);
 }
-.book-slot { flex: none; display: flex; flex-direction: column; gap: 3px; scroll-snap-align: start; animation: book-in .6s cubic-bezier(.2, .7, .2, 1) both; }
+.book-slot { flex: none; display: flex; flex-direction: column; gap: 3px; opacity: 0; }
+.shelf.seen .book-slot { opacity: 1; animation: book-in .7s cubic-bezier(.2, .7, .2, 1) both; }
 .book {
   position: relative; display: block; width: 100%; padding: 0; overflow: hidden; border: none; border-radius: 3px 5px 5px 3px;
   background: var(--kind-bg); cursor: pointer;
@@ -369,12 +417,16 @@ button.block { width: 100%; padding: 9px 14px; }
 .home-label { margin: 0 0 var(--s2); font-size: var(--t-meta); font-weight: 600; letter-spacing: .08em; color: var(--muted); }
 @keyframes breathe { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 @keyframes murmur-in { from { opacity: 0; transform: translateY(4px); filter: blur(2px); } }
-@keyframes book-in { from { opacity: 0; transform: translateY(10px); } }
+@keyframes book-in { from { opacity: 0; transform: translateY(14px); } }
+@keyframes history-in { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes nudge { 0%, 100% { transform: rotate(90deg) translateX(0); } 50% { transform: rotate(90deg) translateX(3px); } }
 @media (prefers-reduced-motion: reduce) {
   .book-slot, .murmur-text, .murmur-dot, .book-slot.ghost .book, .tendencies, .shelf-bar { animation: none; }
-  .home-veil { transition: none; }
+  .home-hero, .home-hero-inner, .home-more .icon, .home-history { transition: none; animation: none; }
 }
 .home-resume { margin-top: var(--s7); }
+.home-below { min-height: 40vh; }
+.home-below .home-shelf { margin-top: 0; }
 .home-resume ul { list-style: none; margin: 0; padding: 0; }
 .home-resume li + li { border-top: 1px solid var(--line); }
 .home-resume button {
@@ -447,9 +499,8 @@ button.block { width: 100%; padding: 9px 14px; }
   .doc { padding: 28px 16px 64px; }
   .doc-title { font-size: 26px; }
   .home { padding-left: 16px; padding-right: 16px; }
-  .home-veil { margin-left: -16px; margin-right: -16px; }
   .shelf { margin: 0 -16px; }
-  .shelf-row { padding-left: 16px; padding-right: 16px; scroll-padding-inline: 16px; }
+  .shelf-row { padding-left: 16px; padding-right: 16px; }
   .shelf::after { left: 16px; right: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
