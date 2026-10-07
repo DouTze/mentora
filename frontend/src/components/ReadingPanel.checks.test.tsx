@@ -119,3 +119,21 @@ describe("a topic guided one block at a time", () => {
     expect(screen.getByRole("button", { name: /下一段|讀完了|出題/ })).toBeTruthy();   // the reader can move on
   });
 });
+
+describe("content left out of the guided reading", () => {
+  test("the first unit says what was skipped, each with its text", async () => {
+    const s = held({ code: "x", detail: "" });
+    const skipped = [{ role: "toc" as const, label: "第 1 頁", text: "第一章 緒論 ........ 1" },
+                     { role: "summary" as const, label: "第 25 頁", text: "本章介紹了研究動機。" }];
+    const guide = { chinese_text: null, guide: "導讀內容。", key_points: [], check: "" };
+    serve({ ...s, reading: { ...s.reading!, guides: { "0": guide }, job: null,
+                             segmentation: { planner: "model", candidates: 1, notes: [], status: "done", skipped } },
+            workflow: { ...wfBase, waiting: "student", error: null } });
+    render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
+    const box = await screen.findByTestId("skipped");
+    expect(box).toHaveTextContent("已略過 2 處不需要導讀的內容");
+    expect(box).toHaveTextContent("目錄");
+    expect(box).toHaveTextContent("摘要／重點回顧");
+    expect(box).toHaveTextContent("第一章 緒論 ........ 1");
+  });
+});

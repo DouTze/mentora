@@ -35,10 +35,10 @@ from langchain_core.messages import HumanMessage
 
 from ..llm.runtime import CallBudget, stable_hash
 from ..llm.tasks import TaskContext, TaskError, run_structured
-from .schemas import (Outline, ParagraphTopic, PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
+from .schemas import (Boundaries, MatterLabels, Outline, ParagraphTopic, PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
                       TopicSummary, UnitChunk, WindowPlan)
 
-SEGMENTATION_VERSION = "units-v9"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊
+SEGMENTATION_VERSION = "units-v10"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -204,7 +204,7 @@ def rules_groups(blocks: list[SourceBlock]) -> list[list[int]]:
 
 
 def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int = 0, hi: int | None = None, *,
-                    size_limit: bool = True) -> list[str]:
+                    size_limit: bool = True, skipped: set[int] | None = None) -> list[str]:
     """Errors of a grouping of blocks[lo:hi] (empty list = valid). Only what the program must guarantee is checked:
     coverage and order, protected relations (glue) and — for the buffer planner, whose guide is one model call per
     unit — the strict size limit; where a topic begins is the model's call. Units from 區塊 outlines have no size
@@ -212,10 +212,11 @@ def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int 
     hi = len(blocks) if hi is None else hi
     errs: list[str] = []
     flat = [i for grp in groups for i in grp]
-    if flat != list(range(lo, hi)):
+    skipped = skipped or set()
+    if flat != [i for i in range(lo, hi) if i not in skipped]:
         seen: set[int] = set()
         dup = [i for i in flat if i in seen or seen.add(i)]
-        miss = sorted(set(range(lo, hi)) - set(flat))
+        miss = sorted(set(range(lo, hi)) - set(flat) - skipped)
         if dup:
             errs.append("重複使用的區塊：" + "、".join(f"B{i - lo + 1}" for i in dup))
         if miss:
@@ -619,6 +620,7 @@ CHUNK_MIN_CHARS = 60      # a shorter 區塊 (a lead-in line, a one-line paragra
 OUTLINE_BATCH = 12        # 區塊 per segment_outline call
 OUTLINE_PREVIEW = 500     # chars of one 區塊 shown to segment_outline
 TOPIC_BATCH = 30          # outline lines per segment_topic call
+BOUNDARY_BATCH = 8        # paragraphs per segment_boundaries call: with 18, qwen3-vl:4b copied the example for every pair
 
 
 def make_chunks(blocks: list[SourceBlock], lo: int = 0, hi: int | None = None) -> list[list[int]]:
@@ -719,6 +721,44 @@ async def outline_chunks(blocks: list[SourceBlock], chunks: list[list[int]], dep
     return out
 
 
+async def _boundaries(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, owned: list[str],
+                      notes: list[str]) -> list[int]:
+    """Where a new unit begins, judged pair by pair from the paragraphs' content summaries (segment_boundaries).
+    Asked where topics change from the outlines' topic labels, a small model cut wherever the labels differed, and
+    they were written finely (every paragraph its own topic); asked to name each paragraph's unit, it named each
+    paragraph. Comparing two neighbours at a time, with the whole stretch in view, it answered the same way every
+    time. Returns 1-based paragraph numbers, like the older decision."""
+    n = len(lines)
+    said = [x.summary.strip() or x.topic.strip() for x in lines]
+    prompt = deps.prompts["segment_boundaries"].replace("{{material_title}}", deps.material_title) \
+        .replace("{{count}}", str(n)).replace("{{pair_count}}", str(n - 1)) \
+        .replace("{{summaries}}", "\n".join(f"P{j}：{s}" for j, s in enumerate(said, 1))) \
+        .replace("{{pairs}}", "\n".join(f"B{j}：P{j}「{said[j - 1]}」 → P{j + 1}「{said[j]}」" for j in range(1, n)))
+    schema = Boundaries.model_json_schema()
+    schema["properties"]["boundaries"] = {**schema["properties"]["boundaries"], "minItems": n - 1, "maxItems": n - 1}
+
+    def check(ans: Boundaries) -> None:
+        from ..llm.tasks import OutputInvalid
+        if len(ans.boundaries) != n - 1:
+            raise OutputInvalid(f"boundaries 必須剛好 {n - 1} 個（每對相鄰段落一個），收到 {len(ans.boundaries)} 個")
+
+    try:
+        ans, _ = await run_structured(deps.make_ctx("segment_boundaries", key), [HumanMessage(content=prompt)],
+                                      Boundaries, task="segment_boundaries", node=f"segment.{key}",
+                                      prompt_version=deps.prompt_version,
+                                      meta={"step": "segment_boundaries", "paragraphs": n,
+                                            "topics": [x.topic for x in lines]},
+                                      source_ids=owned, check=check, json_schema=schema, min_max_tokens=512,
+                                      min_context_tokens=16384)
+        return [j + 2 for j, x in enumerate(ans.boundaries) if x == "new"]
+    except TaskError as e:
+        if e.kind == "unavailable":
+            raise
+        notes.append(f"{key} 主題判斷無效，改在大主題寫法改變處切開：{e.detail[:120]}")
+        return [j for j in range(2, n + 1) if _topic_key(lines[j - 1].topic) != _topic_key(lines[j - 2].topic)
+                and "未判斷" not in lines[j - 1].topic]
+
+
 def _topic_key(t: str) -> str:
     return re.sub(r"[\s「」『』（）()：:，,。]", "", t or "")
 
@@ -731,9 +771,10 @@ async def topic_starts(outline: list[ParagraphTopic], deps: PlannerDeps, done: d
     n = len(outline)
     starts = {0}
     pos, b = 0, 0
+    batch = BOUNDARY_BATCH if "segment_boundaries" in deps.prompts else TOPIC_BATCH
     while pos < n:
         b += 1
-        hi = min(n, pos + TOPIC_BATCH)
+        hi = min(n, pos + batch)
         lines = outline[pos:hi]
         key = f"t{b:02d}"
         owned = [x for c in ids[pos:hi] for x in c]
@@ -757,6 +798,8 @@ async def _decide(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, owne
     n = len(lines)
     if n < 2:
         return []
+    if "segment_boundaries" in deps.prompts:
+        return await _boundaries(lines, deps, key, owned, notes)
     text = "\n".join(f"P{j}：大主題「{x.topic.strip()}」｜{x.aspect.strip()}" for j, x in enumerate(lines, 1))
     prompt = deps.prompts["segment_topic"].replace("{{material_title}}", deps.material_title) \
         .replace("{{count}}", str(n)).replace("{{summaries}}", text)
@@ -785,17 +828,190 @@ async def _decide(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, owne
                 and "未判斷" not in lines[j - 1].topic]
 
 
+ROLE_NAMES = {"toc": "目錄", "summary": "摘要／重點回顧", "meta": "非學科內容"}
+# a table-of-contents entry: dot leaders (or a wide gap) then a page number, also chapter-paged ("1-1", "3-12")
+TOC_ENTRY_RE = re.compile(r"(?:[.．·・…]{4,}|…{2,}| {3,}|\t)\s*\d{1,4}(?:-\d{1,4})?(?!\d)")
+# an entry without leaders: a numbered title ending in its page number ("3.1 The Agent–Environment Interface 48")
+TOC_NUMBERED_RE = re.compile(r"^\s*(?:第.{1,6}[章節]|\d+(?:\.\d+)+)\s+\S.{0,80}?\s\d{1,4}(?:-\d{1,4})?\s*$")
+TOC_TITLE_RE = re.compile(r"^\W*(?:目錄|目次|contents|table of contents)\W*$", re.I)
+TOC_MIN_ENTRIES = 3        # entries in a row before it is a table of contents
+TOC_ENTRY_CHARS = 120      # an entry block is entries, not prose that happens to end in a number
+def toc_entries(text: str) -> int:
+    lines = [x for x in (text or "").splitlines() if x.strip()]
+    return len(TOC_ENTRY_RE.findall(text or "")) + sum(
+        1 for x in lines if TOC_NUMBERED_RE.match(x) and not TOC_ENTRY_RE.search(x))
+
+
+def toc_blocks(blocks: list[SourceBlock]) -> list[list[int]]:
+    """Runs of source blocks that make a table of contents, found by the program before 區塊 are formed (a PDF puts
+    each entry in a block of its own, glues one to the next paragraph, or several entries into one line): blocks
+    that are mostly entries, at least TOC_MIN_ENTRIES of them in a row, with the 「目錄」 title just before."""
+    runs: list[list[int]] = []
+    run, n = [], 0
+
+    def close():
+        if n >= TOC_MIN_ENTRIES:
+            k = run[0] - 1
+            while k >= 0 and TOC_TITLE_RE.match(blocks[k].text or ""):
+                run.insert(0, k)
+                k -= 1
+            runs.append(list(run))
+
+    for i, b in enumerate(blocks):
+        e = 0 if b.kind in ("code", "formula", "table") else toc_entries(b.text)
+        if e and len(b.text) <= e * TOC_ENTRY_CHARS:
+            run.append(i)
+            n += e
+        else:
+            close()
+            run, n = [], 0
+    close()
+    return runs
+
+
+MATTER_BATCH = 40     # outline lines per segment_matter call: enough of the range to see what is lesson and what is not
+REPEAT_MIN = 0.35     # share of a 區塊's wording already in the range before it: a summary repeats, new teaching does not
+
+
+def repeated_share(blocks: list[SourceBlock], c: list[int], earlier: list[int]) -> float:
+    """How much of 區塊 `c`'s wording (character bigrams) is already in the earlier blocks."""
+    def grams(t: str) -> set[str]:
+        t = re.sub(r"[^\w]", "", t or "")
+        return {t[i:i + 2] for i in range(len(t) - 1)}
+    own = grams(" ".join(blocks[i].text for i in c if blocks[i].kind != "heading"))
+    if not own:
+        return 0.0
+    return len(own & grams(" ".join(blocks[i].text for i in earlier))) / len(own)
+
+
+async def matter_marks(blocks: list[SourceBlock], chunks: list[list[int]], outline: list[ParagraphTopic],
+                       deps: PlannerDeps, done: dict, on_window, notes: list[str]) -> dict[int, str]:
+    """The 區塊 that are not lessons of the material's subject, judged on the outlines of a whole stretch at once
+    (segment_matter): about the material, course or exam itself (meta), a summary of what was already taught
+    (summary), contents (toc). Judged one paragraph at a time a small model calls nearly everything content; side
+    by side, a chapter of exam rules reads as such next to the lessons after it. The program then keeps only what
+    it can check for any book: a summary must repeat the text before it (a chapter's opening lesson does not), a
+    table of contents must have the shape of one; code, formulas and tables are never left out."""
+    if "segment_matter" not in deps.prompts or not chunks:
+        return {}
+    n = len(chunks)
+    # two passes over batches cut at different places: what a paragraph is for should not depend on its neighbours
+    # in one batch (a chapter's opening was called meta in one batch, lesson in another). Left out only where both
+    # passes agree.
+    first = await _matter_pass(blocks, chunks, outline, deps, done, on_window, notes, list(range(0, n, MATTER_BATCH)), "m")
+    # the second pass's batches start half a batch later; a range shorter than one batch is cut in two halves, or
+    # both passes would ask the very same question
+    shifted = [0] + list(range(MATTER_BATCH // 2, n, MATTER_BATCH)) if n > MATTER_BATCH else [0, n // 2]
+    second = await _matter_pass(blocks, chunks, outline, deps, done, on_window, notes, sorted(set(shifted)), "n")
+    return {k: kind for k, kind in first.items() if k in second}
+
+
+async def _matter_pass(blocks: list[SourceBlock], chunks: list[list[int]], outline: list[ParagraphTopic],
+                       deps: PlannerDeps, done: dict, on_window, notes: list[str], starts: list[int],
+                       tag: str) -> dict[int, str]:
+    """One labelling pass, batches beginning at `starts`; returns the 區塊 the program accepts as needing no guide."""
+    out: dict[int, str] = {}
+    bounds = starts + [len(chunks)]
+    for b, (start, end) in enumerate(zip(bounds, bounds[1:]), 1):
+        idx = list(range(start, end))
+        if not idx:
+            continue
+        key = f"{tag}{b:02d}"
+        owned = [blocks[i].block_id for k in idx for i in chunks[k]]
+        saved = done.get(key)
+        if saved and saved.get("owned") == owned:
+            marks = saved["marks"]
+        else:
+            lines = "\n".join(f"P{j}：大主題「{outline[k].topic.strip()}」｜{outline[k].summary.strip()}"
+                              for j, k in enumerate(idx, 1))
+            prompt = deps.prompts["segment_matter"].replace("{{material_title}}", deps.material_title) \
+                .replace("{{count}}", str(len(idx))).replace("{{summaries}}", lines)
+            # one label per paragraph, so many of them: asked only for the exceptions, the model copied the empty
+            # example and listed none
+            schema = MatterLabels.model_json_schema()
+            schema["properties"]["labels"] = {**schema["properties"]["labels"], "minItems": len(idx), "maxItems": len(idx)}
+
+            def check(ans: MatterLabels, n=len(idx)) -> None:
+                from ..llm.tasks import OutputInvalid
+                if len(ans.labels) != n:
+                    raise OutputInvalid(f"labels 必須剛好 {n} 個（每段一個），收到 {len(ans.labels)} 個")
+
+            try:
+                ans, _ = await run_structured(deps.make_ctx("segment_matter", key), [HumanMessage(content=prompt)],
+                                              MatterLabels, task="segment_matter", node=f"segment.{key}",
+                                              prompt_version=deps.prompt_version,
+                                              meta={"step": "segment_matter", "paragraphs": len(idx)},
+                                              source_ids=owned, check=check, json_schema=schema, min_max_tokens=1024,
+                                              min_context_tokens=16384)
+                marks = [{"p": j, "kind": x} for j, x in enumerate(ans.labels, 1) if x != "lesson"]
+            except TaskError as e:
+                if e.kind == "unavailable":
+                    raise
+                notes.append(f"{key} 不需導讀內容的判斷無效，這一批全部保留：{e.detail[:120]}")
+                marks = []
+            if on_window:
+                on_window(key, {"owned": owned, "marks": marks})
+        for m in marks:
+            k = idx[m["p"] - 1]
+            c = chunks[k]
+            if any(blocks[i].kind in ("code", "formula", "table") for i in c):
+                continue
+            if m["kind"] == "summary":
+                earlier = [i for j in range(k) if j not in out for i in chunks[j]]
+                if repeated_share(blocks, c, earlier) < REPEAT_MIN:
+                    continue   # says something the range has not: it is teaching, whatever it is called
+            if m["kind"] == "toc" and not toc_entries("\n".join(blocks[i].text for i in c)):
+                continue
+            out[k] = m["kind"]
+    return out
+
+
+def skipped_view(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock]) -> list[dict]:
+    """What the reader is told was left out: where it is, what it was judged to be, and its text."""
+    out = []
+    for x in plan.skipped:
+        bs = [by_id[i] for i in x["block_ids"] if i in by_id]
+        if bs:
+            out.append({"role": x["role"], "label": _label(unit, bs), "topic": x.get("topic", ""),
+                        "text": "\n\n".join(b.text for b in bs)})
+    return out
+
+
 async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_windows: dict, on_window) -> SegmentationPlan:
     notes: list[str] = []
-    chunks = make_chunks(blocks)
+    tocs = toc_blocks(blocks)
+    in_toc = {i for r in tocs for i in r}
+    if len(in_toc) == len(blocks):   # nothing but contents: keep it (an empty range would be worse)
+        tocs, in_toc = [], set()
+    chunks: list[list[int]] = []
+    carry: list[int] = []
+    for c in make_chunks(blocks):
+        c = carry + [i for i in c if i not in in_toc]
+        carry = []
+        if c and all(blocks[i].kind == "heading" for i in c):   # headings left alone by the contents: next 區塊
+            carry = c
+        elif c:
+            chunks.append(c)
+    if carry:
+        chunks.append(carry) if not chunks else chunks[-1].extend(carry)
     ids = [[blocks[i].block_id for i in c] for c in chunks]
     outline = await outline_chunks(blocks, chunks, deps, done_windows, on_window, notes)
-    starts = await topic_starts(outline, deps, done_windows, on_window, notes, ids)
+    skip = await matter_marks(blocks, chunks, outline, deps, done_windows, on_window, notes)
+    if len(skip) == len(chunks):   # a range that would leave nothing to read: keep it all
+        notes.append("所有區塊都被判斷為不需要導讀，改為全部保留")
+        skip = {}
+    kept = [k for k in range(len(chunks)) if k not in skip]
+    local = await topic_starts([outline[k] for k in kept], deps, done_windows, on_window, notes, [ids[k] for k in kept])
     # the units are where the topics change, nothing else: no size rule merges or splits them
-    bounds = starts + [len(chunks)]
-    units_k = [list(range(a, b)) for a, b in zip(bounds, bounds[1:]) if b > a]
+    bounds = local + [len(kept)]
+    units_k = [[kept[j] for j in range(a, b)] for a, b in zip(bounds, bounds[1:]) if b > a]
+    counts: dict[str, int] = {}
+    for role in ["toc"] * len(tocs) + list(skip.values()):
+        counts[ROLE_NAMES[role]] = counts.get(ROLE_NAMES[role], 0) + 1
+    if counts:
+        notes.append("略過不需要導讀的內容：" + "、".join(f"{k} {n} 處" for k, n in counts.items()))
     groups = [[i for k in u for i in chunks[k]] for u in units_k]
-    errs = validate_groups(blocks, groups, size_limit=False)
+    errs = validate_groups(blocks, groups, size_limit=False, skipped=in_toc | {i for k in skip for i in chunks[k]})
     if errs:   # chunks never cut a glued pair; never ship an unchecked plan
         raise PlanInvalid("；".join(errs))
     units = []
@@ -808,7 +1024,12 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
             chunks=[UnitChunk(block_ids=ids[c], topic=outline[c].topic.strip(), aspect=outline[c].aspect.strip(),
                               summary=outline[c].summary.strip()) for c in u]))
     return SegmentationPlan(units=units, warnings=notes, planner="model", relations=glue_plan(blocks)[1],
-                            windows=[{"window_id": "outline", "chunks": len(chunks), "notes": notes, "planner": "model"}])
+                            windows=[{"window_id": "outline", "chunks": len(chunks), "notes": notes, "planner": "model"}],
+                            skipped=sorted([{"block_ids": [blocks[i].block_id for i in r], "role": "toc", "topic": "目錄",
+                                             "at": r[0]} for r in tocs]
+                                           + [{"block_ids": ids[k], "role": role, "topic": outline[k].topic.strip(),
+                                               "at": chunks[k][0]} for k, role in skip.items()],
+                                           key=lambda x: x["at"]))
 
 
 async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_chars: int = WINDOW_CHARS,

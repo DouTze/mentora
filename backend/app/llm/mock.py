@@ -45,6 +45,11 @@ class MockBackend(LLMBackend):
                 topic = (heads[k - 1] if k - 1 < len(heads) else "") or topic
                 out.append({"topic": topic, "aspect": f"第 {k} 段", "summary": f"（模擬）第 {k} 段"})
             text = json.dumps({"paragraphs": out}, ensure_ascii=False)
+        elif step == "segment_matter":   # simulated: every paragraph is a lesson
+            text = json.dumps({"labels": ["lesson"] * int(meta.get("paragraphs", 1))}, ensure_ascii=False)
+        elif step == "segment_boundaries":   # simulated: a new unit where the topic wording changes
+            ts = meta.get("topics") or []
+            text = json.dumps({"boundaries": ["same" if a == b else "new" for a, b in zip(ts, ts[1:])]}, ensure_ascii=False)
         elif step == "segment_topic":   # simulated: a new topic where the topic wording changes
             ts = meta.get("topics") or []
             text = json.dumps({"new_topic_at": [k for k in range(2, len(ts) + 1) if ts[k - 1] != ts[k - 2]]},

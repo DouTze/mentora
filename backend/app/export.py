@@ -65,6 +65,10 @@ def to_markdown(view: dict) -> str:
         lines += ["## 導讀", "", f"共 {rd['total']} 段"
                   + (f"，讀到第 {stopped + 1} 段就提前出題（之後的段落未導讀）" if stopped is not None else "")
                   + (f"，出題依據：{'精簡筆記' if rd.get('quiz_source') == 'compact' else '原文'}" if rd.get("quiz_source") else ""), ""]
+        skipped = (rd.get("segmentation") or {}).get("skipped") or []
+        if skipped:
+            names = {"toc": "目錄", "summary": "摘要／重點回顧", "meta": "非學科內容"}
+            lines += ["略過、沒有導讀的內容：" + "、".join(f"{names.get(x['role'], x['role'])}（{x['label']}）" for x in skipped), ""]
         for q in rd["quotes"]:
             g = rd["guides"].get(str(q["index"]))
             lines.append(f"### {q['index'] + 1}. {q['label']}" + (f" · {q['heading']}" if q.get("heading") else ""))

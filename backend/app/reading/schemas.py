@@ -80,6 +80,7 @@ class SegmentationPlan(BaseModel):
     planner: str = "rules"                      # model | rules | mixed
     windows: list[dict[str, Any]] = Field(default_factory=list)   # model batches: owned/context ids, planner, notes
     relations: list[dict[str, Any]] = Field(default_factory=list) # protected relations kept across units (size cap)
+    skipped: list[dict[str, Any]] = Field(default_factory=list)   # 區塊 left out as not needing a guide: block_ids, role, why
 
 
 # -- what the model returns for one planning window (local labels, never text) --------------------
@@ -104,6 +105,18 @@ class TopicSummary(BaseModel):
 class Outline(BaseModel):
     """segment_outline output: topic / aspect / one-sentence summary of every 區塊, in order."""
     paragraphs: list[ParagraphTopic] = Field(min_length=1)
+
+
+class MatterLabels(BaseModel):
+    """segment_matter output: one label per paragraph of a stretch, in order — a lesson of the subject, or matter
+    about the material / course / exam itself (meta), a summary of what was taught, contents (toc)."""
+    labels: list[Literal["lesson", "meta", "summary", "toc"]] = Field(min_length=1)
+
+
+class Boundaries(BaseModel):
+    """segment_boundaries output: for each pair of neighbouring paragraphs, whether the second one continues the
+    same unit or starts a new one."""
+    boundaries: list[Literal["same", "new"]] = Field(default_factory=list)
 
 
 class TopicStarts(BaseModel):
