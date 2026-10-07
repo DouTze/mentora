@@ -15,8 +15,8 @@ from .llm.registry import Registry
 from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
 from .llm import remote
-from .models import (AnswerRequest, AskRequest, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
-                     RemoteEndpointRequest, ShelfImport, ShelfQuery, StartSessionRequest)
+from .models import (AnswerRequest, AskRequest, CategoryOrder, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
+                     RemoteEndpointRequest, ShelfImport, ShelfQuery, ShelfScope, StartSessionRequest)
 from .persistence.repository import Repository
 from .shelf.service import ShelfService
 from .tutor.session import SessionError, TutorService
@@ -122,6 +122,10 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     async def create_category(req: CategoryRequest):
         return materials.create_category(req.name)
 
+    @app.put("/api/categories/order")
+    async def reorder_categories(req: CategoryOrder):
+        return materials.reorder_categories(req.ids)
+
     @app.patch("/api/categories/{cid}")
     async def rename_category(cid: str, req: CategoryRequest):
         return materials.rename_category(cid, req.name)
@@ -149,6 +153,13 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         materials.delete(mid)
         return {"ok": True}
 
+    @app.get("/api/materials/{mid}/cover")
+    def material_cover(mid: str):
+        path = materials.cover(mid)
+        if not path:
+            raise HTTPException(404)
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
     @app.get("/api/materials/{mid}/file")
     async def material_file(mid: str):
         path, m = materials.file_path(mid)
@@ -171,6 +182,14 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     async def shelf_query(req: ShelfQuery):
         shelf.start(req.text.strip() or None)
         return await asyncio.to_thread(shelf.view)
+
+    @app.get("/api/shelf/scope")
+    def shelf_scope():
+        return shelf.scope_view()
+
+    @app.put("/api/shelf/scope")
+    async def shelf_set_scope(req: ShelfScope):
+        return await shelf.set_scope([r.model_dump() for r in req.roots], req.exclude)
 
     @app.delete("/api/shelf/interests")
     def shelf_forget(req: ShelfQuery):

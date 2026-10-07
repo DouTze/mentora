@@ -4,6 +4,9 @@
     search  (code)   rank the file index with each tendency's keywords; PDF titles / pages for the top candidates
     pick    (model)  choose the shelf among those candidates, one short reason per book
 
+Without a model (the simulated backend) the same graph runs on the topic lexicon in topics.py: the profile comes
+from the topics the person's own material names, the shelf from the keyword ranking.
+
 The model never sees a path and never chooses a file it was not shown: `pick` answers with candidate numbers,
 which code checks. Either model step may fail (no model, bad JSON, timeout); the graph then falls back to the keyword
 ranking, so the shelf is never empty because of the model."""
@@ -20,6 +23,7 @@ from pydantic import BaseModel, Field
 from ..llm.runtime import ModelRuntime
 from ..llm.tasks import parse_model_json
 from .books import BookMeta, keywords_of, rank
+from .topics import expand, tendencies_from
 from .index import ShelfIndex
 
 SHELF_SIZE = 8
@@ -103,7 +107,8 @@ def _reason(text: str, title: str) -> str:
 
 
 class ShelfScout:
-    def __init__(self, index: ShelfIndex, meta: BookMeta, runtime: ModelRuntime):
+    def __init__(self, index: ShelfIndex, meta: BookMeta, runtime: ModelRuntime | None):
+        """`runtime` None: no model to ask (the simulated backend); every step runs on the topic lexicon and keywords."""
         self.index, self.meta, self.runtime = index, meta, runtime
         g = StateGraph(ScoutState)
         g.add_node("profile", self._profile)
@@ -124,17 +129,31 @@ class ShelfScout:
         msg = await asyncio.wait_for(bound.ainvoke([SystemMessage(system), HumanMessage(prompt)]), CALL_TIMEOUT_S)
         return parse_model_json(str(msg.content), schema)
 
+    def _keyword_profile(self, s: ScoutState) -> list[dict]:
+        """Tendencies without a model: the topics the person's library, readings and wishes keep naming, then any
+        wish the lexicon does not know, in the person's own words."""
+        interests = s.get("interests") or []
+        topics = tendencies_from(interests + (s.get("library") or []) + (s.get("reading") or []), serials=len(s.get("series") or []))
+        unknown = [{"label": w[:16], "keywords": keywords_of(w)} for w in interests[:3] if not expand(w)[1]]
+        return topics + unknown
+
     async def _profile(self, s: ScoutState) -> ScoutState:
-        try:
-            p = await self._ask(PROFILE_SYSTEM, _profile_prompt(s, self.index.folders()), Profile,
-                                {"step": "shelf_profile", "query": s.get("query"), "interests": s.get("interests") or [],
-                                 "library": s.get("library") or []})
-            tendencies = [{"label": t.label.strip(), "keywords": [k.strip() for k in t.keywords if k.strip()]} for t in p.tendencies]
-        except Exception as e:   # no model / bad output / timeout → the user's own words are the tendencies
-            s["model_failures"].append(f"profile: {e}")
-            tendencies = [{"label": w[:16], "keywords": keywords_of(w)} for w in ([s["query"]] if s.get("query") else []) + (s.get("interests") or [])[:3]]
-        if s.get("query") and not any(set(keywords_of(s["query"])) & {k.lower() for k in t["keywords"]} for t in tendencies[:1]):
-            tendencies.insert(0, {"label": s["query"][:16], "keywords": keywords_of(s["query"])})
+        if self.runtime is None:
+            tendencies = self._keyword_profile(s)
+        else:
+            try:
+                p = await self._ask(PROFILE_SYSTEM, _profile_prompt(s, self.index.folders()), Profile,
+                                    {"step": "shelf_profile", "query": s.get("query")})
+                tendencies = [{"label": t.label.strip(), "keywords": [k.strip() for k in t.keywords if k.strip()]} for t in p.tendencies]
+            except Exception as e:   # no model / bad output / timeout → the lexicon does the profiling
+                s["model_failures"].append(f"profile: {e}")
+                tendencies = self._keyword_profile(s)
+        if s.get("query"):
+            words, _ = expand(s["query"])
+            if not any(set(keywords_of(s["query"])) & {k.lower() for k in t["keywords"]} for t in tendencies[:1]):
+                tendencies.insert(0, {"label": s["query"][:16], "keywords": words})
+            else:   # the model's own first tendency: widen it with what the lexicon knows about the wish
+                tendencies[0] = {**tendencies[0], "keywords": list(dict.fromkeys(tendencies[0]["keywords"] + words))}
         unique, seen = [], set()
         for t in tendencies:   # a small model may repeat a label; the first one stays
             if t["keywords"] and t["label"].lower() not in seen:
@@ -163,6 +182,8 @@ class ShelfScout:
 
     async def _pick(self, s: ScoutState) -> ScoutState:
         cands = s["candidates"]
+        if self.runtime is None:   # nobody to judge: the keyword ranking is the shelf
+            return {"books": [{**c, "reason": ""} for c in cands[:SHELF_SIZE]], "model_failures": s["model_failures"]}
         chosen: list[dict] = []
         # small models answer numbers far more reliably than ids; the schema bounds them and asks for a few at least
         schema = Picks.model_json_schema()

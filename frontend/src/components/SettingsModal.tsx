@@ -1,14 +1,15 @@
-// Notion-style settings dialog: a left rail of sections (偏好, 伴讀) and the section's page on the right.
+// Notion-style settings dialog: a left rail of sections (偏好, 書櫃範圍, 伴讀) and the section's page on the right.
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api, RequestError } from "../api";
 import { COMPANIONS, seedCompanions, type CompanionId, type CompanionSettings } from "../companions";
-import { LOCALES, useT, type Key, type Locale } from "../i18n";
+import { LOCALES, useT, type Key } from "../i18n";
 import { usePrefs, type Theme } from "../prefs";
-import type { ActiveBackend, ModelConfig, RemoteEndpoint } from "../types";
+import type { ActiveBackend, ModelConfig, RemoteEndpoint, ShelfScope } from "../types";
 import { BackendBadge } from "./BackendBadge";
 import { Icon } from "./Icons";
+import { ComboInput, Select } from "./Select";
 
-export type SettingsTab = "prefs" | "companion";
+export type SettingsTab = "prefs" | "shelf" | "companion";
 
 interface Props {
   initialTab?: SettingsTab;
@@ -37,6 +38,7 @@ export function SettingsModal({ initialTab = "prefs", onClose, onBackendChanged 
 
   const tabs: { id: SettingsTab; label: Key; icon: ReactNode }[] = [
     { id: "prefs", label: "settings.tab.prefs", icon: <Icon.sliders /> },
+    { id: "shelf", label: "settings.tab.shelf", icon: <Icon.shelf /> },
     { id: "companion", label: "settings.tab.companion", icon: <Icon.companion /> },
   ];
 
@@ -56,7 +58,7 @@ export function SettingsModal({ initialTab = "prefs", onClose, onBackendChanged 
           <button className="icon-btn settings-close" onClick={onClose} aria-label={t("settings.close")} title={t("settings.close")}>
             <Icon.close />
           </button>
-          {tab === "prefs" ? <PrefsPane /> : <CompanionPane onBackendChanged={onBackendChanged} />}
+          {tab === "prefs" ? <PrefsPane /> : tab === "shelf" ? <ShelfScopePane /> : <CompanionPane onBackendChanged={onBackendChanged} />}
         </section>
       </div>
     </div>
@@ -75,13 +77,7 @@ function PrefsPane() {
           <div className="pref-label">{t("prefs.language")}</div>
           <div className="muted">{t("prefs.languageHint")}</div>
         </div>
-        <select className="pref-control" aria-label={t("prefs.language")} value={locale} onChange={(e) => setLocale(e.target.value as Locale)}>
-          {LOCALES.map((l) => (
-            <option key={l.id} value={l.id}>
-              {l.label}
-            </option>
-          ))}
-        </select>
+        <Select className="pref-control" label={t("prefs.language")} value={locale} onChange={setLocale} options={LOCALES.map((l) => ({ value: l.id, label: l.label }))} />
       </div>
       <div className="pref-row">
         <div>
@@ -97,6 +93,117 @@ function PrefsPane() {
           ))}
         </div>
       </div>
+    </>
+  );
+}
+
+/** Which folders the bookshelf may look in. Every change is saved at once: the backend forgets what now lies outside
+ * the scope (names, opening text, covers) and chooses a new shelf. */
+function ShelfScopePane() {
+  const t = useT();
+  const [scope, setScope] = useState<ShelfScope | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [addRoot, setAddRoot] = useState("");
+  const [addExclude, setAddExclude] = useState("");
+
+  useEffect(() => {
+    api.shelfScope().then(setScope).catch((e: RequestError) => setMsg({ ok: false, text: e.body.detail }));
+  }, []);
+
+  if (!scope) return <p className="muted">{msg?.text ?? t("companion.loading")}</p>;
+
+  const save = async (roots: { path: string; enabled: boolean }[], exclude: string[]) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      setScope(await api.setShelfScope(roots, exclude));
+      setMsg({ ok: true, text: t("scope.saved") });
+      return true;
+    } catch (e) {
+      setMsg({ ok: false, text: (e as RequestError).body.detail });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const roots = scope.roots.map((r) => ({ path: r.path, enabled: r.enabled }));
+  const excluded = scope.exclude.map((x) => x.path);
+
+  return (
+    <>
+      <h2 className="settings-h">{t("scope.heading")}</h2>
+      <p className="muted settings-lead">{t("scope.lead")}</p>
+
+      <h3 className="settings-sub">{t("scope.roots")}</h3>
+      <ul className="scope-list">
+        {scope.roots.map((r, i) => (
+          <li key={r.path} className={r.enabled ? "" : "off"}>
+            <label className="scope-toggle">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={r.enabled}
+                disabled={busy || (!r.exists && !r.enabled)}
+                onChange={(e) => save(roots.map((x, k) => (k === i ? { ...x, enabled: e.target.checked } : x)), excluded)}
+              />
+              <span className="scope-switch" aria-hidden="true" />
+              <span className="grow">
+                <span className="scope-path">{r.label}</span>
+                {(r.library || r.cloud || !r.exists) && <span className="scope-note">{t(!r.exists ? "scope.missing" : r.library ? "scope.library" : "scope.cloud")}</span>}
+              </span>
+            </label>
+            <button type="button" className="icon-btn" aria-label={t("scope.remove", { path: r.label })} title={t("scope.remove", { path: r.label })} disabled={busy} onClick={() => save(roots.filter((_, k) => k !== i), excluded)}>
+              <Icon.close />
+            </button>
+          </li>
+        ))}
+      </ul>
+      <form
+        className="scope-add"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (addRoot.trim() && (await save([...roots, { path: addRoot.trim(), enabled: true }], excluded))) setAddRoot("");
+        }}
+      >
+        <input value={addRoot} onChange={(e) => setAddRoot(e.target.value)} placeholder={t("scope.addPlaceholder")} aria-label={t("scope.addRoot")} />
+        <button type="submit" disabled={busy || !addRoot.trim()}>
+          {t("scope.addRoot")}
+        </button>
+      </form>
+
+      <h3 className="settings-sub">{t("scope.exclude")}</h3>
+      <p className="muted">{t("scope.excludeHint")}</p>
+      {scope.exclude.length > 0 && (
+        <ul className="scope-list">
+          {scope.exclude.map((x, i) => (
+            <li key={x.path}>
+              <span className="grow scope-path">{x.label}</span>
+              <button type="button" className="icon-btn" aria-label={t("scope.remove", { path: x.label })} title={t("scope.remove", { path: x.label })} disabled={busy} onClick={() => save(roots, excluded.filter((_, k) => k !== i))}>
+                <Icon.close />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form
+        className="scope-add"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (addExclude.trim() && (await save(roots, [...excluded, addExclude.trim()]))) setAddExclude("");
+        }}
+      >
+        <input value={addExclude} onChange={(e) => setAddExclude(e.target.value)} placeholder={t("scope.excludePlaceholder")} aria-label={t("scope.addExclude")} />
+        <button type="submit" disabled={busy || !addExclude.trim()}>
+          {t("scope.addExclude")}
+        </button>
+      </form>
+
+      {(busy || msg) && (
+        <p className={`scope-msg ${msg && !msg.ok ? "bad" : ""}`} role="status">
+          {busy ? t("scope.saving") : msg?.text}
+        </p>
+      )}
     </>
   );
 }
@@ -235,22 +342,16 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
       <div className="grid2">
         <label className="field">
           {t("companion.backend")}
-          <select value={cfg.backend} onChange={(e) => set("backend", e.target.value as ModelConfig["backend"])}>
-            <option value="mock">{t("companion.backend.mock")}</option>
-            <option value="ollama">{t("companion.backend.ollama")}</option>
-            <option value="remote">{t("companion.backend.remote")}</option>
-            <option value="openvino">{t("companion.backend.openvino")}</option>
-          </select>
+          <Select<ModelConfig["backend"]>
+            value={cfg.backend}
+            onChange={(v) => set("backend", v)}
+            options={(["mock", "ollama", "remote", "openvino"] as const).map((b) => ({ value: b, label: t(`companion.backend.${b}`) }))}
+          />
         </label>
         {(cfg.backend === "ollama" || cfg.backend === "remote") && (
           <label className="field">
             {t("companion.modelName")}
-            <input value={cfg.model} onChange={(e) => set("model", e.target.value)} placeholder="qwen3-vl:4b" list="ollama-models" />
-            <datalist id="ollama-models">
-              {models.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
+            <ComboInput value={cfg.model} onChange={(v) => set("model", v)} placeholder="qwen3-vl:4b" suggestions={models} />
           </label>
         )}
         {cfg.backend === "openvino" && (

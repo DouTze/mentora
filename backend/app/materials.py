@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 from pathlib import Path
 
 from . import config
 from .db import Database, new_id, now_iso
 
+log = logging.getLogger("mentor.materials")
 KINDS = {".pdf": "pdf", ".md": "md", ".markdown": "md", ".txt": "txt"}
 
 SCHEMA = """
@@ -162,8 +164,10 @@ def extract_units(kind: str, data: bytes) -> list[str]:
 
 
 class MaterialStore:
-    def __init__(self, db: Database, files_dir: Path | None = None):
+    def __init__(self, db: Database, files_dir: Path | None = None, library_dir: Path | None = None):
+        """`library_dir`: the person's own book folder (~/.mentora); every import leaves a copy of the file there."""
         self.db = db
+        self.library_dir = library_dir or config.LIBRARY_DIR
         self.files_dir = files_dir or (Path(db.path).parent / "materials" if db.path != ":memory:" else config.DATA_DIR / "materials")
         with db.conn() as c:
             c.executescript(SCHEMA)
@@ -209,6 +213,7 @@ class MaterialStore:
             raise MaterialError("unsupported", "目前只支援 pdf、md、txt。")
         self._check_category(category_id)
         units = extract_units(kind, data)
+        self.keep_copy(filename, data)
         mid = new_id()
         self.files_dir.mkdir(parents=True, exist_ok=True)
         (self.files_dir / f"{mid}.{kind}").write_bytes(data)
@@ -217,6 +222,32 @@ class MaterialStore:
                       (mid, category_id or None, Path(filename).stem, filename, kind,
                        "page" if kind == "pdf" else "line", len(units), json.dumps(units, ensure_ascii=False), now_iso()))
         return self.get(mid, with_units=False)
+
+    def keep_copy(self, filename: str, data: bytes) -> Path | None:
+        """Put the file in the library folder under its own name: skipped when the same file is already there, given
+        a " (2)" suffix when another file has that name. A failure (permissions, full disk) does not stop the import."""
+        try:
+            self.library_dir.mkdir(parents=True, exist_ok=True)
+            stem, ext = Path(filename).stem, Path(filename).suffix
+            target, n = self.library_dir / Path(filename).name, 2
+            while target.exists():
+                if target.stat().st_size == len(data) and target.read_bytes() == data:
+                    return target
+                target, n = self.library_dir / f"{stem} ({n}){ext}", n + 1
+            target.write_bytes(data)
+            return target
+        except OSError:
+            log.warning("could not copy %s into %s", filename, self.library_dir, exc_info=True)
+            return None
+
+    def reorder_categories(self, ids: list[str]) -> list[dict]:
+        """Categories in the given order; any not named keep their relative order after them."""
+        current = [c["id"] for c in self.list_categories()]
+        order = [i for i in ids if i in current] + [i for i in current if i not in ids]
+        with self.db.conn() as c:
+            for pos, cid in enumerate(order, 1):
+                c.execute("UPDATE categories SET position=? WHERE id=?", (pos, cid))
+        return self.list_categories()
 
     def get(self, mid: str, *, with_units: bool = True) -> dict:
         with self.db.conn() as c:
@@ -243,10 +274,30 @@ class MaterialStore:
         with self.db.conn() as c:
             c.execute("DELETE FROM materials WHERE id=?", (mid,))
         (self.files_dir / f"{mid}.{m['kind']}").unlink(missing_ok=True)
+        (self.files_dir / "covers" / f"{mid}.png").unlink(missing_ok=True)
 
     def file_path(self, mid: str) -> tuple[Path, dict]:
         m = self.get(mid, with_units=False)
         return self.files_dir / f"{mid}.{m['kind']}", m
+
+    def cover(self, mid: str) -> Path | None:
+        """First page of an imported PDF as a 240px-wide PNG (cached next to the file); None for text materials."""
+        path, m = self.file_path(mid)
+        if m["kind"] != "pdf" or not path.exists():
+            return None
+        out = self.files_dir / "covers" / f"{mid}.png"
+        if out.exists():
+            return out
+        try:
+            import pymupdf
+            with pymupdf.open(path) as doc:
+                page = doc[0]
+                zoom = 240 / max(page.rect.width, 1)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).save(str(out))
+            return out
+        except Exception:
+            return None
 
     def range_units(self, mid: str, start: int, end: int) -> tuple[dict, list[str]]:
         """Raw units start..end (1-based, inclusive) plus the material row without its units."""

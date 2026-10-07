@@ -5,6 +5,7 @@ import tempfile
 os.environ["MENTOR_SHELF_WARMUP"] = "0"
 os.environ["MENTOR_SHELF_ROOTS"] = ""
 os.environ["MENTOR_SHELF_DIR"] = tempfile.mkdtemp(prefix="mentor-shelf-")
+os.environ["MENTOR_LIBRARY_DIR"] = tempfile.mkdtemp(prefix="mentor-library-")   # imports copy files here
 
 import pytest
 from fastapi.testclient import TestClient

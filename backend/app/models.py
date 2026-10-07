@@ -73,8 +73,22 @@ class MaterialUpdate(BaseModel):
     category_id: str | None = None
 
 
+class CategoryOrder(BaseModel):
+    ids: list[str] = Field(max_length=200)
+
+
 class ShelfQuery(BaseModel):
     text: str = Field(default="", max_length=200)
+
+
+class ShelfRoot(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    enabled: bool = True
+
+
+class ShelfScope(BaseModel):
+    roots: list[ShelfRoot] = Field(max_length=30)
+    exclude: list[str] = Field(default_factory=list, max_length=50)
 
 
 class ShelfImport(BaseModel):

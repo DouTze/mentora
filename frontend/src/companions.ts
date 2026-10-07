@@ -25,7 +25,7 @@ export interface CompanionSettings {
   companions: Record<CompanionId, ModelConfig>;
 }
 
-/** First run: the current model settings become 墨羽's, the others start from the same backend with their own model. */
+/** First run: the current model settings become Moyu's, the others start from the same backend with their own model. */
 export function seedCompanions(current: ModelConfig): CompanionSettings {
   const companions = Object.fromEntries(
     COMPANIONS.map((c) => [c.id, c.id === "owl" ? current : { ...current, ...c.defaults }]),

@@ -11,23 +11,16 @@ import type { Library, SessionListItem, ShelfBook, ShelfView } from "../types";
 import type { Route } from "../route";
 import { Icon } from "../components/Icons";
 import { Bookshelf } from "../components/Bookshelf";
-import { useLocale, useT, type Key } from "../i18n";
+import { ResumeReading } from "../components/ResumeReading";
+import { useT, type Key } from "../i18n";
 
 interface Props {
   library: Library;
   onLibraryChange: () => Promise<unknown>;
   onNavigate: (r: Route) => void;
   onOpenSession: (id: string) => void;
-}
-
-const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [["day", 86400], ["hour", 3600], ["minute", 60]];
-
-/** "3 hours ago" / "3 小時前"; under a minute reads as "now" */
-function ago(iso: string, locale: string): string {
-  const secs = (Date.parse(iso) - Date.now()) / 1000;
-  const fmt = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
-  for (const [unit, size] of UNITS) if (Math.abs(secs) >= size) return fmt.format(Math.round(secs / size), unit);
-  return fmt.format(0, "second");
+  /** opens the settings on the shelf's scope (which folders may be searched) */
+  onOpenScope: () => void;
 }
 
 const MURMURS: Key[] = ["home.murmur.1", "home.murmur.2", "home.murmur.3", "home.murmur.4", "home.murmur.5"];
@@ -54,9 +47,8 @@ function Murmur() {
   );
 }
 
-export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }: Props) {
+export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, onOpenScope }: Props) {
   const t = useT();
-  const locale = useLocale();
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [view, setView] = useState<ShelfView | null>(null);
   const [text, setText] = useState("");
@@ -299,6 +291,11 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
               </span>
             ) : preparing || !view ? (
               <Murmur />
+            ) : !view.scoped ? (
+              <button type="button" className="home-scope-ask" onClick={onOpenScope}>
+                <Icon.shelf />
+                {t("home.scope.none")}
+              </button>
             ) : null}
           </div>
 
@@ -321,7 +318,10 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
         {(books.length > 0 || preparing) && (
           <section className="home-shelf">
             <div className="home-shelf-head">
-              <h2 className="home-label">{shelfLabel}</h2>
+              <h2 className="home-label">
+                {shelfLabel}
+                {view?.mode === "keywords" && !preparing && <span className="home-shelf-note">{t("shelf.mode.keywords")}</span>}
+              </h2>
               {!searching && view && view.tendencies.length > 0 && (
                 <span className="tendencies">
                   {view.tendencies.map((x) => (
@@ -333,6 +333,10 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
               )}
             </div>
             <Bookshelf books={books} loading={preparing} selected={selected} onToggle={toggle} />
+            <button type="button" className="home-scope-link" onClick={onOpenScope}>
+              <Icon.shelf />
+              {t("shelf.scope")}
+            </button>
           </section>
         )}
 
@@ -365,27 +369,7 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession }
           </p>
         )}
 
-        {active.length > 0 && (
-          <section className="home-resume">
-            <h2 className="home-label">{t("home.active")}</h2>
-            <ul>
-              {active.map((s) => (
-                <li key={s.id}>
-                  <button onClick={() => onOpenSession(s.id)}>
-                    <span className="grow">
-                      <span className="home-resume-title">{s.source ? s.source.material_title : s.content_title}</span>
-                      <span className="home-resume-meta">
-                        {s.source ? `${s.source.label} · ` : ""}
-                        {ago(s.updated_at, locale)}
-                      </span>
-                    </span>
-                    <Icon.chevron />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        <ResumeReading sessions={active} library={library} onOpen={onOpenSession} />
       </div>
     </div>
   );

@@ -3,8 +3,9 @@ import { api, RequestError } from "../api";
 import type { Library, MaterialDetail, SessionListItem } from "../types";
 import type { Route } from "../route";
 import { Icon, KindTag } from "../components/Icons";
+import { Select } from "../components/Select";
 import { Working } from "../components/Working";
-import { useT } from "../i18n";
+import { useLocale, useT } from "../i18n";
 
 
 interface Props {
@@ -17,6 +18,7 @@ interface Props {
 
 export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenSession }: Props) {
   const t = useT();
+  const locale = useLocale();
   const [material, setMaterial] = useState<MaterialDetail | null>(null);
   const [title, setTitle] = useState("");
   const [range, setRange] = useState<[number, number] | null>(null);
@@ -52,7 +54,10 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
 
   if (!material) return <div className="doc">{error ? <div className="error">{error}</div> : <p className="muted">{t("material.loading")}</p>}</div>;
 
-  const unitName = t(material.unit === "page" ? "material.unit.page" : "material.unit.line");
+  const unitKey = material.unit === "page" ? "material.unit.page" : "material.unit.line";
+  const unitName = t(unitKey);
+  const selectedCount = range ? range[1] - range[0] + 1 : 0;
+  const selectedUnitName = t(unitKey, { count: selectedCount });
   const total = material.unit_count;
   const category = library.categories.find((c) => c.id === material.category_id);
   const clamp = (n: number) => Math.min(total, Math.max(1, Math.round(n) || 1));
@@ -116,18 +121,15 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
       />
       <div className="doc-meta">
         <KindTag kind={material.kind} />
-        <span>{t("material.unitCount", { count: total, unit: unitName })}</span>
+        <span>{t("material.unitCount", { count: total, unit: t(unitKey, { count: total }) })}</span>
         <span>{material.filename}</span>
         <label>
           {t("material.category")}
-          <select value={material.category_id ?? ""} onChange={(e) => patch({ category_id: e.target.value || null })}>
-            <option value="">{t("common.uncategorized")}</option>
-            {library.categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+          <Select
+            value={material.category_id ?? ""}
+            onChange={(v) => patch({ category_id: v || null })}
+            options={[{ value: "", label: t("common.uncategorized") }, ...library.categories.map((c) => ({ value: c.id, label: c.name }))]}
+          />
         </label>
         <span className="spacer" />
         {confirmDelete ? (
@@ -190,13 +192,13 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
 
           <div className="range-inputs">
             <label>
-              {t("material.range.from")}
+              {locale === "en" ? t("material.range.startLabel", { unit: unitName }) : t("material.range.from")}
               <RangeInput value={range?.[0]} max={total} label={t("material.range.startLabel", { unit: unitName })} onCommit={(n) => commitRange(n, range?.[1] ?? n)} />
             </label>
             <label>
-              {t("material.range.to")}
+              {locale === "en" ? t("material.range.endLabel", { unit: unitName }) : t("material.range.to")}
               <RangeInput value={range?.[1]} max={total} label={t("material.range.endLabel", { unit: unitName })} onCommit={(n) => commitRange(range?.[0] ?? n, n)} />
-              {unitName}
+              {locale === "zh-Hant" && unitName}
             </label>
           </div>
           <div className="row">
@@ -213,8 +215,8 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
           <div className={`range-summary ${range ? "on" : ""}`} data-testid="range-summary">
             {range ? (
               <>
-                <strong>{range[0] === range[1] ? t("material.range.single", { n: range[0], unit: unitName }) : t("material.range.span", { start: range[0], end: range[1], unit: unitName })}</strong>
-                <span>{t("material.range.size", { count: range[1] - range[0] + 1, unit: unitName, chars: chars.toLocaleString() })}</span>
+                <strong>{range[0] === range[1] ? t("material.range.single", { n: range[0], unit: unitName }) : t("material.range.span", { start: range[0], end: range[1], unit: selectedUnitName })}</strong>
+                <span>{t("material.range.size", { count: selectedCount, unit: selectedUnitName, chars: chars.toLocaleString(locale) })}</span>
               </>
             ) : (
               <span>{t(material.unit === "page" ? "material.range.hint.page" : "material.range.hint.line")}</span>

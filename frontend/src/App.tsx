@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { ActiveBackend, Library } from "./types";
+import type { Library } from "./types";
+import type { CompanionId } from "./companions";
+import { useConnection } from "./components/CompanionDock";
 import { useRoute, useStored } from "./route";
 import { Sidebar } from "./components/Sidebar";
 import { HomePage } from "./pages/Home";
 import { MaterialPage } from "./pages/Material";
 import { LearnPage } from "./pages/Learn";
 import { HistoryPage } from "./pages/History";
-import { SettingsModal } from "./components/SettingsModal";
+import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { TitleBar } from "./components/TitleBar";
 import { customTitlebar } from "./desktop";
 import { useT } from "./i18n";
@@ -15,15 +17,23 @@ import { useT } from "./i18n";
 export function App() {
   const [route, navigate] = useRoute();
   const [collapsed, setCollapsed] = useStored("mentor.sidebarCollapsed", false);
-  const [active, setActive] = useState<ActiveBackend | null>(null);
+  const [conn, recheck] = useConnection();
+  const [companion, setCompanion] = useState<CompanionId>("owl");
   const [library, setLibrary] = useState<Library>({ categories: [], materials: [] });
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  // the home page reads the shelf again after settings close: its scope may have changed there
+  const [homeKey, setHomeKey] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(() => localStorage.getItem("mentor.sessionId"));
 
-  const refreshBackend = () => api.health().then((h) => setActive(h.backend)).catch(() => setActive(null));
+  const refreshCompanion = () => api.companions().then((c) => c && setCompanion(c.active)).catch(() => {});
+  // the settings changed the companion or its model: show who it is now and ask again whether it answers
+  const refreshBackend = () => {
+    refreshCompanion();
+    recheck();
+  };
   const refreshLibrary = () => api.library().then(setLibrary).catch(() => {});
   useEffect(() => {
-    refreshBackend();
+    refreshCompanion();
     refreshLibrary();
   }, []);
 
@@ -58,16 +68,19 @@ export function App() {
       <Sidebar
         library={library}
         route={route}
-        active={active}
+        companion={companion}
+        conn={conn}
         hasSession={!!sessionId}
         collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)}
         onNavigate={navigate}
         onLibraryChange={refreshLibrary}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => setSettingsTab("prefs")}
       />
       <main className="main">
-        {route.page === "home" && <HomePage library={library} onLibraryChange={refreshLibrary} onNavigate={navigate} onOpenSession={openSession} />}
+        {route.page === "home" && (
+          <HomePage key={homeKey} library={library} onLibraryChange={refreshLibrary} onNavigate={navigate} onOpenSession={openSession} onOpenScope={() => setSettingsTab("shelf")} />
+        )}
         {route.page === "material" && (
           <MaterialPage id={route.id} library={library} onLibraryChange={refreshLibrary} onNavigate={navigate} onOpenSession={openSession} />
         )}
@@ -82,7 +95,16 @@ export function App() {
           </div>
         )}
       </main>
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} onBackendChanged={refreshBackend} />}
+      {settingsTab && (
+        <SettingsModal
+          initialTab={settingsTab}
+          onClose={() => {
+            setSettingsTab(null);
+            setHomeKey((k) => k + 1);
+          }}
+          onBackendChanged={refreshBackend}
+        />
+      )}
     </div>
     </>
   );

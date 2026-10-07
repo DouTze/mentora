@@ -26,19 +26,24 @@ function hash(s: string): number {
   return Math.abs(h);
 }
 
-const KIND_LABEL: Record<ShelfBook["kind"], string> = { pdf: "PDF", md: "MARKDOWN", txt: "TEXT" };
+export const KIND_LABEL: Record<string, string> = { pdf: "PDF", md: "MARKDOWN", txt: "TEXT" };
 
-function DrawnCover({ book }: { book: ShelfBook }) {
-  const h = hash(book.id);
+/** A cloth-bound cover drawn for a book without a picture; its colour follows from its id, so it never changes. */
+export function ClothCover({ id, title, label, foot }: { id: string; title: string; label: string; foot: string }) {
+  const h = hash(id);
   const [bg, ink] = CLOTH[h % CLOTH.length];
   return (
     <div className={`cover-drawn v${h % 2}`} style={{ background: bg, color: ink }}>
-      <span className="cover-kind">{KIND_LABEL[book.kind]}</span>
-      <span className="cover-title">{book.title}</span>
+      <span className="cover-kind">{label}</span>
+      <span className="cover-title">{title}</span>
       <span className="cover-rule" />
-      <span className="cover-foot">{book.author || book.folder}</span>
+      <span className="cover-foot">{foot}</span>
     </div>
   );
+}
+
+function DrawnCover({ book }: { book: ShelfBook }) {
+  return <ClothCover id={book.id} title={book.title} label={KIND_LABEL[book.kind]} foot={book.author || book.folder} />;
 }
 
 function Book({ book, index, selected, onToggle }: { book: ShelfBook; index: number; selected: boolean; onToggle: () => void }) {

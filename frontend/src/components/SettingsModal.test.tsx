@@ -31,7 +31,8 @@ describe("SettingsModal", () => {
     open();
     await userEvent.click(screen.getByRole("radio", { name: "暗" }));
     expect(document.documentElement.dataset.theme).toBe("dark");
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "語系" }), "en");
+    await userEvent.click(screen.getByRole("combobox", { name: "語系" }));
+    await userEvent.click(screen.getByRole("option", { name: "English" }));
     expect(screen.getByRole("tab", { name: "Preferences" })).toBeTruthy();
     expect(document.documentElement.lang).toBe("en");
     await userEvent.click(screen.getByRole("radio", { name: "System" }));
@@ -53,15 +54,15 @@ describe("SettingsModal", () => {
       "PUT /api/companions": (body) => ({ json: { companions: body, config: (body as any).companions.fox, active: { ...active, model: "qwen3-vl:2b" } } }),
     });
     open("companion");
-    await screen.findByRole("radio", { name: "選擇 小栗" });
-    expect(screen.getByRole("radio", { name: "選擇 墨羽" }).getAttribute("aria-checked")).toBe("true");
-    await userEvent.click(screen.getByRole("radio", { name: "選擇 小栗" }));
+    await screen.findByRole("radio", { name: "選擇 Kuri" });
+    expect(screen.getByRole("radio", { name: "選擇 Moyu" }).getAttribute("aria-checked")).toBe("true");
+    await userEvent.click(screen.getByRole("radio", { name: "選擇 Kuri" }));
     expect((screen.getByLabelText("模型") as HTMLInputElement).value).toBe("qwen3-vl:2b");
     await userEvent.click(screen.getByRole("button", { name: "儲存變更" }));
     await waitFor(() => expect(calls.find((c) => c.key === "PUT /api/companions")).toBeTruthy());
     const put = calls.find((c) => c.key === "PUT /api/companions")!.body as any;
     expect(put.active).toBe("fox");
-    expect(put.companions.owl.model).toBe("qwen3-vl:4b"); // 墨羽 keeps the settings that were live before
+    expect(put.companions.owl.model).toBe("qwen3-vl:4b"); // Moyu keeps the settings that were live before
     expect(put.companions.fox.temperature).toBe(0.5);
   });
 });
@@ -76,9 +77,10 @@ describe("SettingsModal · 遠端模型", () => {
       "PUT /api/settings/remote": (body) => ({ json: { remote: { url: (body as any).url, has_token: true } } }),
     });
     open("companion");
-    await screen.findByRole("radio", { name: "選擇 小栗" });
+    await screen.findByRole("radio", { name: "選擇 Kuri" });
     expect(screen.queryByTestId("remote-endpoint")).toBeNull();
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "後端" }), "remote");
+    await userEvent.click(screen.getByRole("combobox", { name: "後端" }));
+    await userEvent.click(screen.getByRole("option", { name: /遠端/ }));
     await userEvent.type(screen.getByLabelText("伺服器網址"), "https://abc.trycloudflare.com");
     await userEvent.type(screen.getByLabelText("存取 token"), "tok-123");
     await userEvent.click(screen.getByRole("button", { name: "儲存連線" }));
@@ -100,7 +102,7 @@ describe("SettingsModal · 並行數量", () => {
       "PUT /api/companions": (body) => ({ json: { companions: body, config: (body as any).companions[(body as any).active], active } }),
     });
     open("companion");
-    await screen.findByRole("radio", { name: "選擇 小栗" });
+    await screen.findByRole("radio", { name: "選擇 Kuri" });
     const input = screen.getByLabelText(/^並行數量/) as HTMLInputElement;
     expect(input.value).toBe("1");
     await userEvent.clear(input);
