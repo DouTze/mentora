@@ -514,43 +514,47 @@ def one_unit_then_rest(blocks):
                       {"blocks": [f"B{nxt + 1}-B{len(blocks)}"], "reason": "下一節"}]}, nxt
 
 
-async def test_a_unit_with_two_topics_is_split_by_the_one_topic_check():
+def summary(*topics):
+    return {"paragraphs": [{"topic": t, "aspect": f"第 {k} 段"} for k, t in enumerate(topics, 1)]}
+
+
+async def test_a_unit_with_two_topics_is_split_from_paragraph_summaries():
     blocks = overview_then_item()
     first, nxt = one_unit_then_rest(blocks)
     item = next(i for i, b in enumerate(blocks) if b.text.startswith("第一階段"))
-    topic = {"new_topic_at": [f"B{item + 1}"], "topics": ["技術演進總覽", "規則式方法"]}
-    b = Scripted([first, topic])
+    b = Scripted([first, summary("技術演進總覽", "規則式方法"), {"new_topic_at": [2]}])
     deps, _ = deps_for(b)
     plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
-    assert [r["meta"]["step"] for r in b.requests] == ["segment_blocks", "segment_topic"]   # the short unit is not asked
-    prompt = b.requests[1]["messages"][0]["content"]
-    assert "「技術演進」" in prompt and "【B1】" in prompt
+    # the short last unit is not asked; the check asks for summaries first, then where topics change
+    assert [r["meta"]["step"] for r in b.requests] == ["segment_blocks", "segment_topic_summary", "segment_topic"]
+    listing = b.requests[1]["messages"][0]["content"]
+    assert "【P1】\n技術演進脈絡" in listing and "【P2】\n第一階段" in listing and "【P3】" not in listing   # heading + its paragraph
+    decide = b.requests[2]["messages"][0]["content"]
+    assert "P1：大主題「技術演進總覽」｜第 1 段" in decide and "第一階段的規則式方法" not in decide            # summaries only
     assert groups_of(plan, blocks) == [list(range(item)), list(range(item, nxt)), list(range(nxt, len(blocks)))]
     assert [u.boundary_reason for u in plan.units] == ["技術演進總覽", "規則式方法", "下一節"]
     assert any("單題檢查" in w and "2 個主題" in w for w in plan.warnings)
 
 
-async def test_one_topic_or_a_too_fine_split_keeps_the_unit():
+async def test_one_topic_a_too_fine_split_or_an_invalid_answer_keeps_the_unit():
     blocks = overview_then_item()
     first, nxt = one_unit_then_rest(blocks)
-    for keep in ({"new_topic_at": [], "topics": ["技術演進"]},
-                 {"new_topic_at": [], "topics": ["這個單元的主題"]},     # the prompt's example copied: nothing is cut
-                 {"new_topic_at": ["B1"], "topics": ["技術演進"]}):      # B1 already opens the unit
-        b = Scripted([first, keep])
+    for starts in ({"new_topic_at": []}, {"new_topic_at": [1]}):     # the example copied / P1 already opens the unit
+        b = Scripted([first, summary("技術演進", "技術演進"), starts])
         deps, _ = deps_for(b)
         plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
-        assert len(b.requests) == 2 and groups_of(plan, blocks)[0] == list(range(nxt))
+        assert len(b.requests) == 3 and groups_of(plan, blocks)[0] == list(range(nxt))
         assert plan.units[0].boundary_reason == "技術演進"
 
     tailed = overview_then_item(tail=True)
     first_t, nxt_t = one_unit_then_rest(tailed)
-    wrap_up = {"new_topic_at": [f"B{nxt_t}"], "topics": ["技術演進", "小結"]}
-    b = Scripted([first_t, wrap_up])                              # a one-line part cannot carry a guide
+    b = Scripted([first_t, summary("技術演進", "技術演進", "小結"), {"new_topic_at": [3]}])   # a one-line part
     deps, _ = deps_for(b)
     plan = await seg.plan_units(tailed, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
     assert groups_of(plan, tailed)[0] == list(range(nxt_t)) and any("太短" in w for w in plan.warnings)
 
-    b = Scripted([first, "不是 JSON", "還是不是"])                  # an invalid answer keeps the unit
+    wrong_count = summary("技術演進")                                   # one summary for two paragraphs, twice
+    b = Scripted([first, wrong_count, wrong_count])
     deps, _ = deps_for(b)
     plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
     assert groups_of(plan, blocks)[0] == list(range(nxt)) and any("單題檢查無效" in w for w in plan.warnings)
@@ -567,11 +571,12 @@ async def test_one_topic_check_skips_short_units_and_old_prompt_snapshots():
 
     blocks = overview_then_item()
     first, nxt = one_unit_then_rest(blocks)
-    b = Scripted([first])
-    deps, _ = deps_for(b)
-    deps.prompts = {k: v for k, v in deps.prompts.items() if k != "segment_topic"}
-    plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
-    assert len(b.requests) == 1 and groups_of(plan, blocks)[0] == list(range(nxt))
+    for missing in ("segment_topic", "segment_topic_summary"):
+        b = Scripted([first])
+        deps, _ = deps_for(b)
+        deps.prompts = {k: v for k, v in deps.prompts.items() if k != missing}
+        plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
+        assert len(b.requests) == 1 and groups_of(plan, blocks)[0] == list(range(nxt))
 
 
 def test_a_cut_right_after_a_heading_moves_back_before_it():
@@ -586,14 +591,14 @@ def test_a_cut_right_after_a_heading_moves_back_before_it():
     assert groups == [list(range(len(blocks)))]
 
 
-async def test_a_new_topic_named_after_its_heading_starts_at_the_heading():
+async def test_a_new_topic_after_a_heading_starts_at_the_heading():
     overview = "自然語言處理的發展可以分成四個技術階段，每個階段都改變了模型設計的思維。" * 6
     item = "第一階段的規則式方法依賴專家手寫的語法規則與詞彙辭典，可解釋但難以擴展。" * 12
     lines = ["# 技術演進脈絡", overview, "", "## A. 第一階段", item, "", "# 下一節", "下一節的內容很短。"]
     blocks = extract_blocks("m", "line", 1, len(lines), lines)[1]
     first, nxt = one_unit_then_rest(blocks)
     head = next(i for i, b in enumerate(blocks) if b.text == "A. 第一階段")
-    b = Scripted([first, {"new_topic_at": [f"B{head + 2}"], "topics": ["技術演進總覽", "規則式方法"]}])   # the sentence after it
+    b = Scripted([first, summary("技術演進總覽", "規則式方法"), {"new_topic_at": [2]}])
     deps, _ = deps_for(b)
     plan = await seg.plan_units(blocks, deps, window_chars=10 ** 6, window_tokens=10 ** 6)
     assert groups_of(plan, blocks)[:2] == [list(range(head)), list(range(head, nxt))]
