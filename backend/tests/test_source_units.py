@@ -13,6 +13,7 @@ from app.llm.tasks import TaskContext
 from app.persistence.repository import Repository
 from app.reading import segmentation as seg
 from app.reading.prompts import load_bundle
+from app.reading.schemas import ParagraphTopic
 from app.reading.source import MAX_BLOCK_CHARS, SourceError, extract_blocks
 from evals import reading_eval as ev
 
@@ -705,16 +706,15 @@ def toc_then_text():
 
 async def test_a_table_of_contents_and_a_chapter_summary_are_left_out():
     blocks = toc_then_text()
-    chunks = seg.make_chunks(blocks)
-    roles = [("目錄", "content")] + [("緒論", "content")] * (len(chunks) - 2) + [("緒論", "summary")]
-    b = Scripted([outline_roles(*roles), {"new_topic_at": []}])
+    # the contents never reach the model: only the chapter and its summary are outlined
+    b = Scripted([outline_roles(("緒論", "content"), ("緒論", "summary")), {"new_topic_at": []}])
     deps, _ = deps_for(b, outline=True)
     plan = await seg.plan_units(blocks, deps)
     # the contents by its shape (though the model said content), the summary by the model's word
     assert [x["role"] for x in plan.skipped] == ["toc", "summary"]
     kept = {i for u in plan.units for i in u.block_ids}
     assert not any(bid in kept for x in plan.skipped for bid in x["block_ids"])
-    assert any("略過 2 個" in w for w in plan.warnings)
+    assert any("目錄 1 處" in w and "摘要／重點回顧 1 處" in w for w in plan.warnings)
     assert len(b.requests) == 1 and len(plan.units) == 1      # one 區塊 left: no topic to decide between
     by_id = {x.block_id: x for x in blocks}
     view = seg.skipped_view("line", plan, by_id)
@@ -724,9 +724,48 @@ async def test_a_table_of_contents_and_a_chapter_summary_are_left_out():
 
 
 async def test_nothing_is_left_out_when_everything_would_be():
-    blocks = paragraphs(2)
-    b = Scripted([outline_roles(("A", "other"), ("A", "summary")), {"new_topic_at": []}])
+    blocks = pdf_like(["序 本書的編寫目的是協助讀者準備考試，並說明各章的安排方式與使用建議。",
+                       "參考文獻 王小明（2020）。人工智慧導論。台北：某某出版社。"])
+    b = Scripted([outline_roles(("序", "other"), ("參考文獻", "other")), {"new_topic_at": []}])
     deps, _ = deps_for(b, outline=True)
     plan = await seg.plan_units(blocks, deps)
     assert plan.skipped == [] and sum(len(u.block_ids) for u in plan.units) == len(blocks)
     assert any("全部保留" in w for w in plan.warnings)
+
+
+def pdf_like(lines):
+    """md lines read as one source block each, like a PDF that puts every line of a contents page in its own block."""
+    return extract_blocks("m", "line", 1, len(lines), [x for l in lines for x in (l, "")])[1]
+
+
+def test_a_contents_page_is_found_by_its_entries_whatever_the_model_says():
+    """From a real exam guide: the contents' entries were each their own 區塊 (one even glued three entries into one
+    line), the model called them content, and the old check — three entry lines inside one 區塊 — caught one."""
+    blocks = pdf_like(["• 序序 為提供授課教師及考生掌握評鑑方向，準備有所依循，本計畫委託委員會題庫組及規劃組領域專家撰寫。",
+                       "經濟部產業人才能力鑑定推動小組 敬啟",
+                       "• 目錄目錄第一章考試科目與評鑑內容 ........................ 1-1第二章考科內容 .................. 2-1第三章AI相關技術應用.......... 3-1",
+                       "3.1 自然語言處理技術與應用 .......................................... 3",
+                       "3.2 電腦視覺技術與應用 .............................................. 12",
+                       "為了更明確產業對各類專業人才的能力需求，特別針對亟需人才的多個職類訂定職能基準，作為人才培育的依據。",
+                       "在 2022 年底推出的服務，用戶數在 5 天內就超過了 1000000 人，引起各行各業對這項技術的高度關注。"])
+    runs = seg.toc_blocks(blocks)
+    assert [[blocks[i].text[:6] for i in r] for r in runs] == [["• 目錄目錄", "3.1 自然", "3.2 電腦"]]
+    in_toc = {i for r in runs for i in r}
+    chunks = [c2 for c in seg.make_chunks(blocks) if (c2 := [i for i in c if i not in in_toc])]
+    skipped = seg.matter_skips(blocks, chunks, in_toc)
+    # the preface and its signature by the title 「序」, up to the contents; the text after it stays
+    assert sorted(i for k in skipped for i in chunks[k]) == [0, 1]
+    assert seg.toc_entries("在 2022 年底推出的服務，用戶數在 5 天內就超過了 1000000 人。") == 0
+
+
+async def test_a_model_summary_or_other_needs_words_in_the_text_to_back_it():
+    """「重點掃瞄」 opened a chapter's first lesson and the model called it a summary: the chapter's text was dropped.
+    The model's summary / other removes text only with 「本章摘要」, 「參考文獻」 … at its start."""
+    lines = ["重點掃瞄", "", "隨著人工智慧技術的迅速發展，自然語言處理已逐漸成為 AI 生態系統的核心之一，連接人類與機器的溝通。", "",
+             "# 本章摘要", "", "本章介紹了自然語言處理的發展脈絡，從規則式方法一路談到預訓練語言模型與生成式 AI 的崛起。", "",
+             "這一段只是一般的說明文字，模型卻把它當成非教學內容，因為它講的是課程的安排與後面章節的內容。"]
+    blocks = extract_blocks("m", "line", 1, len(lines), lines)[1]
+    chunks = seg.make_chunks(blocks)
+    outline = [ParagraphTopic(topic="t", role=r) for r in ("summary", "summary", "other")][:len(chunks)]
+    got = seg.model_skips(blocks, chunks, outline)
+    assert [blocks[chunks[k][0]].text[:4] for k in got] == ["本章摘要"]

@@ -787,25 +787,99 @@ async def _decide(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, owne
 
 
 ROLE_NAMES = {"toc": "目錄", "summary": "摘要／重點回顧", "other": "非教學內容"}
-TOC_LINE_RE = re.compile(r"(?:\.{3,}|…{2,}|·{3,}|\s{2,}|\t)\s*\d{1,4}\s*$|^\s*(?:第.{1,6}[章節]|\d+(?:\.\d+)*)\s+\S.*\s\d{1,4}\s*$")
+# a table-of-contents entry: dot leaders (or a wide gap) then a page number, also chapter-paged ("1-1", "3-12")
+TOC_ENTRY_RE = re.compile(r"(?:[.．·・…]{4,}|…{2,}| {3,}|\t)\s*\d{1,4}(?:-\d{1,4})?(?!\d)")
+# an entry without leaders: a numbered title ending in its page number ("3.1 The Agent–Environment Interface 48")
+TOC_NUMBERED_RE = re.compile(r"^\s*(?:第.{1,6}[章節]|\d+(?:\.\d+)+)\s+\S.{0,80}?\s\d{1,4}(?:-\d{1,4})?\s*$")
+TOC_TITLE_RE = re.compile(r"^\W*(?:目錄|目次|contents|table of contents)\W*$", re.I)
+TOC_MIN_ENTRIES = 3        # entries in a row before it is a table of contents
+TOC_ENTRY_CHARS = 120      # an entry block is entries, not prose that happens to end in a number
+# what a model's "summary" / "other" must be backed by, in the 區塊's heading or opening words. A bare 「重點」 is not
+# (「重點掃瞄」 opened a chapter's first paragraphs), nor 「前言」 (a textbook chapter's 前言 is its first lesson)
+SUMMARY_RE = re.compile(r"本章摘要|本節摘要|章節摘要|課文摘要|章末摘要|摘要整理|重點整理|重點回顧|重點複習|本章重點|本節重點|小結|總結|"
+                        r"\bsummary\b|\breview questions\b|\bchapter review\b|key (?:points|takeaways)", re.I)
+OTHER_RE = re.compile(r"^\W*序(?:言|文)?(?:\W|序|$)|編者的話|編輯說明|使用說明|致謝|謝誌|敬啟|版權|ISBN|出版者|出版日期|印刷|"
+                      r"參考文獻|參考資料|延伸閱讀|索引|\bpreface\b|\bforeword\b|\bcopyright\b|\backnowledg|\breferences\b|"
+                      r"\bbibliography\b|\bindex\b", re.I)
 
 
-def looks_like_toc(text: str) -> bool:
-    """A table of contents, by its shape: most of at least three lines are titles ending in a page number (after
-    dot leaders, spaces or a numbered heading). Decided by the program, whatever the outline says."""
+def toc_entries(text: str) -> int:
     lines = [x for x in (text or "").splitlines() if x.strip()]
-    return len(lines) >= 3 and sum(bool(TOC_LINE_RE.search(x)) for x in lines) >= 0.6 * len(lines)
+    return len(TOC_ENTRY_RE.findall(text or "")) + sum(
+        1 for x in lines if TOC_NUMBERED_RE.match(x) and not TOC_ENTRY_RE.search(x))
 
 
-def skip_role(blocks: list[SourceBlock], c: list[int], o: ParagraphTopic) -> str | None:
-    """Why a 區塊 needs no guide (None = it does): the outline's role, or the program's table-of-contents shape.
-    Code, formulas and tables are never skipped on the model's word."""
-    text = "\n".join(blocks[i].text for i in c)
-    if looks_like_toc(text):
-        return "toc"
-    if o.role != "content" and not any(blocks[i].kind in ("code", "formula", "table") for i in c):
-        return o.role
-    return None
+def toc_blocks(blocks: list[SourceBlock]) -> list[list[int]]:
+    """Runs of source blocks that make a table of contents, found by the program before 區塊 are formed (a PDF puts
+    each entry in a block of its own, glues one to the next paragraph, or several entries into one line): blocks
+    that are mostly entries, at least TOC_MIN_ENTRIES of them in a row, with the 「目錄」 title just before."""
+    runs: list[list[int]] = []
+    run, n = [], 0
+
+    def close():
+        if n >= TOC_MIN_ENTRIES:
+            k = run[0] - 1
+            while k >= 0 and TOC_TITLE_RE.match(blocks[k].text or ""):
+                run.insert(0, k)
+                k -= 1
+            runs.append(list(run))
+
+    for i, b in enumerate(blocks):
+        e = 0 if b.kind in ("code", "formula", "table") else toc_entries(b.text)
+        if e and len(b.text) <= e * TOC_ENTRY_CHARS:
+            run.append(i)
+            n += e
+        else:
+            close()
+            run, n = [], 0
+    close()
+    return runs
+
+
+# the title a front / back matter section opens with (a 區塊's first words): no model needed to know a preface
+MATTER_TITLE_RE = re.compile(r"^\W*(?:序(?:言|文)?|編者的話|編輯說明|出版說明|版權(?:頁|聲明)?|致謝|謝誌|參考文獻|參考資料|延伸閱讀|索引|"
+                             r"preface|foreword|copyright|acknowledg\w*|references|bibliography|index)(?=\W|序|$)", re.I)
+
+
+SIGNATURE_RE = re.compile(r"敬啟|謹識|謹誌|謹序|謹致|謹啟")   # the signature that closes a preface (often a short line, read as a heading)
+
+
+def matter_skips(blocks: list[SourceBlock], chunks: list[list[int]], in_toc: set[int]) -> dict[int, str]:
+    """Front or back matter by its title (「序」, 「參考文獻」, 「Index」 …): that 區塊 and the ones after it, up to the
+    next heading or table of contents (where the book's own structure begins) — a preface's signature (「…敬啟」)
+    still belongs to it. Code, formulas and tables stay."""
+    out: dict[int, str] = {}
+    k = 0
+    while k < len(chunks):
+        if not MATTER_TITLE_RE.match((blocks[chunks[k][0]].text or "")[:20]):
+            k += 1
+            continue
+        out[k] = "other"
+        j = k + 1
+        while (j < len(chunks)
+               and (blocks[chunks[j][0]].kind != "heading" or SIGNATURE_RE.search(" ".join(blocks[i].text for i in chunks[j])))
+               and not any(i in in_toc for i in range(chunks[j - 1][-1] + 1, chunks[j][0]))
+               and not any(blocks[i].kind in ("code", "formula", "table") for i in chunks[j])):
+            out[j] = "other"
+            j += 1
+        k = j
+    return out
+
+
+def model_skips(blocks: list[SourceBlock], chunks: list[list[int]], outline: list[ParagraphTopic]) -> dict[int, str]:
+    """區塊 the model called a summary or other non-teaching matter, where the text backs it: a 區塊 whose heading or
+    opening words say what it is (「本章摘要」, 「序」, 「參考文獻」 …), and the 區塊 right after it the model gave the
+    same role (the rest of that section). Without that, the model's word alone never removes text; nor code,
+    formulas or tables."""
+    out: dict[int, str] = {}
+    for k, c in enumerate(chunks):
+        role = outline[k].role
+        if role not in ("summary", "other") or any(blocks[i].kind in ("code", "formula", "table") for i in c):
+            continue
+        probe = " ".join([blocks[i].text for i in c if blocks[i].kind == "heading"] + [(blocks[c[0]].text or "")[:40]])
+        if (SUMMARY_RE if role == "summary" else OTHER_RE).search(probe) or out.get(k - 1) == role:
+            out[k] = role
+    return out
 
 
 def skipped_view(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock]) -> list[dict]:
@@ -821,25 +895,39 @@ def skipped_view(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock
 
 async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_windows: dict, on_window) -> SegmentationPlan:
     notes: list[str] = []
-    chunks = make_chunks(blocks)
+    tocs = toc_blocks(blocks)
+    in_toc = {i for r in tocs for i in r}
+    if len(in_toc) == len(blocks):   # nothing but contents: keep it (an empty range would be worse)
+        tocs, in_toc = [], set()
+    chunks: list[list[int]] = []
+    carry: list[int] = []
+    for c in make_chunks(blocks):
+        c = carry + [i for i in c if i not in in_toc]
+        carry = []
+        if c and all(blocks[i].kind == "heading" for i in c):   # headings left alone by the contents: next 區塊
+            carry = c
+        elif c:
+            chunks.append(c)
+    if carry:
+        chunks.append(carry) if not chunks else chunks[-1].extend(carry)
     ids = [[blocks[i].block_id for i in c] for c in chunks]
     outline = await outline_chunks(blocks, chunks, deps, done_windows, on_window, notes)
-    skip = {k: role for k, c in enumerate(chunks) if (role := skip_role(blocks, c, outline[k]))}
+    skip = {**model_skips(blocks, chunks, outline), **matter_skips(blocks, chunks, in_toc)}
     if len(skip) == len(chunks):   # a range that would leave nothing to read: keep it all
         notes.append("所有區塊都被判斷為不需要導讀，改為全部保留")
         skip = {}
-    if skip:
-        counts = {}
-        for role in skip.values():
-            counts[ROLE_NAMES[role]] = counts.get(ROLE_NAMES[role], 0) + 1
-        notes.append(f"略過 {len(skip)} 個不需要導讀的區塊（" + "、".join(f"{k} {n}" for k, n in counts.items()) + "）")
+    counts: dict[str, int] = {}
+    for role in ["toc"] * len(tocs) + list(skip.values()):
+        counts[ROLE_NAMES[role]] = counts.get(ROLE_NAMES[role], 0) + 1
+    if counts:
+        notes.append("略過不需要導讀的內容：" + "、".join(f"{k} {n} 處" for k, n in counts.items()))
     kept = [k for k in range(len(chunks)) if k not in skip]
     local = await topic_starts([outline[k] for k in kept], deps, done_windows, on_window, notes, [ids[k] for k in kept])
     # the units are where the topics change, nothing else: no size rule merges or splits them
     bounds = local + [len(kept)]
     units_k = [[kept[j] for j in range(a, b)] for a, b in zip(bounds, bounds[1:]) if b > a]
     groups = [[i for k in u for i in chunks[k]] for u in units_k]
-    errs = validate_groups(blocks, groups, size_limit=False, skipped={i for k in skip for i in chunks[k]})
+    errs = validate_groups(blocks, groups, size_limit=False, skipped=in_toc | {i for k in skip for i in chunks[k]})
     if errs:   # chunks never cut a glued pair; never ship an unchecked plan
         raise PlanInvalid("；".join(errs))
     units = []
@@ -853,8 +941,11 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
                               summary=outline[c].summary.strip()) for c in u]))
     return SegmentationPlan(units=units, warnings=notes, planner="model", relations=glue_plan(blocks)[1],
                             windows=[{"window_id": "outline", "chunks": len(chunks), "notes": notes, "planner": "model"}],
-                            skipped=[{"block_ids": ids[k], "role": role, "topic": outline[k].topic.strip()}
-                                     for k, role in sorted(skip.items())])
+                            skipped=sorted([{"block_ids": [blocks[i].block_id for i in r], "role": "toc", "topic": "目錄",
+                                             "at": r[0]} for r in tocs]
+                                           + [{"block_ids": ids[k], "role": role, "topic": outline[k].topic.strip(),
+                                               "at": chunks[k][0]} for k, role in skip.items()],
+                                           key=lambda x: x["at"]))
 
 
 async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_chars: int = WINDOW_CHARS,
