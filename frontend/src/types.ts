@@ -286,6 +286,32 @@ export interface MaterialDetail extends Material {
   units: string[];
 }
 
+/** A readable file the shelf scout found on this computer (not imported yet). */
+export interface ShelfBook {
+  id: string;
+  title: string;
+  author: string;
+  kind: "pdf" | "md" | "txt";
+  pages: number | null;
+  folder: string;
+  /** cover width / height (PDF first page); text files get a drawn cover */
+  aspect: number;
+  /** iCloud / OneDrive placeholder: no cover is rendered (that would download it) */
+  cloud: boolean;
+  reason: string;
+  tendency: string | null;
+}
+
+export interface ShelfView {
+  status: "preparing" | "ready";
+  query: string | null;
+  tendencies: string[];
+  books: ShelfBook[];
+  interests: string[];
+  simulated: boolean;
+  indexed: number;
+}
+
 export interface Library {
   categories: Category[];
   materials: Material[];
