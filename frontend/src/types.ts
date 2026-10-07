@@ -91,6 +91,8 @@ export interface GuideBlock {
   heading?: string | null;
   status: "accepted" | "failed";
   guide: string;
+  /** attempts this 區塊 has used (failed ones are retried automatically up to a limit) */
+  attempt?: number;
   chinese_text?: string | null;
   unverified?: { kind: "coverage"; source: string; guide: string }[];
 }

@@ -347,6 +347,7 @@ function TopicBlocks({ guide, retrying, onRetry }: { guide: Guide; retrying: boo
           ) : (
             <div className="block-failed" data-testid="block-failed">
               {t("reading.block.failed")}
+              {(b.attempt ?? 1) > 1 && <> {t("reading.block.retried", { n: b.attempt ?? 1 })}</>}
             </div>
           )}
         </section>

@@ -308,9 +308,22 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         overview = tg.fallback_overview(chunks) if source_only else await topic_overview(sid, task, q, command_id)
 
         async def one(k: int):
+            """A 區塊 that fails is run again on its own (a new attempt: new operation key, new budget) while the
+            failure is one a new run can fix, up to READING_BLOCK_ATTEMPTS attempts in all."""
             if k in keep:
                 return keep[k]
-            att = attempts.get(k, task.attempt)
+            first = attempts.get(k, task.attempt)
+            n = max(1, config.READING_BLOCK_ATTEMPTS)
+            earlier: list[dict] = []   # the attempts that failed before the last one (kept in the record)
+            for i, att in enumerate(range(first, first + n)):
+                entry = await run_once(k, att)
+                if (source_only or entry.get("status") == "accepted" or i == n - 1
+                        or not tg.worth_retrying(entry.get("error"))):
+                    break
+                earlier.append({"attempt": att, **(entry.get("error") or {})})
+            return {**entry, "failed_attempts": earlier} if earlier and not source_only else entry
+
+        async def run_once(k: int, att: int):
             ev = symbol_evidence(r, {**q, "block_ids": chunks[k]["block_ids"], "text": chunks[k]["text"]})
             bt = tg.block_task(task.model_copy(update={"attempt": att}), q, k, overview, ev)
             hit = None if source_only else repo.get_artifact(block_key(bt))
