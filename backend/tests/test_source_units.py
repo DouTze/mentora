@@ -686,3 +686,47 @@ async def test_a_unit_from_outlines_has_no_size_limit(monkeypatch):
     plan = await seg.plan_units(blocks, deps)
     assert plan.planner == "model" and len(plan.units) == 1 and len(plan.units[0].chunks) == 4
     assert not any("規則切法" in w for w in plan.warnings)
+
+
+# -- units-v10: 區塊 that need no guide are left out ---------------------------------------------------
+
+def outline_roles(*pairs):
+    return {"paragraphs": [{"topic": t, "aspect": f"第 {k} 段", "summary": f"摘要 {k}", "role": r}
+                           for k, (t, r) in enumerate(pairs, 1)]}
+
+
+def toc_then_text():
+    lines = ["目錄", "", "第一章 緒論 ........ 1", "第二章 方法 ........ 15", "第三章 結果 ........ 42", "",
+             "# 第一章 緒論", "", "本章說明研究的動機與問題，並介紹後面各章會用到的基本概念與符號，讓讀者先掌握全書的脈絡。", "",
+             "研究的核心問題是如何在資料有限時仍然得到可靠的估計，本書從統計與計算兩個角度切入這個問題。", "",
+             "# 本章摘要", "", "本章介紹了研究動機、核心問題，以及從統計與計算兩個角度切入的整體方法，後面各章會逐一展開。"]
+    return extract_blocks("m", "line", 1, len(lines), lines)[1]
+
+
+async def test_a_table_of_contents_and_a_chapter_summary_are_left_out():
+    blocks = toc_then_text()
+    chunks = seg.make_chunks(blocks)
+    roles = [("目錄", "content")] + [("緒論", "content")] * (len(chunks) - 2) + [("緒論", "summary")]
+    b = Scripted([outline_roles(*roles), {"new_topic_at": []}])
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    # the contents by its shape (though the model said content), the summary by the model's word
+    assert [x["role"] for x in plan.skipped] == ["toc", "summary"]
+    kept = {i for u in plan.units for i in u.block_ids}
+    assert not any(bid in kept for x in plan.skipped for bid in x["block_ids"])
+    assert any("略過 2 個" in w for w in plan.warnings)
+    assert len(b.requests) == 1 and len(plan.units) == 1      # one 區塊 left: no topic to decide between
+    by_id = {x.block_id: x for x in blocks}
+    view = seg.skipped_view("line", plan, by_id)
+    assert view[0]["role"] == "toc" and "第二章 方法" in view[0]["text"] and view[0]["label"]
+    quotes = seg.to_quotes("line", plan, by_id)
+    assert all("本章介紹了研究動機" not in q["text"] and "........" not in q["text"] for q in quotes)
+
+
+async def test_nothing_is_left_out_when_everything_would_be():
+    blocks = paragraphs(2)
+    b = Scripted([outline_roles(("A", "other"), ("A", "summary")), {"new_topic_at": []}])
+    deps, _ = deps_for(b, outline=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert plan.skipped == [] and sum(len(u.block_ids) for u in plan.units) == len(blocks)
+    assert any("全部保留" in w for w in plan.warnings)

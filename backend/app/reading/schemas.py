@@ -80,6 +80,7 @@ class SegmentationPlan(BaseModel):
     planner: str = "rules"                      # model | rules | mixed
     windows: list[dict[str, Any]] = Field(default_factory=list)   # model batches: owned/context ids, planner, notes
     relations: list[dict[str, Any]] = Field(default_factory=list) # protected relations kept across units (size cap)
+    skipped: list[dict[str, Any]] = Field(default_factory=list)   # 區塊 left out as not needing a guide: block_ids, role, why
 
 
 # -- what the model returns for one planning window (local labels, never text) --------------------
@@ -94,6 +95,9 @@ class ParagraphTopic(BaseModel):
     topic: str = Field(min_length=1)   # what the paragraph mainly introduces ("…總覽" for an overview of several items)
     aspect: str = ""                   # which side of that topic it covers
     summary: str = ""                  # segment_outline: what the paragraph says, in one sentence
+    # segment_outline: content to guide, or something a reader does not need guided (a table of contents, a
+    # chapter summary / review, other front or back matter); when unsure, content
+    role: Literal["content", "toc", "summary", "other"] = "content"
 
 
 class TopicSummary(BaseModel):

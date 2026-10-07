@@ -38,7 +38,7 @@ from ..llm.tasks import TaskContext, TaskError, run_structured
 from .schemas import (Outline, ParagraphTopic, PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
                       TopicSummary, UnitChunk, WindowPlan)
 
-SEGMENTATION_VERSION = "units-v9"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊
+SEGMENTATION_VERSION = "units-v10"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -204,7 +204,7 @@ def rules_groups(blocks: list[SourceBlock]) -> list[list[int]]:
 
 
 def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int = 0, hi: int | None = None, *,
-                    size_limit: bool = True) -> list[str]:
+                    size_limit: bool = True, skipped: set[int] | None = None) -> list[str]:
     """Errors of a grouping of blocks[lo:hi] (empty list = valid). Only what the program must guarantee is checked:
     coverage and order, protected relations (glue) and — for the buffer planner, whose guide is one model call per
     unit — the strict size limit; where a topic begins is the model's call. Units from 區塊 outlines have no size
@@ -212,10 +212,11 @@ def validate_groups(blocks: list[SourceBlock], groups: list[list[int]], lo: int 
     hi = len(blocks) if hi is None else hi
     errs: list[str] = []
     flat = [i for grp in groups for i in grp]
-    if flat != list(range(lo, hi)):
+    skipped = skipped or set()
+    if flat != [i for i in range(lo, hi) if i not in skipped]:
         seen: set[int] = set()
         dup = [i for i in flat if i in seen or seen.add(i)]
-        miss = sorted(set(range(lo, hi)) - set(flat))
+        miss = sorted(set(range(lo, hi)) - set(flat) - skipped)
         if dup:
             errs.append("重複使用的區塊：" + "、".join(f"B{i - lo + 1}" for i in dup))
         if miss:
@@ -785,17 +786,60 @@ async def _decide(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, owne
                 and "未判斷" not in lines[j - 1].topic]
 
 
+ROLE_NAMES = {"toc": "目錄", "summary": "摘要／重點回顧", "other": "非教學內容"}
+TOC_LINE_RE = re.compile(r"(?:\.{3,}|…{2,}|·{3,}|\s{2,}|\t)\s*\d{1,4}\s*$|^\s*(?:第.{1,6}[章節]|\d+(?:\.\d+)*)\s+\S.*\s\d{1,4}\s*$")
+
+
+def looks_like_toc(text: str) -> bool:
+    """A table of contents, by its shape: most of at least three lines are titles ending in a page number (after
+    dot leaders, spaces or a numbered heading). Decided by the program, whatever the outline says."""
+    lines = [x for x in (text or "").splitlines() if x.strip()]
+    return len(lines) >= 3 and sum(bool(TOC_LINE_RE.search(x)) for x in lines) >= 0.6 * len(lines)
+
+
+def skip_role(blocks: list[SourceBlock], c: list[int], o: ParagraphTopic) -> str | None:
+    """Why a 區塊 needs no guide (None = it does): the outline's role, or the program's table-of-contents shape.
+    Code, formulas and tables are never skipped on the model's word."""
+    text = "\n".join(blocks[i].text for i in c)
+    if looks_like_toc(text):
+        return "toc"
+    if o.role != "content" and not any(blocks[i].kind in ("code", "formula", "table") for i in c):
+        return o.role
+    return None
+
+
+def skipped_view(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock]) -> list[dict]:
+    """What the reader is told was left out: where it is, what it was judged to be, and its text."""
+    out = []
+    for x in plan.skipped:
+        bs = [by_id[i] for i in x["block_ids"] if i in by_id]
+        if bs:
+            out.append({"role": x["role"], "label": _label(unit, bs), "topic": x.get("topic", ""),
+                        "text": "\n\n".join(b.text for b in bs)})
+    return out
+
+
 async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_windows: dict, on_window) -> SegmentationPlan:
     notes: list[str] = []
     chunks = make_chunks(blocks)
     ids = [[blocks[i].block_id for i in c] for c in chunks]
     outline = await outline_chunks(blocks, chunks, deps, done_windows, on_window, notes)
-    starts = await topic_starts(outline, deps, done_windows, on_window, notes, ids)
+    skip = {k: role for k, c in enumerate(chunks) if (role := skip_role(blocks, c, outline[k]))}
+    if len(skip) == len(chunks):   # a range that would leave nothing to read: keep it all
+        notes.append("所有區塊都被判斷為不需要導讀，改為全部保留")
+        skip = {}
+    if skip:
+        counts = {}
+        for role in skip.values():
+            counts[ROLE_NAMES[role]] = counts.get(ROLE_NAMES[role], 0) + 1
+        notes.append(f"略過 {len(skip)} 個不需要導讀的區塊（" + "、".join(f"{k} {n}" for k, n in counts.items()) + "）")
+    kept = [k for k in range(len(chunks)) if k not in skip]
+    local = await topic_starts([outline[k] for k in kept], deps, done_windows, on_window, notes, [ids[k] for k in kept])
     # the units are where the topics change, nothing else: no size rule merges or splits them
-    bounds = starts + [len(chunks)]
-    units_k = [list(range(a, b)) for a, b in zip(bounds, bounds[1:]) if b > a]
+    bounds = local + [len(kept)]
+    units_k = [[kept[j] for j in range(a, b)] for a, b in zip(bounds, bounds[1:]) if b > a]
     groups = [[i for k in u for i in chunks[k]] for u in units_k]
-    errs = validate_groups(blocks, groups, size_limit=False)
+    errs = validate_groups(blocks, groups, size_limit=False, skipped={i for k in skip for i in chunks[k]})
     if errs:   # chunks never cut a glued pair; never ship an unchecked plan
         raise PlanInvalid("；".join(errs))
     units = []
@@ -808,7 +852,9 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
             chunks=[UnitChunk(block_ids=ids[c], topic=outline[c].topic.strip(), aspect=outline[c].aspect.strip(),
                               summary=outline[c].summary.strip()) for c in u]))
     return SegmentationPlan(units=units, warnings=notes, planner="model", relations=glue_plan(blocks)[1],
-                            windows=[{"window_id": "outline", "chunks": len(chunks), "notes": notes, "planner": "model"}])
+                            windows=[{"window_id": "outline", "chunks": len(chunks), "notes": notes, "planner": "model"}],
+                            skipped=[{"block_ids": ids[k], "role": role, "topic": outline[k].topic.strip()}
+                                     for k, role in sorted(skip.items())])
 
 
 async def plan_units(blocks: list[SourceBlock], deps: PlannerDeps, *, window_chars: int = WINDOW_CHARS,
