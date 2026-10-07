@@ -110,6 +110,9 @@ pub fn run() {
                 .min_inner_size(900.0, 600.0)
                 // without decorations Windows still draws the drop shadow and the rounded corners (Windows 11)
                 .decorations(!custom_titlebar)
+                // Tauri's own file-drop handler swallows the page's HTML5 drag events (on Windows entirely), which
+                // breaks moving materials between categories; the page reads dropped files from the drop event itself
+                .disable_drag_drop_handler()
                 // exports (Content-Disposition: attachment) land in Downloads and are shown in Finder / Explorer
                 .on_download(|webview, event| {
                     match event {
@@ -131,6 +134,11 @@ pub fn run() {
                     }
                     true
                 });
+            // macOS 26+: the standard title bar is translucent and takes its tint from whatever scrolls under it. A
+            // transparent one shows the window's own background instead, which the page keeps at its --bg colour for
+            // the chosen light / dark theme (frontend/src/prefs.tsx), so the bar stays one steady colour.
+            #[cfg(target_os = "macos")]
+            let window = window.title_bar_style(tauri::TitleBarStyle::Transparent);
             // what the page needs to know before it loads; both values are plain ASCII, so their Debug form ("...") is
             // a valid JS string literal
             let mut script = format!(

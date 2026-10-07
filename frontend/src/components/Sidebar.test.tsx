@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Sidebar } from "./Sidebar";
 import { mockFetch } from "../test/fixtures";
@@ -103,5 +103,43 @@ describe("Sidebar", () => {
     expect(calls.some((c) => c.key.startsWith("DELETE"))).toBe(false);
     await userEvent.click(screen.getByRole("menuitem", { name: /確定刪除/ }));
     await waitFor(() => expect(calls.some((c) => c.key === "DELETE /api/categories/c3")).toBe(true));
+  });
+
+  test("a material dragged onto a category moves there; the hand closes on press and the label follows", async () => {
+    const calls = mockFetch({ "PATCH /api/materials/m2": () => ({ json: { ...library.materials[1], category_id: "c1" } }) });
+    setup();
+    const target = screen.getByRole("button", { name: /^生物\s*1$/ }).closest("[data-drop-key]")!;
+    const original = document.elementFromPoint;
+    document.elementFromPoint = () => target;
+    try {
+      const leaf = screen.getByText("Newton laws").closest("button")!;
+      fireEvent.pointerDown(leaf, { button: 0, clientX: 10, clientY: 10, pointerType: "mouse" });
+      expect(document.documentElement.classList.contains("grabbing")).toBe(true);   // pressed, not yet moved
+      act(() => {
+        document.dispatchEvent(new MouseEvent("pointermove", { clientX: 80, clientY: 40 }));
+      });
+      expect(document.querySelector(".drag-ghost")?.textContent).toContain("Newton laws");
+      expect(target.classList.contains("drop")).toBe(true);
+      act(() => {
+        document.dispatchEvent(new MouseEvent("pointerup", { clientX: 80, clientY: 40 }));
+      });
+      await waitFor(() => expect(calls.find((c) => c.key === "PATCH /api/materials/m2")?.body).toEqual({ category_id: "c1" }));
+      expect(document.documentElement.classList.contains("grabbing")).toBe(false);
+      expect(document.querySelector(".drag-ghost")).toBeNull();
+    } finally {
+      document.elementFromPoint = original;
+    }
+  });
+
+  test("a press without moving is still a click", async () => {
+    const { visited } = setup();
+    const leaf = screen.getByText("Newton laws").closest("button")!;
+    fireEvent.pointerDown(leaf, { button: 0, clientX: 10, clientY: 10, pointerType: "mouse" });
+    act(() => {
+      document.dispatchEvent(new MouseEvent("pointerup", { clientX: 11, clientY: 10 }));
+    });
+    await userEvent.click(leaf);
+    expect(visited).toEqual([{ page: "material", id: "m2" }]);
+    expect(document.documentElement.classList.contains("grabbing")).toBe(false);
   });
 });

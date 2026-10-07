@@ -1,8 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The page talks to the backend over HTTP; from Tauri it only drives its own window (the custom title bar).",
-  "windows": ["main"],
+  "description": "The page talks to the backend over HTTP; from Tauri it only drives its own window (the custom title bar, and the title bar colour that follows the theme).",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
@@ -11,6 +13,8 @@
     "core:window:allow-is-maximized",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
-    "core:window:allow-set-title"
+    "core:window:allow-set-title",
+    "core:window:allow-set-background-color",
+    "core:window:allow-set-theme"
   ]
 }
