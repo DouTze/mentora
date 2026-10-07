@@ -140,7 +140,9 @@ class TutorService:
                         "backend": r["model_config"].get("backend"), "simulated": r["model_config"].get("simulated"),
                         "workflow_runner": r.get("workflow_runner") or "legacy",
                         "verdict": (r["summary"] or {}).get("verdict"),
-                        "progress": _progress(r)})
+                        "progress": _progress(r),
+                        # the companion's whole-material study (導師全文學習): the reader uses it, the lists do not
+                        "study": bool((r.get("workflow_meta") or {}).get("study"))})
         return out
 
     # -- one turn -----------------------------------------------------------

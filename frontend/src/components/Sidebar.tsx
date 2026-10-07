@@ -89,6 +89,10 @@ interface Props {
   onOpenSettings: () => void;
 }
 
+const PEEK_OPEN_MS = 120;    // a pointer only passing over the rail does not open it
+const PEEK_CLOSE_MS = 300;
+const PEEK_EXIT_MS = 160;   // .sidebar.peek.leaving animation
+
 export function Sidebar({ library, route, companion, conn, hasSession, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
   const t = useT();
   const [folded, setFolded] = useStored<string[]>("mentor.foldedCategories", []);
@@ -98,6 +102,36 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const importInto = useRef<string | null>(null);
+  // folded: hovering the rail floats the whole sidebar over the page (nothing moves); leaving folds it again
+  const [peek, setPeek] = useState(false);
+  const [leaving, setLeaving] = useState(false);   // the card is sliding away (its exit animation), then unmounts
+  const peekBox = useRef<HTMLElement>(null);
+  const peekTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const enterPeek = () => {
+    clearTimeout(peekTimer.current);
+    setLeaving(false);   // back over it while it slides away: it stays
+    if (!peek) peekTimer.current = setTimeout(() => setPeek(true), PEEK_OPEN_MS);
+  };
+  const leavePeek = () => {
+    clearTimeout(peekTimer.current);
+    peekTimer.current = setTimeout(() => {
+      // stay while something inside is in use: a name being typed, a menu open, a drag
+      const box = peekBox.current;
+      if (box && (box.contains(document.activeElement) && document.activeElement?.tagName === "INPUT" || box.querySelector(".menu, .dock-menu") || document.documentElement.classList.contains("grabbing"))) return leavePeek();
+      setLeaving(true);
+      peekTimer.current = setTimeout(() => {
+        setPeek(false);
+        setLeaving(false);
+      }, PEEK_EXIT_MS);
+    }, PEEK_CLOSE_MS);
+  };
+  useEffect(() => () => clearTimeout(peekTimer.current), []);
+  useEffect(() => {
+    if (!collapsed) {
+      setPeek(false);
+      setLeaving(false);
+    }
+  }, [collapsed]);
 
   const run = async (work: () => Promise<unknown>) => {
     setError(null);
@@ -175,9 +209,9 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
     },
   });
 
-  if (collapsed) {
+  if (collapsed && !peek) {
     return (
-      <aside className="sidebar rail" aria-label={t("nav.label")}>
+      <aside className="sidebar rail" aria-label={t("nav.label")} onMouseEnter={enterPeek} onMouseLeave={() => clearTimeout(peekTimer.current)}>
         <button className="icon-btn" onClick={onToggle} aria-label={t("side.expand")} title={t("side.expand")}>
           <Icon.expand />
         </button>
@@ -197,13 +231,27 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
     { key: UNSORTED, category: null, items: library.materials.filter((m) => !m.category_id) },
   ];
 
-  return (
-    <aside className="sidebar" aria-label={t("nav.label")} onClickCapture={drag.swallowClick}>
+  const card = (
+    <aside
+      className={`sidebar ${peek ? "peek" : ""} ${leaving ? "leaving" : ""}`}
+      aria-label={t("nav.label")}
+      onClickCapture={drag.swallowClick}
+      ref={peekBox}
+      onMouseEnter={peek ? enterPeek : undefined}
+      onMouseLeave={peek ? leavePeek : undefined}
+    >
       <div className="side-head">
         <span className="brand">Mentor</span>
-        <button className="icon-btn" onClick={onToggle} aria-label={t("side.collapse")} title={t("side.collapse")}>
-          <Icon.collapse />
-        </button>
+        {peek ? (
+          // keep it open: the sidebar is pinned back into the layout
+          <button className="icon-btn" onClick={onToggle} aria-label={t("side.expand")} title={t("side.pin")}>
+            <Icon.expand />
+          </button>
+        ) : (
+          <button className="icon-btn" onClick={onToggle} aria-label={t("side.collapse")} title={t("side.collapse")}>
+            <Icon.collapse />
+          </button>
+        )}
       </div>
 
       <nav className="side-nav">
@@ -299,6 +347,9 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
       </div>
     </aside>
   );
+  if (!peek) return card;
+  // the rail keeps its place in the layout (one grid cell); the card floats over it and the page
+  return <div className="sidebar rail">{card}</div>;
 }
 
 const NAV: { page: "home" | "learn" | "history"; label: Key; icon: ReactNode }[] = [

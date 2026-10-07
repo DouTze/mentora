@@ -1,5 +1,5 @@
 import type { CompanionSettings } from "./companions";
-import type { ActiveBackend, ApiError, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReadingQA, SessionListItem, SessionView, ShelfBook, ShelfScope, ShelfView, Strategy, TutorMessage, Turn } from "./types";
+import type { ActiveBackend, ApiError, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReaderQuestion, ReadingQA, SessionListItem, SessionView, ShelfBook, ShelfScope, ShelfView, Strategy, StudyView, TutorMessage, Turn } from "./types";
 
 export class RequestError extends Error {
   constructor(public status: number, public body: ApiError & { session?: SessionView | null }) {
@@ -97,7 +97,19 @@ export const api = {
     call<Material>(`/materials/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteMaterial: (id: string) => call<{ ok: boolean }>(`/materials/${id}`, { method: "DELETE" }),
   materialFileUrl: (id: string) => `${API_BASE}/materials/${id}/file`,
-  sessions: () => call<SessionListItem[]>("/sessions"),
+  materialPages: (id: string) => call<{ sizes: [number, number][] }>(`/materials/${id}/pages`),
+  materialPageUrl: (id: string, n: number, width: number) => `${API_BASE}/materials/${id}/pages/${n}?w=${width}`,
+  study: (id: string) => call<StudyView>(`/materials/${id}/study`),
+  /** focus (also the heartbeat) / leave: the reader opened or left the book; pause / resume / cancel: the person's choice */
+  studyAction: (id: string, action: "focus" | "leave" | "pause" | "resume" | "cancel") =>
+    call<StudyView>(`/materials/${id}/study/${action}`, { method: "POST" }),
+  studyLeaveUrl: (id: string) => `${API_BASE}/materials/${id}/study/leave`,
+  readerQuestions: (id: string) => call<ReaderQuestion[]>(`/materials/${id}/questions`),
+  readerAsk: (id: string, at: number, question: string) =>
+    call<ReaderQuestion>(`/materials/${id}/ask`, { method: "POST", body: JSON.stringify({ at, question }) }),
+  readerLearn: (id: string, at: number) => call<SessionView>(`/materials/${id}/learn`, { method: "POST", body: JSON.stringify({ at }) }),
+  /** the learning records; the companion's whole-material studies (導師全文學習) belong to the reader, not the lists */
+  sessions: () => call<SessionListItem[]>("/sessions").then((xs) => xs.filter((x) => !x.study)),
   session: (id: string) => call<SessionView>(`/sessions/${id}`),
   deleteSession: (id: string) => call<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   answer: (id: string, answer: string) =>

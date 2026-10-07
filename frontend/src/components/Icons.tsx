@@ -83,6 +83,21 @@ export const Icon = {
       <path d="m15 19.4 3-11.1 2.6.7-3 11.1" />
     </Svg>
   ),
+  /** 導讀: an open book, a ribbon falling from the spine */
+  book: () => (
+    <Svg>
+      <path d="M12 6.8C10.3 5.6 8 5 4.5 5v12.5c3.5 0 5.8.6 7.5 1.8 1.7-1.2 4-1.8 7.5-1.8V5C16 5 13.7 5.6 12 6.8z" />
+      <path d="M12 6.8v12.5" />
+    </Svg>
+  ),
+  /** 出題: a question mark inside a card */
+  quiz: () => (
+    <Svg>
+      <rect x="4.5" y="3.5" width="15" height="17" rx="2.5" />
+      <path d="M9.8 9.6a2.3 2.3 0 1 1 3.3 2.1c-.7.3-1.1.9-1.1 1.6v.4" />
+      <circle cx="12" cy="16.6" r=".9" fill="currentColor" stroke="none" />
+    </Svg>
+  ),
   close: () => (
     <Svg>
       <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />

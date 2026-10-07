@@ -275,6 +275,8 @@ class MaterialStore:
             c.execute("DELETE FROM materials WHERE id=?", (mid,))
         (self.files_dir / f"{mid}.{m['kind']}").unlink(missing_ok=True)
         (self.files_dir / "covers" / f"{mid}.png").unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(self.files_dir / "pages" / mid, ignore_errors=True)
 
     def file_path(self, mid: str) -> tuple[Path, dict]:
         m = self.get(mid, with_units=False)
@@ -298,6 +300,24 @@ class MaterialStore:
             return out
         except Exception:
             return None
+
+    PAGE_WIDTHS = (480, 720, 960, 1280, 1600, 2000)
+
+    def pdf_of(self, mid: str) -> Path | None:
+        path, m = self.file_path(mid)
+        return path if m["kind"] == "pdf" and path.exists() else None
+
+    def page_target(self, mid: str, n: int, width: int) -> tuple[Path, Path] | None:
+        """(the PDF, where page n about `width` pixels wide is cached) — widths snap to a few sizes. The rendering
+        itself runs in app.pdf_worker (MuPDF must not run on two threads of the server)."""
+        pdf = self.pdf_of(mid)
+        if not pdf or not 1 <= n <= self.get(mid, with_units=False)["unit_count"]:
+            return None
+        w = next((x for x in self.PAGE_WIDTHS if x >= width), self.PAGE_WIDTHS[-1])
+        return pdf, self.files_dir / "pages" / mid / f"{n}-{w}.png"
+
+    def sizes_cache(self, mid: str) -> Path:
+        return self.files_dir / "pages" / mid / "sizes.json"
 
     def range_units(self, mid: str, start: int, end: int) -> tuple[dict, list[str]]:
         """Raw units start..end (1-based, inclusive) plus the material row without its units."""

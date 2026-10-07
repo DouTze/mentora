@@ -205,6 +205,8 @@ export interface SessionListItem {
   verdict: string | null;
   /** reading quote `read` of `total`, or past the reading and answering questions */
   progress: { stage: "reading" | "quiz"; read: number; total: number };
+  /** the companion's whole-material study (導師全文學習): used by the reader, left out of the lists */
+  study?: boolean;
 }
 
 export interface ModelConfig {
@@ -288,6 +290,37 @@ export interface Material {
 
 export interface MaterialDetail extends Material {
   units: string[];
+}
+
+/** 導師全文學習: the whole material read once through the learning flow; its parts locate the reader's page. */
+export interface StudyView {
+  /** off: not started (or cancelled) — the companion reads only while the book is open */
+  status: "reading" | "ready" | "failed" | "off";
+  session_id: string | null;
+  /** waiting: paused by the person (`by_user`) or because another book is being read */
+  paused?: boolean;
+  by_user?: boolean;
+  planner: string | null;
+  /** 0–1, share of the text segmented so far */
+  progress: number;
+  /** where the segmentation is: preparing the text, the outline pass (exact count), the topic pass or the buffers
+   * (counts estimated: `approx`) */
+  step: { phase: "extract" | "outline" | "topic" | "window"; current?: number; total?: number | null; approx?: boolean } | null;
+  error: string | null;
+  /** first and last page (line) of every reading part */
+  parts: { index: number; from: number; to: number; heading: string | null }[];
+}
+
+/** A question typed in the reader, answered from the units on that page (and their guide when one exists). */
+export interface ReaderQuestion {
+  id: string;
+  unit_no: number;
+  question: string;
+  answer: string;
+  label: string | null;
+  unit_ids: string[];
+  used_guide: boolean;
+  created_at: string;
 }
 
 /** A readable file the shelf scout found on this computer (not imported yet). */
