@@ -1,0 +1,47 @@
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import type { PdfPageLayer } from "../types";
+import { PdfLayer } from "./PdfLayer";
+
+afterEach(cleanup);
+
+const layer: PdfPageLayer = {
+  page: 1,
+  label: "i",
+  size: [300, 400],
+  quarter: 0,
+  lines: [
+    { block: 0, runs: [{ t: "Hello", rect: [10, 10, 40, 21] }, { t: "world", rect: [45, 10, 75, 21], sp: true }] },
+    { block: 0, runs: [{ t: "Next", rect: [10, 30, 34, 41] }] },
+  ],
+  links: [
+    { rect: [10, 10, 40, 21], kind: "page", page: 3, y: 120 },
+    { rect: [45, 10, 75, 21], kind: "uri", uri: "https://example.org" },
+    { rect: [10, 30, 34, 41], kind: "uri", uri: "javascript:alert(1)" },
+  ],
+  images: [{ rect: [10, 100, 210, 250], xref: 7, width: 400, height: 300 }],
+  annotations: [],
+};
+
+describe("PdfLayer", () => {
+  test("text copies in reading order with spaces and line breaks, placed at its boxes", () => {
+    const { container } = render(<PdfLayer layer={layer} imageUrl={(x) => `/img/${x}`} onGoto={() => {}} />);
+    expect(container.querySelector(".pdf-text")?.textContent).toBe("Hello world\nNext\n");
+    const first = container.querySelector<HTMLElement>(".pdf-run")!;
+    // places are shares of the page and the size follows the page's --k, so a zoom does not re-render the runs
+    expect([first.style.left, first.style.top]).toEqual(["3.333%", "2.500%"]);
+    expect(first.style.getPropertyValue("--fs")).toBe("11.00");
+  });
+
+  test("page links go to their page, web links open, unsafe links stay inert", () => {
+    const onGoto = mock(() => {});
+    const { container } = render(<PdfLayer layer={layer} imageUrl={(x) => `/img/${x}`} onGoto={onGoto} />);
+    const links = container.querySelectorAll<HTMLElement>(".pdf-link");
+    fireEvent.click(links[0]);
+    expect(onGoto).toHaveBeenCalledWith(3, 120);
+    expect(links[1].getAttribute("href")).toBe("https://example.org");
+    expect(links[2].tagName).toBe("SPAN");
+    expect(links[2].getAttribute("href")).toBeNull();
+    expect(container.querySelector(".pdf-image-save")?.getAttribute("href")).toBe("/img/7");
+  });
+});

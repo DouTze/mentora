@@ -319,6 +319,18 @@ class MaterialStore:
     def sizes_cache(self, mid: str) -> Path:
         return self.files_dir / "pages" / mid / "sizes.json"
 
+    def info_cache(self, mid: str) -> Path:
+        """Where the document info (app.pdfdoc.document_info) of a PDF is cached; the version is in the name."""
+        from .pdfdoc.layer import LAYER_VERSION
+        return self.files_dir / "pages" / mid / f"info-v{LAYER_VERSION}.json"
+
+    def layer_cache(self, mid: str, n: int) -> Path | None:
+        """Where page n's layer (app.pdfdoc.page_layer) is cached; None when the material has no page n."""
+        from .pdfdoc.layer import LAYER_VERSION
+        if not self.pdf_of(mid) or not 1 <= n <= self.get(mid, with_units=False)["unit_count"]:
+            return None
+        return self.files_dir / "pages" / mid / f"layer-v{LAYER_VERSION}-{n}.json"
+
     def range_units(self, mid: str, start: int, end: int) -> tuple[dict, list[str]]:
         """Raw units start..end (1-based, inclusive) plus the material row without its units."""
         m = self.get(mid)

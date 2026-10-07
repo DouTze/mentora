@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 import json
 
@@ -194,6 +194,67 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
             except Exception as e:  # noqa: BLE001 — a page MuPDF cannot draw
                 raise HTTPException(404, f"這一頁無法顯示：{e}") from e
         return FileResponse(out, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+    async def cached_json(path: Path, job, *args) -> dict:
+        """A pdf_worker job's JSON result, kept on disk next to the page images (written atomically)."""
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        out = await pdf_worker.run("pages", job, *args)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+        return out
+
+    @app.get("/api/materials/{mid}/info")
+    async def material_info(mid: str):
+        """What a PDF holds besides its pages: metadata, page labels, outline, attachments, fonts, layers, form
+        fields and counts (app.pdfdoc.inspect). Text materials have none."""
+        pdf = materials.pdf_of(mid)
+        if not pdf:
+            raise HTTPException(404, "這份教材不是 PDF")
+        try:
+            return await cached_json(materials.info_cache(mid), pdf_worker.doc_info, str(pdf))
+        except Exception as e:  # noqa: BLE001 — a file MuPDF cannot open
+            raise HTTPException(422, f"無法讀取這個 PDF：{e}") from e
+
+    @app.get("/api/materials/{mid}/pages/{n}/layer")
+    async def material_page_layer(mid: str, n: int):
+        """Page n's text runs (reading order), links, images and comments in view space (app.pdfdoc.layer)."""
+        path = materials.layer_cache(mid, n)
+        if not path:
+            raise HTTPException(404, "沒有這一頁")
+        pdf = materials.pdf_of(mid)
+        try:
+            return await cached_json(path, pdf_worker.page_layer, str(pdf), n)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(422, f"這一頁無法解析：{e}") from e
+
+    @app.get("/api/materials/{mid}/images/{xref}")
+    async def material_image(mid: str, xref: int):
+        """A stored image of the PDF (an `xref` from a page layer), as png / jpeg / gif / webp."""
+        pdf = materials.pdf_of(mid)
+        if not pdf or xref <= 0:
+            raise HTTPException(404, "沒有這張圖片")
+        try:
+            data, ext = await pdf_worker.run("pages", pdf_worker.image, str(pdf), xref)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(404, f"沒有這張圖片：{e}") from e
+        return Response(content=data, media_type=f"image/{ext}", headers={"Cache-Control": "max-age=86400"})
+
+    @app.get("/api/materials/{mid}/attachments/{i}")
+    async def material_attachment(mid: str, i: int):
+        """Attachment i of the document info's `attachments`, downloaded under its own name."""
+        info = await material_info(mid)
+        if not 0 <= i < len(info["attachments"]):
+            raise HTTPException(404, "沒有這個附件")
+        try:
+            name, data = await pdf_worker.run("pages", pdf_worker.attachment, str(materials.pdf_of(mid)), info["attachments"][i]["source"])
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(404, f"無法取出這個附件：{e}") from e
+        from urllib.parse import quote
+        return Response(content=data, media_type="application/octet-stream",
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
 
     # -- the reader: the companion's whole-material study, questions, 導讀 from where the reader is ----------
     @app.get("/api/materials/{mid}/study")

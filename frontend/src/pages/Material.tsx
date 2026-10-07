@@ -6,9 +6,10 @@
 // from the units on that page.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api, RequestError } from "../api";
-import type { Library, MaterialDetail, ReaderQuestion, StudyView } from "../types";
+import type { Library, MaterialDetail, PdfInfo, PdfOutlineItem, PdfPageLayer, ReaderQuestion, StudyView } from "../types";
 import type { Route } from "../route";
 import { Icon } from "../components/Icons";
+import { PdfLayer } from "../components/PdfLayer";
 import { RichText } from "../components/RichText";
 import { Select } from "../components/Select";
 import { Working } from "../components/Working";
@@ -80,10 +81,43 @@ function useRestore(root: React.RefObject<HTMLElement | null>, at: number, ready
 }
 
 // -- PDF ------------------------------------------------------------------------------------
-function PdfPage({ id, n, size, width }: { id: string; n: number; size: [number, number]; width: number }) {
+// page layers (text runs, links, images) once per page and material while the app runs; the server caches them too
+const layers = new Map<string, Promise<PdfPageLayer | null>>();
+function pageLayer(id: string, n: number): Promise<PdfPageLayer | null> {
+  const key = `${id}:${n}`;
+  if (!layers.has(key)) layers.set(key, api.materialPageLayer(id, n).catch(() => (layers.delete(key), null)));
+  return layers.get(key)!;
+}
+
+type Goto = (page: number, y?: number) => void;
+
+function PdfPage({ id, n, size, width, onGoto }: { id: string; n: number; size: [number, number]; width: number; onGoto: Goto }) {
   const ref = useRef<HTMLElement>(null);
   const [near, setNear] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [layer, setLayer] = useState<PdfPageLayer | null>(null);
+  // the text layer lives only while the page is within about a screen of the view: far pages keep their image only
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") return setLive(true);
+    const io = new IntersectionObserver((es) => setLive(es.some((e) => e.isIntersecting)), { rootMargin: "100% 0px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  // stable for the memoised layer: a zoom re-renders the page, not its text runs
+  const gotoNow = useRef(onGoto);
+  gotoNow.current = onGoto;
+  const goto = useCallback<Goto>((p, y) => gotoNow.current(p, y), []);
+  const imageUrl = useCallback((x: number) => api.materialImageUrl(id, x), [id]);
+  useEffect(() => {
+    if (!near) return;
+    let live = true;
+    pageLayer(id, n).then((l) => live && setLayer(l));
+    return () => {
+      live = false;
+    };
+  }, [near, id, n]);
   useEffect(() => {
     const el = ref.current;
     if (!el || near) return;
@@ -96,11 +130,12 @@ function PdfPage({ id, n, size, width }: { id: string; n: number; size: [number,
   const want = width * Math.min(window.devicePixelRatio || 1, 2);
   const px = RENDER_WIDTHS.find((x) => x >= want) ?? RENDER_WIDTHS[RENDER_WIDTHS.length - 1];
   return (
-    <figure className="paper" ref={ref} data-at={n} style={{ aspectRatio: `${size[0]} / ${size[1]}` }}>
+    <figure className="paper" ref={ref} data-at={n} style={{ aspectRatio: `${size[0]} / ${size[1]}`, ["--k" as string]: width / size[0] }}>
       {near && width > 0 && (
         <img src={api.materialPageUrl(id, n, px)} alt="" draggable={false} decoding="async" className={loaded ? "on" : ""} onLoad={() => setLoaded(true)} />
       )}
-      <figcaption>{n}</figcaption>
+      {live && width > 0 && layer && <PdfLayer layer={layer} imageUrl={imageUrl} onGoto={goto} />}
+      <figcaption>{layer && layer.label !== String(n) ? `${layer.label} · ${n}` : n}</figcaption>
     </figure>
   );
 }
@@ -129,8 +164,10 @@ function pageWidth(zoom: Zoom, size: [number, number], avail: number): number {
   return Math.max(200, Math.min(avail, Math.round(((window.innerHeight - CHROME_H) * size[0]) / size[1])));
 }
 
-function PdfReader({ material, at, zoom, focus, onAt, onScale }: {
+function PdfReader({ material, at, zoom, focus, gotoRef, onAt, onScale }: {
   material: MaterialDetail;
+  /** set to a function that brings a page (and a point on it) to the top: links, the outline */
+  gotoRef: React.RefObject<Goto | null>;
   at: number;
   zoom: Zoom;
   /** where a pinch / ctrl-wheel happened (client coordinates); that point stays put while the pages grow */
@@ -177,6 +214,17 @@ function PdfReader({ material, at, zoom, focus, onAt, onScale }: {
   const keep = useRef(at);
   keep.current = at;
   const prev = useRef(0);
+  // while the size changes (a pinch, ctrl-wheel, the zoom buttons) the text layers are hidden, so each step only
+  // scales the page images; they come back once the size has settled
+  const settle = useRef(0);
+  useLayoutEffect(() => {
+    const el = root.current;
+    if (!el || !prev.current || prev.current === width) return;
+    el.classList.add("zooming");
+    clearTimeout(settle.current);
+    settle.current = window.setTimeout(() => el.classList.remove("zooming"), 220);
+  }, [width]);
+  useEffect(() => () => clearTimeout(settle.current), []);
   useLayoutEffect(() => {
     const el = root.current;
     const old = prev.current;
@@ -201,9 +249,21 @@ function PdfReader({ material, at, zoom, focus, onAt, onScale }: {
   }, [width]);
   usePosition(root, onAt, [sizes, width]);
   useRestore(root, at, !!sizes?.length && width > 0);
+  const goto = useCallback<Goto>(
+    (page, y) => {
+      const el = root.current?.querySelector<HTMLElement>(`[data-at="${page}"]`);
+      if (!el) return;
+      el.scrollIntoView({ block: "start" });
+      const size = pages[page - 1];
+      // a point on the page: scroll on to it, keeping a little of what comes before in view
+      if (y && size && width) scrollParent(el).scrollTop += Math.max(0, (y * width) / size[0] - 24);
+    },
+    [pages, width],
+  );
+  gotoRef.current = goto;
   return (
     <div className="pdf-pages" ref={root} style={{ width: width || undefined, gap: Math.max(12, Math.round(width * 0.04)) }}>
-      {sizes !== null && pages.map((s, i) => <PdfPage key={i} id={material.id} n={i + 1} size={s} width={width} />)}
+      {sizes !== null && pages.map((s, i) => <PdfPage key={i} id={material.id} n={i + 1} size={s} width={width} onGoto={goto} />)}
     </div>
   );
 }
@@ -586,6 +646,95 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
   );
 }
 
+// -- outline and document info -------------------------------------------------------------------------
+type OutlineRow = { item: PdfOutlineItem; depth: number };
+function flatten(items: PdfOutlineItem[], depth = 0, out: OutlineRow[] = []): OutlineRow[] {
+  for (const item of items) {
+    out.push({ item, depth });
+    flatten(item.children, depth + 1, out);
+  }
+  return out;
+}
+
+/** The PDF's bookmarks, the section being read marked; picking one brings its page (and point) to the top. */
+function OutlineMenu({ info, at, onGoto }: { info: PdfInfo; at: number; onGoto: Goto }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const rows = useMemo(() => flatten(info.outline), [info]);
+  let current = -1;
+  rows.forEach((r, i) => {
+    if (r.item.page && r.item.page <= at) current = i;
+  });
+  useEffect(() => {
+    if (!open) return;
+    list.current?.querySelector(".current")?.scrollIntoView({ block: "center" });
+    const onDown = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
+    const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  return (
+    <div className="reader-more" ref={box}>
+      <button type="button" className="icon-btn" aria-haspopup="menu" aria-expanded={open} aria-label={t("reader.toc")} title={t("reader.toc")} onClick={() => setOpen((v) => !v)}>
+        <Icon.toc />
+      </button>
+      {open && (
+        <div className="menu reader-menu reader-toc" role="menu" ref={list}>
+          {rows.length === 0 && <p className="reader-menu-facts">{t("reader.toc.empty")}</p>}
+          {rows.map((r, i) => (
+            <button
+              key={i}
+              type="button"
+              role="menuitem"
+              className={i === current ? "current" : undefined}
+              style={{ paddingLeft: 10 + r.depth * 14 }}
+              disabled={!r.item.page}
+              onClick={() => {
+                if (!r.item.page) return;
+                setOpen(false);
+                onGoto(r.item.page, r.item.y);
+              }}
+            >
+              <span className="toc-title">{r.item.title}</span>
+              {r.item.page && <span className="toc-page">{info.labels?.[r.item.page - 1] ?? r.item.page}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** What the PDF says about itself and what it holds, in the material menu; attachments can be saved. */
+function PdfFacts({ id, info }: { id: string; info: PdfInfo }) {
+  const t = useT();
+  const who = [info.title, info.author].filter(Boolean).join(" · ");
+  return (
+    <>
+      {who && <p className="reader-menu-facts" title={who}>{who}</p>}
+      <p className="reader-menu-facts">
+        {t("reader.info.counts", { version: info.pdf_version ?? "?", links: info.counts.links, images: info.counts.images, annotations: info.counts.annotations })}
+      </p>
+      {info.attachments.length > 0 && (
+        <div className="reader-attachments">
+          <span>{t("reader.info.attachments")}</span>
+          {info.attachments.map((a, i) => (
+            <a key={i} href={api.materialAttachmentUrl(id, i)} download={a.name} title={a.description ?? a.name}>
+              <Icon.download /> {a.name}
+            </a>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 // -- zoom ------------------------------------------------------------------------------------------------
 function ZoomBar({ zoom, shown, pdf, onZoom }: { zoom: Zoom; shown: number; pdf: boolean; onZoom: (z: Zoom) => void }) {
   const t = useT();
@@ -644,6 +793,20 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
   const [at, setAt] = useState(() => storedAt(id));
   const [study, studyAction] = useStudy(id);
   const menuBox = useRef<HTMLDivElement>(null);
+  const gotoRef = useRef<Goto | null>(null);
+  const [info, setInfo] = useState<PdfInfo | null>(null);
+  useEffect(() => {
+    setInfo(null);
+    if (material?.id !== id || material.kind !== "pdf") return;
+    let live = true;
+    api
+      .materialInfo(id)
+      .then((i) => live && setInfo(i))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [id, material?.id, material?.kind]);
   const [zoom, setZoomState] = useState<Zoom>({ scale: 1 });
   const [shown, setShown] = useState(1);   // the zoom as a percentage, also when fitted
   const kind = material?.kind ?? "";
@@ -821,6 +984,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
         </div>
         <StudyBadge study={study} onAction={studyAction} />
         <ZoomBar zoom={zoom} shown={shown} pdf={material.kind === "pdf"} onZoom={zoomFrom} />
+        {info && info.outline.length > 0 && <OutlineMenu info={info} at={at} onGoto={(p, y) => gotoRef.current?.(p, y)} />}
         {material.unit === "page" && (
           <span className="reader-pos" aria-label={t("reader.position")}>
             {at} / {material.unit_count}
@@ -843,6 +1007,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
               <p className="reader-menu-facts">
                 {material.filename} · {t("material.unitCount", { count: material.unit_count, unit: t(material.unit === "page" ? "material.unit.page" : "material.unit.line", { count: material.unit_count }) })}
               </p>
+              {info && <PdfFacts id={material.id} info={info} />}
               <div className="menu-sep" />
               {confirmDelete ? (
                 <div className="reader-menu-confirm">
@@ -866,7 +1031,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
       {error && <div className="error reader-page-error">{error}</div>}
       <div className="reader-body" aria-label={t("material.content")}>
         {material.kind === "pdf" ? (
-          <PdfReader material={material} at={at} zoom={zoom} focus={focus} onAt={onAt} onScale={setShown} />
+          <PdfReader material={material} at={at} zoom={zoom} focus={focus} gotoRef={gotoRef} onAt={onAt} onScale={setShown} />
         ) : (
           <TextReader material={material} at={at} scale={"scale" in zoom ? zoom.scale : 1} onAt={onAt} />
         )}

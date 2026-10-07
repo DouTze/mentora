@@ -5,7 +5,8 @@ while the companion's study extracts the same book on another thread crashed the
 in a process of its own, with its own MuPDF, so the server's own MuPDF use (on the event loop) is left exactly as it
 was:
 
-    pages     page sizes and page images for the reader (a small pool, one MuPDF per worker)
+    pages     page sizes, page images, page layers (text runs, links, images, comments), document info, stored
+              images and attachments for the reader (a small pool, one MuPDF per worker; app.pdfdoc does the reading)
     studies   setting up a whole-material study: the normal `start_from_material(1..N)` of the learning flow, whose
               text and layout extraction of a long book takes minutes
 
@@ -63,6 +64,38 @@ def render_page(path: str, n: int, width: int, out: str) -> bool:
         page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).save(str(tmp))
         tmp.replace(target)
     return True
+
+
+def doc_info(path: str) -> dict:
+    import pymupdf
+
+    from .pdfdoc import document_info
+    with pymupdf.open(path) as doc:
+        return document_info(doc)
+
+
+def page_layer(path: str, n: int) -> dict:
+    import pymupdf
+
+    from .pdfdoc import page_layer as layer
+    with pymupdf.open(path) as doc:
+        return layer(doc, n)
+
+
+def image(path: str, xref: int) -> tuple[bytes, str]:
+    import pymupdf
+
+    from .pdfdoc import image_bytes
+    with pymupdf.open(path) as doc:
+        return image_bytes(doc, xref)
+
+
+def attachment(path: str, source: dict) -> tuple[str, bytes]:
+    import pymupdf
+
+    from .pdfdoc import embedded_file
+    with pymupdf.open(path) as doc:
+        return embedded_file(doc, source)
 
 
 def create_study(db_path: str, model_config: dict, material_id: str, unit_count: int, strategy_id: str) -> str:
