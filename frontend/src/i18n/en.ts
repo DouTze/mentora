@@ -220,7 +220,7 @@ export const en: Dict = {
   "reading.skipped.summary": "Skipped {n} parts that need no guided reading (expand to see)",
   "reading.skipped.role.toc": "Table of contents",
   "reading.skipped.role.summary": "Summary / review",
-  "reading.skipped.role.other": "Not course content",
+  "reading.skipped.role.meta": "Not course content (preface, exam or course information, etc.)",
   "reading.topic.summary": "In this section: ",
   "reading.block.label": "Original · part {n} of {total}",
   "reading.block.failed": "The guided reading for this part didn't pass its checks and isn't shown yet. You can read the original above.",

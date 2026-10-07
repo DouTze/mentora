@@ -67,7 +67,7 @@ def to_markdown(view: dict) -> str:
                   + (f"，出題依據：{'精簡筆記' if rd.get('quiz_source') == 'compact' else '原文'}" if rd.get("quiz_source") else ""), ""]
         skipped = (rd.get("segmentation") or {}).get("skipped") or []
         if skipped:
-            names = {"toc": "目錄", "summary": "摘要／重點回顧", "other": "非教學內容"}
+            names = {"toc": "目錄", "summary": "摘要／重點回顧", "meta": "非學科內容"}
             lines += ["略過、沒有導讀的內容：" + "、".join(f"{names.get(x['role'], x['role'])}（{x['label']}）" for x in skipped), ""]
         for q in rd["quotes"]:
             g = rd["guides"].get(str(q["index"]))

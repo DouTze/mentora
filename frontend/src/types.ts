@@ -109,8 +109,8 @@ export interface Segmentation {
   candidates: number;
   notes: string[];
   status?: "pending" | "done";
-  /** 區塊 left out as needing no guide (a table of contents, a summary repeating the text, front / back matter) */
-  skipped?: { role: "toc" | "summary" | "other"; label: string; topic?: string; text: string }[];
+  /** 區塊 left out as needing no guide (contents, a summary repeating the text, matter about the material / course / exam) */
+  skipped?: { role: "toc" | "summary" | "meta"; label: string; topic?: string; text: string }[];
 }
 
 export interface ReadingView {

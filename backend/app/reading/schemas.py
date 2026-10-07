@@ -95,9 +95,6 @@ class ParagraphTopic(BaseModel):
     topic: str = Field(min_length=1)   # what the paragraph mainly introduces ("…總覽" for an overview of several items)
     aspect: str = ""                   # which side of that topic it covers
     summary: str = ""                  # segment_outline: what the paragraph says, in one sentence
-    # segment_outline: content to guide, or something a reader does not need guided (a table of contents, a
-    # chapter summary / review, other front or back matter); when unsure, content
-    role: Literal["content", "toc", "summary", "other"] = "content"
 
 
 class TopicSummary(BaseModel):
@@ -108,6 +105,18 @@ class TopicSummary(BaseModel):
 class Outline(BaseModel):
     """segment_outline output: topic / aspect / one-sentence summary of every 區塊, in order."""
     paragraphs: list[ParagraphTopic] = Field(min_length=1)
+
+
+class MatterLabels(BaseModel):
+    """segment_matter output: one label per paragraph of a stretch, in order — a lesson of the subject, or matter
+    about the material / course / exam itself (meta), a summary of what was taught, contents (toc)."""
+    labels: list[Literal["lesson", "meta", "summary", "toc"]] = Field(min_length=1)
+
+
+class Boundaries(BaseModel):
+    """segment_boundaries output: for each pair of neighbouring paragraphs, whether the second one continues the
+    same unit or starts a new one."""
+    boundaries: list[Literal["same", "new"]] = Field(default_factory=list)
 
 
 class TopicStarts(BaseModel):
