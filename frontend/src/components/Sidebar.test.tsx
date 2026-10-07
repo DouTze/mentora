@@ -143,3 +143,20 @@ describe("Sidebar", () => {
     expect(document.documentElement.classList.contains("grabbing")).toBe(false);
   });
 });
+
+describe("Sidebar · folded", () => {
+  test("hovering the rail floats the whole sidebar; leaving folds it again", async () => {
+    mockFetch({});
+    render(
+      <Sidebar library={{ categories: [], materials: [] }} route={{ page: "home" }} companion="owl" conn={{ status: "idle", active: null, detail: "" }} hasSession={false}
+        collapsed onToggle={() => {}} onNavigate={() => {}} onLibraryChange={async () => {}} onOpenSettings={() => {}} />,
+    );
+    expect(document.querySelector(".sidebar.peek")).toBeNull();
+    await userEvent.hover(document.querySelector(".sidebar.rail")!);
+    await waitFor(() => expect(document.querySelector(".sidebar.peek")).not.toBeNull());
+    expect(screen.getByText("Mentor")).toBeTruthy();
+    fireEvent.mouseLeave(document.querySelector(".sidebar.peek")!);
+    await waitFor(() => expect(document.querySelector(".sidebar.peek.leaving")).not.toBeNull());   // slides away first
+    await waitFor(() => expect(document.querySelector(".sidebar.peek")).toBeNull(), { timeout: 2000 });
+  });
+});

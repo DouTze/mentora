@@ -8,6 +8,7 @@ export const shell = {
   "nav.history": "學習紀錄",
   "side.expand": "展開側邊欄",
   "side.collapse": "收合側邊欄",
+  "side.pin": "固定側邊欄",
   "side.materials": "教材",
   "side.newCategory": "新增分類",
   "side.import": "匯入教材",

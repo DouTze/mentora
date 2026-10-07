@@ -9,6 +9,7 @@ export const en: Dict = {
   "nav.history": "Learning history",
   "side.expand": "Expand sidebar",
   "side.collapse": "Collapse sidebar",
+  "side.pin": "Keep sidebar open",
   "side.materials": "Materials",
   "side.newCategory": "New category",
   "side.import": "Import materials",

@@ -175,6 +175,17 @@ label.field > * { margin-top: 4px; }
   background: var(--side); border-right: 1px solid var(--line); font-size: 14px; user-select: none;
 }
 .sidebar.rail { align-items: center; gap: 2px; padding: 10px 0; }
+/* the folded sidebar, hovered: the whole sidebar as a card floating over the page, clear of the window edge */
+.sidebar.peek {
+  position: fixed; z-index: 50; left: 8px; top: calc(var(--titlebar-h, 0px) + 8px); width: 268px;
+  height: calc(100vh - var(--titlebar-h, 0px) - 16px); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 2px 6px var(--shadow), 0 24px 60px -20px var(--shadow); overflow: hidden; animation: peek-in .18s ease both;
+}
+.sidebar.peek .side-foot { border-top-color: var(--line); }
+.sidebar.peek.leaving { animation: peek-out .16s ease-in both; pointer-events: none; }
+@keyframes peek-in { from { opacity: 0; transform: translateX(-10px); } }
+@keyframes peek-out { to { opacity: 0; transform: translateX(-12px); } }
+@media (prefers-reduced-motion: reduce) { .sidebar.peek, .sidebar.peek.leaving { animation: none; } }
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 8px 8px 16px; }
 .brand { font-family: var(--serif); font-weight: 700; font-size: 18px; letter-spacing: .01em; }
 .icon-btn {
