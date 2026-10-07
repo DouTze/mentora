@@ -1,5 +1,5 @@
 import type { CompanionSettings } from "./companions";
-import type { ActiveBackend, ApiError, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReadingQA, SessionListItem, SessionView, Strategy, TutorMessage, Turn } from "./types";
+import type { ActiveBackend, ApiError, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReadingQA, SessionListItem, SessionView, ShelfBook, ShelfView, Strategy, TutorMessage, Turn } from "./types";
 
 export class RequestError extends Error {
   constructor(public status: number, public body: ApiError & { session?: SessionView | null }) {
@@ -78,6 +78,15 @@ export const api = {
     return call<Material>("/materials", { method: "POST", body: form });
   },
   material: (id: string) => call<MaterialDetail>(`/materials/${id}`),
+  shelf: () => call<ShelfView>("/shelf"),
+  /** keyword search over the indexed files, no model: answers while the person is still typing */
+  shelfSearch: (q: string) => call<{ books: ShelfBook[] }>(`/shelf/search?q=${encodeURIComponent(q)}`),
+  /** saves the wish (if any) and starts a scout run in the background */
+  shelfQuery: (text: string) => call<ShelfView>("/shelf/query", { method: "POST", body: JSON.stringify({ text }) }),
+  shelfForget: (text: string) => call<{ interests: string[] }>("/shelf/interests", { method: "DELETE", body: JSON.stringify({ text }) }),
+  shelfImport: (ids: string[], categoryName: string | null) =>
+    call<{ category: Category | null; materials: Material[] }>("/shelf/import", { method: "POST", body: JSON.stringify({ ids, category_name: categoryName }) }),
+  shelfCoverUrl: (id: string) => `${API_BASE}/shelf/${id}/cover`,
   updateMaterial: (id: string, patch: { title?: string; category_id?: string | null }) =>
     call<Material>(`/materials/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteMaterial: (id: string) => call<{ ok: boolean }>(`/materials/${id}`, { method: "DELETE" }),

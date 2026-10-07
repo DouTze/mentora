@@ -73,6 +73,15 @@ class MaterialUpdate(BaseModel):
     category_id: str | None = None
 
 
+class ShelfQuery(BaseModel):
+    text: str = Field(default="", max_length=200)
+
+
+class ShelfImport(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=20)
+    category_name: str | None = Field(default=None, max_length=40)
+
+
 class AnswerRequest(BaseModel):
     answer: str = Field(min_length=1)
 

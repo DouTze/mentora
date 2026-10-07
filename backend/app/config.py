@@ -25,6 +25,9 @@ READING_BLOCK_ATTEMPTS = int(os.environ.get("MENTOR_BLOCK_ATTEMPTS", "3"))
 # 切段：model（由模型依來源單元規則把候選段落組成 quote）| rules（只用規則切法）
 QUOTE_PLANNER = os.environ.get("MENTOR_QUOTE_PLANNER", "model")
 CHECKPOINT_PATH = os.environ.get("MENTOR_CHECKPOINT_PATH", "")   # 預設與業務 DB 同目錄的 checkpoints.sqlite3
+# 首頁書櫃：掃描索引、封面與上次挑書結果放這裡；SHELF_WARMUP=0 時啟動不先掃描（測試）
+SHELF_DIR = Path(os.environ.get("MENTOR_SHELF_DIR", DATA_DIR / "shelf"))
+SHELF_WARMUP = os.environ.get("MENTOR_SHELF_WARMUP", "1") != "0"
 READING_DIR = Path(os.environ.get("MENTOR_READING_DIR", DATA_DIR / "reading"))
 
 GEN_DEFAULTS = {

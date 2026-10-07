@@ -49,6 +49,14 @@ class MockBackend(LLMBackend):
             ts = meta.get("topics") or []
             text = json.dumps({"new_topic_at": [k for k in range(2, len(ts) + 1) if ts[k - 1] != ts[k - 2]]},
                               ensure_ascii=False)
+        elif step == "shelf_profile":   # simulated: the person's own words are the tendencies, no understanding
+            words = ([meta["query"]] if meta.get("query") else []) + list(meta.get("interests") or [])[:2] \
+                or list(meta.get("library") or [])[:2] or ["（模擬）一般閱讀"]
+            text = json.dumps({"tendencies": [{"label": w[:16], "keywords": [w, *w.split()][:6] if len(w) > 1 else [w, w]}
+                                              for w in words[:3]]}, ensure_ascii=False)
+        elif step == "shelf_pick":   # simulated: the keyword ranking as it came
+            text = json.dumps({"picks": [{"n": k, "reason": "（模擬）和你的閱讀方向相關"}
+                                         for k in range(1, min(int(meta.get("candidates") or 0), 8) + 1)]}, ensure_ascii=False)
         elif step == "reading_topic":
             text = json.dumps({"summary": "（模擬）這個主題的概要。", "key_points": ["（模擬）重點"],
                                "check": "你能用自己的話說出這個主題的重點嗎？"}, ensure_ascii=False)
