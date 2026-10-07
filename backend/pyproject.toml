@@ -22,6 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 openvino = ["openvino-genai>=2025.1"]
+# 打包桌面版的 Python sidecar（scripts/build-sidecar.ts）
+desktop = ["pyinstaller>=6.10"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

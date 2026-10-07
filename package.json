@@ -3,6 +3,14 @@
   "private": true,
   "scripts": {
     "dev": "bun scripts/dev.ts",
-    "stop": "bun scripts/stop.ts"
+    "stop": "bun scripts/stop.ts",
+    "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "desktop:build": "tauri build",
+    "desktop:prepare": "bun scripts/desktop-prepare.ts",
+    "desktop:sidecar": "bun scripts/build-sidecar.ts",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
   }
 }

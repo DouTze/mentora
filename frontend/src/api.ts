@@ -7,12 +7,34 @@ export class RequestError extends Error {
   }
 }
 
+// Browser / dev server: same-origin "/api" (frontend/server.ts proxies it to FastAPI). Desktop app: the Tauri shell
+// injects the sidecar's address (a free port picked at launch) as window.__MENTOR_API__ before the page loads.
+const DESKTOP_API = (globalThis as { __MENTOR_API__?: string }).__MENTOR_API__;
+const API_BASE: string = DESKTOP_API ?? "/api";
+
+// The desktop sidecar starts together with the window and needs a few seconds (longer on the first launch, when
+// the one-file executable unpacks itself), so requests wait until it answers instead of failing right away.
+let backendReady: Promise<void> | null = null;
+function waitForBackend(): Promise<void> {
+  backendReady ??= (async () => {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      try {
+        if ((await fetch(`${API_BASE}/health`)).ok) return;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  })();
+  return backendReady;
+}
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
+  if (DESKTOP_API) await waitForBackend();
   try {
     // FormData sets its own multipart content-type (with boundary)
     const headers = init?.body instanceof FormData ? undefined : { "content-type": "application/json" };
-    res = await fetch(`/api${path}`, { headers, ...init });
+    res = await fetch(`${API_BASE}${path}`, { headers, ...init });
   } catch (e) {
     throw new RequestError(0, { code: "network", detail: `無法連線後端：${e}`, retryable: true });
   }
@@ -59,7 +81,7 @@ export const api = {
   updateMaterial: (id: string, patch: { title?: string; category_id?: string | null }) =>
     call<Material>(`/materials/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteMaterial: (id: string) => call<{ ok: boolean }>(`/materials/${id}`, { method: "DELETE" }),
-  materialFileUrl: (id: string) => `/api/materials/${id}/file`,
+  materialFileUrl: (id: string) => `${API_BASE}/materials/${id}/file`,
   sessions: () => call<SessionListItem[]>("/sessions"),
   session: (id: string) => call<SessionView>(`/sessions/${id}`),
   deleteSession: (id: string) => call<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
@@ -71,5 +93,5 @@ export const api = {
   command: (id: string, commandId: string) => call<CommandView>(`/sessions/${id}/commands/${encodeURIComponent(commandId)}`),
   replay: (id: string) =>
     call<{ session: SessionView; replayed_answers: number; total_answers: number; error: ApiError | null }>(`/sessions/${id}/replay`, { method: "POST" }),
-  exportUrl: (id: string, format: "json" | "md") => `/api/sessions/${id}/export?format=${format}`,
+  exportUrl: (id: string, format: "json" | "md") => `${API_BASE}/sessions/${id}/export?format=${format}`,
 };

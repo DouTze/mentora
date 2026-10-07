@@ -1,0 +1,39 @@
+# Build the desktop app (Tauri + Python sidecar) for macOS and Windows.
+# PyInstaller cannot cross-compile, so each OS builds its own sidecar on its own runner.
+name: desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest      # Apple Silicon (aarch64-apple-darwin)
+          - os: windows-latest    # x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: astral-sh/setup-uv@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: bun install
+      # beforeBuildCommand (bun run desktop:prepare) builds the frontend and the sidecar first
+      - run: bun run desktop:build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mentora-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error

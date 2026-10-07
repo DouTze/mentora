@@ -16,3 +16,10 @@ backend/models/
 
 # 遠端推論的連線設定（含 token），只放本機
 remote.env
+
+# desktop (Tauri) build outputs
+backend/build/
+backend/dist/
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/
