@@ -84,6 +84,28 @@ export const PdfLayer = memo(function PdfLayer({ layer, imageUrl, onGoto }: {
   };
   useEffect(() => () => clearTimeout(timer.current), []);
   const root = useRef<HTMLDivElement>(null);
+  // a formula is found under the pointer by its whole box on the page (every line of a display, not only the run
+  // that carries its LaTeX), so the text layer above it still selects as usual
+  const under = useRef<number | null>(null);
+  const onMove = (e: React.MouseEvent) => {
+    const el = root.current;
+    if (!el || !layer.math?.length) return;
+    const r = el.getBoundingClientRect();
+    const k = r.width / layer.size[0];
+    if (!k) return;
+    const x = (e.clientX - r.left) / k, y = (e.clientY - r.top) / k;
+    const pad = 2;
+    const i = layer.math.findIndex(({ rect: [x0, y0, x1, y1] }) => x >= x0 - pad && x <= x1 + pad && y >= y0 - pad && y <= y1 + pad);
+    const k2 = i < 0 ? null : i;
+    if (k2 === under.current) return;
+    under.current = k2;
+    hover(k2, k2 === null ? 250 : 350);
+  };
+  const onOut = () => {
+    if (under.current === null) return;
+    under.current = null;
+    hover(null, 250);
+  };
   // the card floats over the whole app, so scrolling the page under it closes it rather than leaving it behind
   useEffect(() => {
     if (card === null) return;
@@ -97,7 +119,7 @@ export const PdfLayer = memo(function PdfLayer({ layer, imageUrl, onGoto }: {
   }, [card]);
   const notes = layer.annotations.filter((a) => a.content && !["Highlight", "Underline", "StrikeOut", "Squiggly"].includes(a.type));
   return (
-    <div className="pdf-layer" ref={root}>
+    <div className="pdf-layer" ref={root} onMouseMove={layer.math?.length ? onMove : undefined} onMouseLeave={layer.math?.length ? onOut : undefined}>
       {layer.images.map((im, i) =>
         // a figure, not a bullet or a rule: at least a tenth of the page each way
         im.xref > 0 && im.rect[2] - im.rect[0] > layer.size[0] / 10 && im.rect[3] - im.rect[1] > layer.size[1] / 10 ? (
@@ -119,7 +141,7 @@ export const PdfLayer = memo(function PdfLayer({ layer, imageUrl, onGoto }: {
                     {r.t}
                   </span>
                 ) : (
-                  <span className="pdf-run math" style={r.style} onMouseEnter={() => hover(r.math!, 350)} onMouseLeave={() => hover(null, 250)}>
+                  <span className="pdf-run math" style={r.style}>
                     {r.t}
                   </span>
                 )}
@@ -130,7 +152,7 @@ export const PdfLayer = memo(function PdfLayer({ layer, imageUrl, onGoto }: {
         ))}
       </div>
       {card !== null && layer.math?.[card] && root.current && (
-        <MathCard formula={layer.math[card]} size={layer.size} page={root.current} onEnter={() => hover(card, 0)} onLeave={() => hover(null, 200)} />
+        <MathCard formula={layer.math[card]} size={layer.size} page={root.current} onEnter={() => hover(card, 0)} onLeave={() => ((under.current = null), hover(null, 200))} />
       )}
       {notes.map((a) => (
         <div key={`n${a.index}`} className="pdf-note" style={box(a.rect)} title={a.author ? `${a.author}：${a.content}` : (a.content ?? "")} />

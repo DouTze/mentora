@@ -107,12 +107,44 @@ describe("MaterialPage · study progress and zoom", () => {
 
   test("ctrl + wheel (a trackpad pinch) is taken by the reader, not the window", async () => {
     setup();
-    await screen.findByText("100%");
+    await screen.findByRole("button", { name: "將這頁加入書籤" });
     // the test DOM drops ctrlKey from a WheelEvent's init, so it is set on the event itself
     const e = new WheelEvent("wheel", { deltaY: -40, clientX: 400, clientY: 300, cancelable: true });
     Object.defineProperty(e, "ctrlKey", { value: true });
     window.dispatchEvent(e);
     expect(e.defaultPrevented).toBe(true);
+  });
+});
+
+describe("MaterialPage · toolbar", () => {
+  test("the bookmark button marks the line being read with the heading it falls under, and unmarks it", async () => {
+    const marks: unknown[] = [];
+    const { calls } = setup({
+      "PUT /api/materials/m1/bookmarks/1": () => ({ json: [{ unit_no: 1, chapter: "光合作用", created_at: "" }] }),
+      "DELETE /api/materials/m1/bookmarks/1": () => ({ json: [] }),
+    });
+    cleanup();
+    let current: { unit_no: number; chapter: string | null; created_at: string }[] = [];
+    const view = () => (
+      <MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={() => {}}
+        bookmarks={current} onBookmarks={(_, m) => { current = m; marks.push(m); rerender(view()); }} />
+    );
+    const { rerender } = render(view());
+    await userEvent.click(await screen.findByRole("button", { name: "將這頁加入書籤" }));
+    await waitFor(() => expect(calls.find((c) => c.key === "PUT /api/materials/m1/bookmarks/1")?.body).toEqual({ chapter: "光合作用" }));
+    const on = await screen.findByRole("button", { name: "移除這頁的書籤" });
+    expect(on.getAttribute("aria-pressed")).toBe("true");
+    await userEvent.click(on);
+    await waitFor(() => expect(marks.at(-1)).toEqual([]));
+  });
+
+  test("the zoom lives in the ⋯ card, not on the toolbar; the placeholder does not repeat the position", async () => {
+    setup();
+    const box = await screen.findByRole("textbox", { name: "向導師提問" });
+    expect(box.getAttribute("placeholder")).toBe("對這段有疑問？");
+    expect(screen.queryByRole("group", { name: "縮放" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "教材選項" }));
+    expect(screen.getByRole("group", { name: "縮放" })).toHaveTextContent("100%");
   });
 });
 
@@ -130,7 +162,7 @@ describe("MaterialPage · English", () => {
         <MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={() => {}} />
       </I18nContext.Provider>,
     );
-    expect(await screen.findByPlaceholderText("Questions about Line 1? Ask your tutor")).toBeTruthy();
+    expect(await screen.findByPlaceholderText("Questions about this passage?")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Guide me/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Quiz me/ })).toBeTruthy();
   });

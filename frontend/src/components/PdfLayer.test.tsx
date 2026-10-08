@@ -45,16 +45,18 @@ describe("PdfLayer", () => {
     expect(container.querySelector(".pdf-image-save")?.getAttribute("href")).toBe("/img/7");
   });
 
-  test("a formula run holds its LaTeX, and hovering it opens a card with the formula and its source", async () => {
+  test("a formula run holds its LaTeX, and hovering anywhere in its box opens a card with the formula and its source", async () => {
     const withMath: PdfPageLayer = {
       ...layer,
       lines: [{ block: 0, runs: [{ t: "$$y=a\\times b \\tag{1.2}$$", rect: [10, 60, 200, 72], sp: true, math: 0 }] }],
       math: [{ rect: [10, 55, 200, 78], latex: "y=a\\times b", display: true, tag: "1.2" }],
     };
     const { container } = render(<PdfLayer layer={withMath} imageUrl={(x) => `/img/${x}`} onGoto={() => {}} />);
-    const run = container.querySelector<HTMLElement>(".pdf-run.math")!;
     expect(container.querySelector(".pdf-text")?.textContent).toBe(" $$y=a\\times b \\tag{1.2}$$\n");
-    fireEvent.mouseEnter(run);
+    const page = container.querySelector<HTMLElement>(".pdf-layer")!;
+    page.getBoundingClientRect = () => ({ left: 0, top: 0, width: layer.size[0], height: layer.size[1] }) as DOMRect;
+    // a lower line of the display (below the run that carries the LaTeX), at 1 px per point
+    fireEvent.mouseMove(page, { clientX: 100, clientY: 76 });
     await new Promise((r) => setTimeout(r, 400));
     const card = document.body.querySelector(".pdf-math-card")!;   // a portal: it floats over the whole app
     expect(card.querySelector(".katex")).toBeTruthy();

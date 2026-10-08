@@ -1,5 +1,5 @@
 import type { CompanionSettings } from "./companions";
-import type { ActiveBackend, ApiError, PdfInfo, PdfPageLayer, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReaderQuestion, ReadingQA, SessionListItem, SessionView, ShelfBook, ShelfScope, ShelfView, Strategy, StudyView, TutorMessage, Turn } from "./types";
+import type { ActiveBackend, ApiError, Bookmark, Bookmarks, PdfInfo, PdfPageLayer, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReaderQuestion, ReadingQA, SessionListItem, SessionView, ShelfBook, ShelfScope, ShelfView, Strategy, StudyView, TutorMessage, Turn } from "./types";
 
 export class RequestError extends Error {
   constructor(public status: number, public body: ApiError & { session?: SessionView | null }) {
@@ -99,6 +99,10 @@ export const api = {
   materialFileUrl: (id: string) => `${API_BASE}/materials/${id}/file`,
   materialPages: (id: string) => call<{ sizes: [number, number][] }>(`/materials/${id}/pages`),
   materialPageUrl: (id: string, n: number, width: number) => `${API_BASE}/materials/${id}/pages/${n}?w=${width}`,
+  bookmarks: () => call<Bookmarks>("/bookmarks"),
+  addBookmark: (id: string, n: number, chapter: string | null) =>
+    call<Bookmark[]>(`/materials/${id}/bookmarks/${n}`, { method: "PUT", body: JSON.stringify({ chapter }) }),
+  removeBookmark: (id: string, n: number) => call<Bookmark[]>(`/materials/${id}/bookmarks/${n}`, { method: "DELETE" }),
   materialInfo: (id: string) => call<PdfInfo>(`/materials/${id}/info`),
   materialPageLayer: (id: string, n: number) => call<PdfPageLayer>(`/materials/${id}/pages/${n}/layer`),
   materialImageUrl: (id: string, xref: number) => `${API_BASE}/materials/${id}/images/${xref}`,

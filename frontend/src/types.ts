@@ -274,6 +274,14 @@ export interface Source {
   text: string;
 }
 
+/** A page (a line, in a text) the reader marked, and the chapter it falls in as the reader named it. */
+export interface Bookmark {
+  unit_no: number;
+  chapter: string | null;
+  created_at: string;
+}
+export type Bookmarks = Record<string, Bookmark[]>;
+
 export interface Category {
   id: string;
   name: string;

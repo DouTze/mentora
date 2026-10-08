@@ -25,9 +25,15 @@ export interface Connection {
 const RECHECK_MS = 5 * 60_000;
 const FOCUS_RECHECK_MS = 2 * 60_000;
 
+export type CheckResult = { active: ActiveBackend; health: { ok: boolean; detail?: string } };
+const connectionOf = ({ active, health }: CheckResult): Connection => ({
+  active, detail: health.detail ?? "", status: active.simulated ? "idle" : health.ok ? "ok" : "bad", checkedAt: Date.now(),
+});
+
 /** Asks the backend whether the current model answers: on start, every five minutes, on returning to the window after
- * two minutes away, and whenever `recheck` is called (after the settings change the model). */
-export function useConnection(): [Connection, () => void] {
+ * two minutes away, and whenever `recheck` is called (after the settings change the model). A check made elsewhere
+ * (the settings' 檢查連線) is handed in with `report`, so the dock shows the same answer at once. */
+export function useConnection(): [Connection, () => void, (r: CheckResult) => void] {
   const [conn, setConn] = useState<Connection>({ status: "idle", active: null, detail: "" });
   const running = useRef(false);
   const last = useRef(0);
@@ -38,9 +44,7 @@ export function useConnection(): [Connection, () => void] {
     setConn((c) => ({ ...c, status: "checking" }));
     api
       .checkSettings()
-      .then(({ active, health }) =>
-        setConn({ active, detail: health.detail ?? "", status: active.simulated ? "idle" : health.ok ? "ok" : "bad", checkedAt: Date.now() }),
-      )
+      .then((r) => setConn(connectionOf(r)))
       .catch((e) => setConn((c) => ({ ...c, status: "bad", detail: String(e?.body?.detail ?? e), checkedAt: Date.now() })))
       .finally(() => (running.current = false));
   }, []);
@@ -54,7 +58,11 @@ export function useConnection(): [Connection, () => void] {
       window.removeEventListener("focus", onFocus);
     };
   }, [check]);
-  return [conn, check];
+  const report = useCallback((r: CheckResult) => {
+    last.current = Date.now();
+    setConn(connectionOf(r));
+  }, []);
+  return [conn, check, report];
 }
 
 /** A model on this machine (OpenVINO, or Ollama on localhost) or one reached over the network. */

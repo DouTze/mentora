@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { api, RequestError } from "./api";
-import type { Library } from "./types";
+import type { Bookmark, Bookmarks, Library } from "./types";
 import type { CompanionId } from "./companions";
 import { useConnection } from "./components/CompanionDock";
 import { useRoute, useStored } from "./route";
 import { Sidebar } from "./components/Sidebar";
 import { Toaster } from "./components/Toaster";
 import { HomePage } from "./pages/Home";
-import { MaterialPage } from "./pages/Material";
+import { MaterialPage, POSITION_KEY } from "./pages/Material";
 import { LearnPage } from "./pages/Learn";
 import { HistoryPage } from "./pages/History";
 import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
@@ -18,7 +18,7 @@ import { useT } from "./i18n";
 export function App() {
   const [route, navigate] = useRoute();
   const [collapsed, setCollapsed] = useStored("mentor.sidebarCollapsed", false);
-  const [conn, recheck] = useConnection();
+  const [conn, recheck, reportCheck] = useConnection();
   const [companion, setCompanion] = useState<CompanionId>("owl");
   const [library, setLibrary] = useState<Library>({ categories: [], materials: [] });
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
@@ -46,18 +46,33 @@ export function App() {
     localStorage.removeItem("mentor.sessionId");
     setSessionId(null);
   };
+  // every book's bookmarks: the reader marks pages, the sidebar lists them under the book
+  const [bookmarks, setBookmarks] = useState<Bookmarks>({});
+  const refreshBookmarks = () => api.bookmarks().then(setBookmarks).catch(() => {});
+  const setBookMarks = (id: string, marks: Bookmark[]) => setBookmarks((all) => ({ ...all, [id]: marks }));
   const refreshLibrary = () =>
     api
       .library()
       .then((l) => {
         setLibrary(l);
         forgetClosedSession();
+        refreshBookmarks();   // a deleted book took its bookmarks with it
       })
       .catch(() => {});
   useEffect(() => {
     refreshCompanion();
     refreshLibrary();
   }, []);
+  // a page opened from the sidebar (a bookmark): stored as where the book is read, then brought into view
+  const [readingAt, setReadingAt] = useState<{ id: string; n: number } | null>(null);
+  const [jump, setJump] = useState<{ id: string; n: number; k: number } | null>(null);
+  const openPage = (id: string, n: number) => {
+    try {
+      localStorage.setItem(POSITION_KEY(id), String(n));
+    } catch {}
+    setJump({ id, n, k: Date.now() });
+    navigate({ page: "material", id });
+  };
 
   // Cmd/Ctrl + \ folds the sidebar, same as Notion
   useEffect(() => {
@@ -89,13 +104,19 @@ export function App() {
   return (
     <>
     {customTitlebar && <TitleBar title={pageTitle} collapsed={collapsed} />}
-    <div className={`shell ${collapsed ? "collapsed" : ""}`}>
+    <div className={`shell ${collapsed ? "collapsed" : ""} ${route.page === "material" ? "reading" : ""}`}>
       <Sidebar
         library={library}
         route={route}
         companion={companion}
         conn={conn}
         hasSession={!!sessionId}
+        sessionId={sessionId}
+        bookmarks={bookmarks}
+        readingAt={readingAt}
+        onOpenPage={openPage}
+        onOpenSession={openSession}
+        onRemoveBookmark={(id, n) => api.removeBookmark(id, n).then((m) => setBookMarks(id, m)).catch(() => {})}
         collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)}
         onNavigate={navigate}
@@ -107,7 +128,17 @@ export function App() {
           <HomePage key={homeKey} library={library} onLibraryChange={refreshLibrary} onNavigate={navigate} onOpenSession={openSession} onOpenScope={() => setSettingsTab("shelf")} />
         )}
         {route.page === "material" && (
-          <MaterialPage id={route.id} library={library} onLibraryChange={refreshLibrary} onNavigate={navigate} onOpenSession={openSession} />
+          <MaterialPage
+            id={route.id}
+            library={library}
+            onLibraryChange={refreshLibrary}
+            onNavigate={navigate}
+            onOpenSession={openSession}
+            bookmarks={bookmarks[route.id] ?? []}
+            onBookmarks={setBookMarks}
+            jump={jump}
+            onPosition={(id, n) => setReadingAt((p) => (p?.id === id && p.n === n ? p : { id, n }))}
+          />
         )}
         {route.page === "learn" && (
           <div className="doc">
@@ -129,6 +160,7 @@ export function App() {
             setHomeKey((k) => k + 1);
           }}
           onBackendChanged={refreshBackend}
+          onChecked={reportCheck}
         />
       )}
     </div>
