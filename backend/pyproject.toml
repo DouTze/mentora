@@ -10,6 +10,8 @@ dependencies = [
     "httpx>=0.27",
     "pypdf>=5",
     "pymupdf>=1.25",
+    # PDF 方程式轉 LaTeX：Unicode → LaTeX 對照表（app/pdfdoc/math.py）
+    "pylatexenc>=2.10,<3",
     "python-multipart>=0.0.9",
     # 導讀 agent 與學習流程（MENTOR_WORKFLOW=langgraph）。精確版本見 requirements.lock。
     "langchain>=1.4,<2",

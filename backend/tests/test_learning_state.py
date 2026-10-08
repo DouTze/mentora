@@ -8,6 +8,7 @@ from test_workflow import MD, graph_app, idle, prefetch_idle, run  # noqa: F401 
 
 def start_with(c, **contract):
     m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
+    m = m.get("material") or m          # the same file again is the book already imported (409 duplicate)
     s = c.post("/api/sessions", json={"material_id": m["id"], "start": 1, "end": len(MD.splitlines()), **contract}).json()
     return idle(c, s["id"])
 

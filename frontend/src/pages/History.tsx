@@ -80,6 +80,8 @@ export function HistoryPage({ onOpen }: { onOpen: (id: string) => void }) {
                   <td className="nowrap">
                     {s.status === "completed" ? (
                       <span className={`badge ${s.verdict === "passed" ? "ok" : "warn"}`}>{t(s.verdict === "passed" ? "session.verdict.passed" : "session.verdict.review")}</span>
+                    ) : s.status === "closed" ? (
+                      <span className="badge" title={t("learn.closed")}>{t("session.status.closed")}</span>
                     ) : (
                       <span className="badge">{t("session.status.active")}</span>
                     )}

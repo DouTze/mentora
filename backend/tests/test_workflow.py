@@ -46,6 +46,7 @@ def idle(c, sid, timeout=20):
 
 def start(c, text=MD):
     m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(text.encode()))}).json()
+    m = m.get("material") or m          # the same file again is the book already imported (409 duplicate)
     s = c.post("/api/sessions", json={"material_id": m["id"], "start": 1, "end": len(text.splitlines())}).json()
     assert s["workflow_runner"] == "langgraph"
     return idle(c, s["id"])

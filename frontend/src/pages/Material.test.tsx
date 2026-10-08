@@ -32,7 +32,7 @@ describe("MaterialPage · reader", () => {
     expect(screen.getByText("植物利用陽光製造葡萄糖。 葉綠體是進行光合作用的地方。".split(" ")[0], { exact: false })).toBeTruthy();
     expect(screen.queryByTestId("unit")).toBeNull();
     expect(screen.queryByRole("button", { name: "開始學習" })).toBeNull();
-    expect(await screen.findByText("導師已讀完全書")).toBeTruthy();
+    expect(await screen.findByText("全書段落已整理好")).toBeTruthy();
   });
 
   test("a question is sent with the line being read and its answer shown above the box", async () => {
@@ -71,7 +71,7 @@ describe("MaterialPage · reader", () => {
   test("the study's progress is shown while the companion reads", async () => {
     const reading = { ...study, status: "reading", progress: 0.42, parts: [] };
     setup({ "GET /api/materials/m1/study": () => ({ json: reading }), "POST /api/materials/m1/study/focus": () => ({ json: reading }) });
-    expect(await screen.findByText("導師正在讀全書 · 42%")).toBeTruthy();
+    expect(await screen.findByText("導師正在整理全書段落 · 42%")).toBeTruthy();
   });
 });
 
@@ -79,7 +79,7 @@ describe("MaterialPage · study progress and zoom", () => {
   test("hovering the study shows the pass and the batch the companion is on", async () => {
     const reading = { ...study, status: "reading", progress: 0.12, parts: [], step: { phase: "outline", current: 3, total: 12, approx: false } };
     setup({ "GET /api/materials/m1/study": () => ({ json: reading }), "POST /api/materials/m1/study/focus": () => ({ json: reading }) });
-    await userEvent.hover(await screen.findByText("導師正在讀全書 · 12%"));
+    await userEvent.hover(await screen.findByText("導師正在整理全書段落 · 12%"));
     const card = await screen.findByRole("tooltip");
     expect(card).toHaveTextContent("逐段摘要");
     expect(card).toHaveTextContent("第 3 段，共 12 段");
@@ -92,16 +92,16 @@ describe("MaterialPage · study progress and zoom", () => {
       "POST /api/materials/m1/study/focus": () => ({ json: reading }),
       "POST /api/materials/m1/study/pause": () => ({ json: { ...reading, paused: true, by_user: true } }),
     });
-    await userEvent.hover(await screen.findByText("導師正在讀全書 · 30%"));
+    await userEvent.hover(await screen.findByText("導師正在整理全書段落 · 30%"));
     await userEvent.click(await screen.findByRole("button", { name: "暫停" }));
-    expect((await screen.findAllByText("已暫停全文學習 · 30%")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("已暫停全書分段 · 30%")).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "繼續" })).toBeTruthy();
     expect(calls.some((c) => c.key === "POST /api/materials/m1/study/pause")).toBe(true);
   });
 
   test("opening the book tells the server the companion may read it", async () => {
     const { calls } = setup();
-    await screen.findByText("導師已讀完全書");
+    await screen.findByText("全書段落已整理好");
     expect(calls.some((c) => c.key === "POST /api/materials/m1/study/focus")).toBe(true);
   });
 

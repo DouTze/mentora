@@ -136,7 +136,9 @@ class ShelfService:
 
     def _exclude(self) -> set[str]:
         """Books already in the library stay off the shelf (matched by file name and by title)."""
-        return {s.lower() for m in self.materials.list() for s in (m["filename"], m["title"])}
+        # and the book folder's own copies, which carry content names (app.library)
+        return {s.lower() for m in self.materials.list() for s in (m["filename"], m["title"])} | \
+            {n.lower() for n in self.materials.library.stored_names()}
 
     def view(self) -> dict:
         exclude = self._exclude()
@@ -226,7 +228,7 @@ class ShelfService:
         if category_name and category_name.strip():
             name = category_name.strip()[:40]
             category = next((c for c in self.materials.list_categories() if c["name"] == name), None) or self.materials.create_category(name)
-        imported = []
+        imported, duplicates = [], []
         for e in entries:
             try:
                 if e.parts:   # a series: its chapters in order, as one text
@@ -236,9 +238,17 @@ class ShelfService:
                     data, filename = Path(e.path).read_bytes(), Path(e.path).name
             except OSError as err:
                 raise MaterialError("unreadable", f"讀不到「{e.name}」：{err.strerror or err}") from err
-            m = self.materials.add(filename, data, category["id"] if category else None)
+            try:
+                m = self.materials.add(filename, data, category["id"] if category else None, original_path=str(e.path))
+            except MaterialError as err:
+                if err.code != "duplicate":
+                    raise
+                duplicates.append(err.extra["material"])   # the same file is already in the library: named, not added
+                continue
             # the title the shelf showed (PDF metadata or a cleaned file name), not the raw file name
             imported.append(self.materials.update(m["id"], title=self.meta.book(e)["title"], category_id=None, set_category=False))
+            if getattr(self, "describer", None):
+                self.describer.schedule(m["id"])
         if self.result:   # what was imported leaves the shelf right away
             self._save_result({**self.result, "books": [b for b in self.result["books"] if b["id"] not in ids]})
-        return {"category": category, "materials": imported}
+        return {"category": category, "materials": imported, "duplicates": duplicates}

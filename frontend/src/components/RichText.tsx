@@ -27,9 +27,21 @@ function math(src: string, display: boolean): ReactNode {
   return display ? <div className="math-display" dangerouslySetInnerHTML={{ __html: html }} /> : <span dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
+/** A display formula written inside a line of text ("… given by $$…$$ where …", as PDF text is imported): its own
+ * line, set as a display, without leaving the paragraph. */
+function mathBlockInLine(src: string): ReactNode {
+  let html: string;
+  try {
+    html = katex.renderToString(src, { displayMode: true, throwOnError: false, strict: "ignore", output: "htmlAndMathml" });
+  } catch {
+    return <code>{src}</code>;
+  }
+  return <span className="math-display math-in-line" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
 // -- inline -----------------------------------------------------------------
-// tokens, first match wins: inline math, code, bold, italic
-const INLINE_RE = /(\$(?!\s)(?:\\.|[^$\\\n])+?(?<!\s)\$)|(`[^`\n]+`)|(\*\*[^*\n]+?\*\*)|(\*(?!\s)[^*\n]+?(?<!\s)\*)/g;
+// tokens, first match wins: display math within a line, inline math, code, bold, italic
+const INLINE_RE = /(\$\$(?:\\.|[^$\\])+?\$\$)|(\$(?!\s)(?:\\.|[^$\\\n])+?(?<!\s)\$)|(`[^`\n]+`)|(\*\*[^*\n]+?\*\*)|(\*(?!\s)[^*\n]+?(?<!\s)\*)/g;
 
 export function renderInline(text: string): ReactNode[] {
   const out: ReactNode[] = [];
@@ -38,8 +50,9 @@ export function renderInline(text: string): ReactNode[] {
   for (const m of text.matchAll(INLINE_RE)) {
     const i = m.index ?? 0;
     if (i > last) out.push(text.slice(last, i));
-    const [tok, dollar, code, bold, italic] = m;
-    if (dollar) out.push(<Fragment key={k++}>{math(tok.slice(1, -1), false)}</Fragment>);
+    const [tok, display, dollar, code, bold, italic] = m;
+    if (display) out.push(<Fragment key={k++}>{mathBlockInLine(tok.slice(2, -2))}</Fragment>);
+    else if (dollar) out.push(<Fragment key={k++}>{math(tok.slice(1, -1), false)}</Fragment>);
     else if (code) out.push(<code key={k++}>{tok.slice(1, -1)}</code>);
     else if (bold) out.push(<strong key={k++}>{renderInline(tok.slice(2, -2))}</strong>);
     else if (italic) out.push(<em key={k++}>{renderInline(tok.slice(1, -1))}</em>);

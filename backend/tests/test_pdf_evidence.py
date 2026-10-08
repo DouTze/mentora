@@ -29,7 +29,8 @@ def test_font_flags_and_lost_glyphs_are_kept_per_block():
     assert e["page"] == 1 and len(e["bbox"]) == 4 and e["bold_tokens"] == ["w"] and "x" in e["italic_tokens"]
     assert e["superscripts"] == ["2"] and e["math_fonts"] == ["Symbol"] and e["lost_glyphs"]
     assert any(sp["font"] == "Times-Bold" and sp["t"] == "w" for sp in e["spans"])
-    assert "x2" in sym.text                                      # the text layer flattened x² — why text is not evidence
+    # the text reads the raised 2 as a superscript (app.pdfdoc.math); the font evidence above is still what confirms it
+    assert any("$x^{2}$" in b.text for b in blocks)
     plain = next(b for b in blocks if b.text.startswith("This paragraph"))
     assert unit_symbol_evidence([plain], str(path), False) is None
     ev = unit_symbol_evidence([sym], str(path), False)

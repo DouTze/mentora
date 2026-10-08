@@ -172,6 +172,10 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         r = row(sid)
         content = r["content_snapshot"]
         if content["segmentation"]["status"] == "done":
+            # units taken from the material's study (WorkflowService.start_from_study): no segmenting here, but the
+            # coming units' sources are warmed as after a segmentation of its own
+            if content["segmentation"].get("reused_from") and deps.on_units_ready:
+                deps.on_units_ready(sid)
             return {"error": None, "failed_node": None}
         stage(state, "segment")
         m = meta(r)
@@ -249,6 +253,40 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                                    source_kind="pdf" if content["source"]["unit"] == "page" else "md",
                                    depends_on_prev=bool(q.get("depends_on_prev")),
                                    symbol_evidence=symbol_evidence(r, q))
+
+    def contract_of(r: dict | None) -> tuple:
+        """What a guide is written for besides its source: the reading depth, goal and the reader's background."""
+        tc = (meta(r) if r else {}).get("task_contract") or {}
+        return tc.get("depth", "close"), tc.get("goal", ""), tc.get("reader_background", "")
+
+    def reusable_guide(sid: str, q: dict) -> dict | None:
+        """An accepted guide of the same unit written by another reading of this material (its study, or an earlier
+        導讀 of the same part) for the same task contract: readings started from the study share its unit ids, so a
+        unit's guide is written once. The key is ReadingTaskInput.source_hash (unit, text, blocks), the reading
+        workflow version and the contract (a guide for a skim by a high-school reader is not one for a close read)."""
+        want = contract_of(row(sid))
+        for g in repo.accepted_guides(q["unit_id"], stable_hash([q["unit_id"], q["text"], q["block_ids"]]),
+                                      ra.READING_WORKFLOW_VERSION, exclude_session=sid):
+            other = deps.db.get_session(g["session_id"]) if g.get("session_id") else None
+            if other and contract_of(other) == want:
+                return g
+        return None
+
+    def adopt_guide(sid: str, idx: int, q: dict, found: dict) -> dict:
+        """Take over a reusable guide as this session's accepted guide of unit `idx` (shown, not yet read)."""
+        art = {**found["payload"], "reused_from": found["session_id"]}
+
+        def mutate(c: dict, s: dict) -> None:
+            s["reading"]["guides"][str(idx)] = art
+            s["reading"]["presented"] = sorted(set(s["reading"].get("presented") or []) | {idx})
+
+        repo.commit(sid, f"{sid}:guide:{q['unit_id']}:reuse:{found['artifact_id']}", kind="guide", payload=art, mutate=mutate,
+                    unit_id=q["unit_id"],
+                    meta={"source_hash": found["source_hash"], "context_hash": found["context_hash"],
+                          "prompt_version": found["prompt_version"], "model_config_hash": found["model_config_hash"],
+                          "workflow_version": ra.READING_WORKFLOW_VERSION})
+        workspace(sid).write_guide(q, art)
+        return {"error": None, "failed_node": None}
 
     def prefetch_key(t: ra.ReadingTaskInput) -> str:
         """Everything the guide depends on; a question asked meanwhile or another model / prompt misses the cache."""
@@ -418,9 +456,11 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         stage(state, "guide")
         idx = rd["index"]
         q = content["quotes"][idx]
+        attempt = (state.get("guide_attempt") or {}).get(q["unit_id"], 1)
+        if attempt == 1 and not retry_blocks and (found := reusable_guide(sid, q)):
+            return adopt_guide(sid, idx, q, found)
         if tg.chunks_of(q):
             return await guide_topic(state, idx, q)
-        attempt = (state.get("guide_attempt") or {}).get(q["unit_id"], 1)
         task = guide_task(sid, idx, attempt)
         op = f"{sid}:guide:{q['unit_id']}:a{attempt}:{ra.READING_WORKFLOW_VERSION}:{gates.GATE_RULES_VERSION}"
         cached = repo.get_artifact(prefetch_key(task)) if attempt == 1 else None
@@ -879,6 +919,8 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         nxt = rd["index"] + 1
         if nxt >= len(content["quotes"]) or str(nxt) in rd["guides"]:
             return "not_applicable"
+        if reusable_guide(sid, content["quotes"][nxt]):   # the guide node adopts it: nothing to write ahead
+            return "reused"
         # the next unit's input once the current unit is read: the current guide counts as accepted
         task = guide_task(sid, nxt, 1, guides=rd["guides"], assume_read={rd["index"]})
         q = content["quotes"][nxt]
@@ -909,7 +951,8 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         if st.get("phase") != "reading" or rd.get("done") or slots < 1 or (content.get("segmentation") or {}).get("status") != "done":
             return []
         first = rd["index"] + 2
-        todo = [i for i in range(first, min(len(content["quotes"]), first + slots)) if str(i) not in rd["guides"]]
+        todo = [i for i in range(first, min(len(content["quotes"]), first + slots))
+                if str(i) not in rd["guides"] and not reusable_guide(sid, content["quotes"][i])]
 
         async def one(i: int) -> str:
             task = guide_task(sid, i, 1, guides=rd["guides"])

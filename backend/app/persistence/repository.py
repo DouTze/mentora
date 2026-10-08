@@ -123,6 +123,24 @@ class Repository:
                 run(c)
         return self.get_artifact(operation_key) if conn is None else {"operation_key": operation_key}
 
+    def accepted_guides(self, unit_id: str, source_hash: str, workflow_version: str, *, exclude_session: str | None = None) -> list[dict]:
+        """Accepted guides of a unit written by any reading (the material's study or another 導讀 of the same part),
+        newest first: same unit, same source text and blocks (`source_hash`), same reading workflow version."""
+        q = ("SELECT * FROM reading_artifacts WHERE kind='guide' AND status='accepted' AND unit_id=? AND source_hash=? "
+             "AND workflow_version=?")
+        args: list = [unit_id, source_hash, workflow_version]
+        if exclude_session:
+            q += " AND session_id<>?"
+            args.append(exclude_session)
+        with self.db.conn() as c:
+            rows = c.execute(q + " ORDER BY created_at DESC, rowid DESC", args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["payload"] = json.loads(d["payload"])
+            out.append(d)
+        return out
+
     def list_artifacts(self, session_id: str, kind: str | None = None) -> list[dict]:
         q, args = "SELECT * FROM reading_artifacts WHERE session_id=?", [session_id]
         if kind:

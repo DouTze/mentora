@@ -236,6 +236,15 @@ class StudyService:
             self._sids.pop(mid, None)
         return self.view(mid)
 
+    async def drop(self, mid: str) -> None:
+        """The material is being deleted: its study goes (as cancel does), with the person's setting for it and the
+        questions asked from its pages."""
+        await self.cancel(mid)
+        self._set_pref(mid, None)
+        self.forget(mid)
+        if self._focus == mid:
+            self._focus = None
+
     def _progress(self, row: dict) -> tuple[float, dict]:
         """How far the segmentation has got, read from the buffers the learning flow has saved (nothing is planned
         here). With the outline prompts the planner runs two passes over the 區塊: outlines in batches of

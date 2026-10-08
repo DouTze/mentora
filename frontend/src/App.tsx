@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, RequestError } from "./api";
 import type { Library } from "./types";
 import type { CompanionId } from "./companions";
 import { useConnection } from "./components/CompanionDock";
 import { useRoute, useStored } from "./route";
 import { Sidebar } from "./components/Sidebar";
+import { Toaster } from "./components/Toaster";
 import { HomePage } from "./pages/Home";
 import { MaterialPage } from "./pages/Material";
 import { LearnPage } from "./pages/Learn";
@@ -31,7 +32,28 @@ export function App() {
     refreshCompanion();
     recheck();
   };
-  const refreshLibrary = () => api.library().then(setLibrary).catch(() => {});
+  // the current reading ("進行中的學習") is let go when it no longer is one: deleted, or closed because its material was
+  // deleted (wherever that happened, the library is read again after it)
+  const forgetClosedSession = () => {
+    const id = localStorage.getItem("mentor.sessionId");
+    if (!id) return;
+    api
+      .session(id)
+      .then((s) => s.status === "closed" && forgetSession())
+      .catch((e: RequestError) => e.status === 404 && forgetSession());
+  };
+  const forgetSession = () => {
+    localStorage.removeItem("mentor.sessionId");
+    setSessionId(null);
+  };
+  const refreshLibrary = () =>
+    api
+      .library()
+      .then((l) => {
+        setLibrary(l);
+        forgetClosedSession();
+      })
+      .catch(() => {});
   useEffect(() => {
     refreshCompanion();
     refreshLibrary();
@@ -98,6 +120,7 @@ export function App() {
           </div>
         )}
       </main>
+      <Toaster />
       {settingsTab && (
         <SettingsModal
           initialTab={settingsTab}

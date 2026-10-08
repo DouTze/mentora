@@ -170,7 +170,8 @@ export interface WorkflowView {
 
 export interface SessionView {
   id: string;
-  status: "active" | "completed";
+  /** closed: its material was deleted; kept as a record, takes no more commands */
+  status: "active" | "completed" | "closed";
   created_at: string;
   updated_at: string;
   content_id: string;
@@ -288,10 +289,27 @@ export interface Material {
   unit: "page" | "line";
   unit_count: number;
   created_at: string;
+  /** a short name the connected model gave the book (null until it has) */
+  alias?: string | null;
+}
+
+/** The book's copy in the person's book folder (~/.mentora) and what it stands for (backend app/library.py). */
+export interface LibraryFile {
+  stored_name: string;
+  original_name: string;
+  /** where the file came from; null for a browser upload, which gives only the name */
+  original_path: string | null;
+  sha256: string;
+  size: number;
+  alias: string | null;
+  description: string | null;
+  described_by: string | null;
+  described_at: string | null;
 }
 
 export interface MaterialDetail extends Material {
   units: string[];
+  library?: LibraryFile | null;
 }
 
 /** Rectangles of a PDF page in view space: points, origin at the top-left of the page as shown, y down. */
@@ -348,7 +366,10 @@ export interface PdfPageLayer {
   size: [number, number];
   /** the text runs this many quarter turns clockwise from left-to-right (1: downwards) */
   quarter: number;
-  lines: { block: number; runs: { t: string; rect: PdfRect; sp?: boolean }[] }[];
+  /** a run with `math` holds that formula's LaTeX ($…$ / $$…$$) in place of the glyphs it covers */
+  lines: { block: number; runs: { t: string; rect: PdfRect; sp?: boolean; math?: number }[] }[];
+  /** formulas read from the glyphs and their layout (backend app/pdfdoc/math.py) */
+  math?: { rect: PdfRect; latex: string; display: boolean; tag: string | null }[];
   links: PdfLink[];
   images: { rect: PdfRect; xref: number; width: number | null; height: number | null }[];
   annotations: { index: number; type: string; rect: PdfRect; quads: PdfRect[]; content: string | null; author: string | null; color: string | null }[];
