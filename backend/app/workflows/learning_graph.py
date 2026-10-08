@@ -59,7 +59,7 @@ from ..reading.contracts import LearningSnapshot, NotesAudit, NotesOutput, QuizA
 from ..reading.gates import symbol_like
 from ..reading.pdf_evidence import unit_symbol_evidence
 from ..reading.prompts import render
-from ..reading.segmentation import SEGMENTATION_VERSION, PlannerDeps, plan_parts, plan_units, to_quotes
+from ..reading.segmentation import SEGMENTATION_VERSION, PlannerDeps, plan_parts, plan_units, skipped_view, to_quotes
 from ..reading.tools import ReadingScope, build_tools, tools_text
 from ..tutor import engine, generate, reading
 from ..tutor.reading_agent import ReadingWorkspace
@@ -197,13 +197,15 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             plan = await plan_units(blocks, pd, done_windows=done, on_window=on_window)
         except TaskError as e:
             return {"error": model_error(e), "failed_node": "prepare"}
-        quotes = to_quotes(content["source"]["unit"], plan, {b.block_id: b for b in blocks})
+        by_id = {b.block_id: b for b in blocks}
+        quotes = to_quotes(content["source"]["unit"], plan, by_id)
+        skipped = skipped_view(content["source"]["unit"], plan, by_id)
         parts, _ = plan_parts(quotes)
 
         def mutate(c: dict, s: dict) -> None:
             c["quotes"], c["parts"] = quotes, parts
             c["segmentation"].update({"status": "done", "planner": plan.planner, "notes": plan.warnings,
-                                      "windows": len(plan.windows), "version": SEGMENTATION_VERSION,
+                                      "windows": len(plan.windows), "version": SEGMENTATION_VERSION, "skipped": skipped,
                                       "candidates": len(blocks)})
 
         repo.commit(sid, f"{sid}:segment:commit", kind="segmentation", payload=plan.model_dump(), mutate=mutate)

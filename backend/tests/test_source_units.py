@@ -13,6 +13,7 @@ from app.llm.tasks import TaskContext
 from app.persistence.repository import Repository
 from app.reading import segmentation as seg
 from app.reading.prompts import load_bundle
+from app.reading.schemas import ParagraphTopic
 from app.reading.source import MAX_BLOCK_CHARS, SourceError, extract_blocks
 from evals import reading_eval as ev
 
@@ -42,13 +43,14 @@ class Scripted(LLMBackend):
         return LLMResult(text=out if isinstance(out, str) else json.dumps(out), latency_ms=1)
 
 
-def deps_for(backend, outline: bool = False):
+def deps_for(backend, outline: bool = False, matter: bool = False, boundaries: bool = False):
     """Planner deps over the current prompt bundle. Without `outline` the bundle lacks segment_outline, like a
     session pinned to a snapshot from before units-v9: the buffer planner (segment_blocks …) is what is tested."""
     rt = ModelRuntime(ModelSnapshot("mock", "", "", "", "", 0.2, 512, 8192), BackendPool(build=lambda c: backend))
     sink = ListSink()
     b = load_bundle()
-    prompts = b["prompts"] if outline else {k: v for k, v in b["prompts"].items() if k != "segment_outline"}
+    drop = ({"segment_outline"} if not outline else set()) | ({"segment_matter"} if not matter else set())         | ({"segment_boundaries"} if not boundaries else set())
+    prompts = {k: v for k, v in b["prompts"].items() if k not in drop}
     return seg.PlannerDeps(make_ctx=lambda task, key: TaskContext(rt, CallBudget.for_task(task), sink),
                            prompts=prompts, prompt_version=b["hash"], material_title="t"), sink
 
@@ -639,7 +641,7 @@ async def test_units_are_decided_from_chunk_outlines_and_carry_their_chunks():
     listing = b.requests[0]["messages"][0]["content"]
     assert "【P1】\n技術演進脈絡" in listing and "【P3】\n下一節" in listing
     decide = b.requests[1]["messages"][0]["content"]
-    assert "P2：大主題「規則式方法」｜第 2 段" in decide and "專家手寫" not in decide       # outlines only, never source
+    assert "大主題「規則式方法」｜第 2 段" in decide and "專家手寫" not in decide       # outlines only, never source
     assert [u.boundary_reason for u in plan.units] == ["技術演進總覽", "規則式方法", "下一節"]
     assert [[c.summary for c in u.chunks] for u in plan.units] == [["摘要 1"], ["摘要 2"], ["摘要 3"]]
     by_id = {x.block_id: x for x in blocks}
@@ -686,3 +688,96 @@ async def test_a_unit_from_outlines_has_no_size_limit(monkeypatch):
     plan = await seg.plan_units(blocks, deps)
     assert plan.planner == "model" and len(plan.units) == 1 and len(plan.units[0].chunks) == 4
     assert not any("規則切法" in w for w in plan.warnings)
+
+
+# -- units-v10: content that needs no guide is left out ----------------------------------------------------
+
+def pdf_like(lines):
+    """md lines read as one source block each, like a PDF that puts every line of a contents page in its own block."""
+    return extract_blocks("m", "line", 1, len(lines), [x for l in lines for x in (l, "")])[1]
+
+
+def labels(*kinds):
+    return {"labels": list(kinds)}
+
+
+def test_a_contents_page_is_found_by_its_shape_in_any_book():
+    """Entries in blocks of their own, several glued into one line, chapter-paged numbers, an English numbered
+    contents without leaders: the shape of a table of contents, whatever the book. Prose ending in numbers is not."""
+    zh = pdf_like(["目錄",
+                   "第一章考試科目與評鑑內容 ........................ 1-1第二章考科內容 .................. 2-1",
+                   "3.1 自然語言處理技術與應用 .......................................... 3",
+                   "3.2 電腦視覺技術與應用 .............................................. 12",
+                   "在 2022 年底推出的服務，用戶數在 5 天內就超過了 1000000 人，引起各行各業對這項技術的高度關注。"])
+    assert [[zh[i].text[:4] for i in r] for r in seg.toc_blocks(zh)] == [["目錄", "第一章考", "3.1 ", "3.2 "]]
+    en = pdf_like(["Contents", "3.1 The Agent–Environment Interface 48", "3.2 Goals and Rewards 53",
+                   "3.3 Returns and Episodes 54", "In 2022 the service reached 1000000 users within 5 days of launch."])
+    assert [len(r) for r in seg.toc_blocks(en)] == [4]
+    assert seg.toc_entries("在 2022 年底推出的服務，用戶數在 5 天內就超過了 1000000 人。") == 0
+
+
+GUIDE = ["序 為提供授課教師及考生掌握評鑑方向，本計畫委託題庫組與規劃組的領域專家撰寫這本學習指引，作為準備考試時的重點參考。",
+         "本手冊為學習指引，並非正式教材或題庫，亦不保證考試通過，建議考生依循考試簡章所公告的評鑑主題內容進行充分準備。",
+         "考試科目包含人工智慧技術應用與規劃，評鑑內容分為數據準備、模型選擇、導入評估與風險管理等主題，各有不同的配分比例。",
+         "自然語言處理讓機器能夠理解並生成人類語言，是人工智慧最具挑戰性的領域之一，常見應用包括智慧客服、機器翻譯與文本分析。",
+         "電腦視覺讓機器能夠看懂影像與影片，進行物體辨識與場景理解，常被用在智慧監控、醫療影像判讀與無人駕駛等不同領域之中。",
+         "重點掃瞄 生成式 AI 能夠產生全新的內容，例如文字、圖片、音樂與程式碼，背後通常是以大量資料訓練而成的大型預訓練模型。",
+         "本章摘要 自然語言處理讓機器能夠理解並生成人類語言；電腦視覺讓機器能夠看懂影像與影片，進行物體辨識與場景理解。"]
+
+
+async def test_what_needs_no_guide_is_judged_on_the_whole_range_and_checked_by_the_program(monkeypatch):
+    monkeypatch.setattr(seg, "CHUNK_MIN_CHARS", 10)   # one 區塊 per line here
+    blocks = pdf_like(GUIDE)
+    kinds = ("meta", "meta", "meta", "toc", "lesson", "summary", "summary")
+    b = Scripted([outline("教材說明", "教材說明", "考試規定", "自然語言處理", "電腦視覺", "生成式AI", "總整理"),
+                  labels(*kinds), labels(*kinds[:3]), labels(*kinds[3:]),     # the second pass: the range in two halves
+                  {"boundaries": ["new", "new"]}])
+    deps, _ = deps_for(b, outline=True, matter=True, boundaries=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert [r["meta"]["step"] for r in b.requests] == ["segment_outline", "segment_matter", "segment_matter",
+                                                        "segment_matter", "segment_boundaries"]
+    judged = b.requests[1]["messages"][0]["content"]
+    assert "P3：" in judged and "P7：" in judged and "評鑑內容分為" not in judged         # outlines of the whole stretch, not text
+    by_id = {x.block_id: x for x in blocks}
+    kept = " ".join(by_id[i].text for u in plan.units for i in u.block_ids)
+    # the model's meta stands; its summary only where the text repeats what came before; its toc only with the shape
+    assert [x["role"] for x in plan.skipped] == ["meta", "meta", "meta", "summary"]
+    assert "生成式 AI 能夠產生全新的內容" in kept and "自然語言處理讓機器能夠理解" in kept
+    assert "本章摘要" not in kept and "不保證考試通過" not in kept
+    assert len(plan.units) == 3                                    # topics are decided among what is kept
+
+
+async def test_a_paragraph_is_left_out_only_when_both_passes_say_so(monkeypatch):
+    """A chapter's opening paragraph was called meta in one batch and lesson in another: dropped, the reader lost a
+    lesson. Two passes over differently cut batches must agree."""
+    monkeypatch.setattr(seg, "CHUNK_MIN_CHARS", 10)
+    blocks = pdf_like(GUIDE[2:5])
+    b = Scripted([outline("考試規定", "自然語言處理", "電腦視覺"), labels("meta", "meta", "lesson"),
+                  labels("meta"), labels("lesson", "lesson"), {"boundaries": ["same"]}])
+    deps, _ = deps_for(b, outline=True, matter=True, boundaries=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert [x["role"] for x in plan.skipped] == ["meta"] and sum(len(u.chunks) for u in plan.units) == 2
+
+
+async def test_nothing_is_left_out_when_everything_would_be(monkeypatch):
+    monkeypatch.setattr(seg, "CHUNK_MIN_CHARS", 10)   # one 區塊 per line here
+    blocks = pdf_like(GUIDE[:2])
+    b = Scripted([outline("教材說明", "教材說明"), labels("meta", "meta"), labels("meta"), labels("meta"), {"new_topic_at": []}])
+    deps, _ = deps_for(b, outline=True, matter=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert plan.skipped == [] and sum(len(u.block_ids) for u in plan.units) == len(blocks)
+    assert any("全部保留" in w for w in plan.warnings)
+
+
+async def test_units_are_decided_pair_by_pair_from_the_content_summaries():
+    """Asked where topics change from the outlines' topic labels, qwen3-vl:4b cut at every finely written label (17
+    units in 10 pages, a different answer each time); comparing neighbours from their summaries it answered the same
+    way every time. The labels are not shown, only what each paragraph says."""
+    blocks = paragraphs(4)
+    b = Scripted([{"paragraphs": [{"topic": f"細標籤{k}", "aspect": "", "summary": f"第{k}段說的內容"} for k in range(1, 5)]},
+                  {"boundaries": ["same", "new", "same"]}])
+    deps, _ = deps_for(b, outline=True, boundaries=True)
+    plan = await seg.plan_units(blocks, deps)
+    ask = b.requests[1]["messages"][0]["content"]
+    assert "B2：P2「第2段說的內容」 → P3「第3段說的內容」" in ask and "細標籤" not in ask
+    assert [len(u.chunks) for u in plan.units] == [2, 2]

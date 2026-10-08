@@ -76,6 +76,8 @@ BUDGETS: dict[str, dict[str, int]] = {
     "segment_split": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},   # one oversize unit, focused
     "segment_topic": {"max_calls": 4, "max_format_fixes": 2, "max_revisions": 0},   # one unit: summaries, then where topics change
     "segment_outline": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},  # outlines of one batch of 區塊
+    "segment_matter": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},   # which 區塊 of a stretch need no guide
+    "segment_boundaries": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},  # same unit / new unit, pair by pair
     "topic": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},            # one unit's summary, key points, check
     # source understanding (+ context, audit, one source revision) and teaching (bridges, draft, audit, one body
     # revision, one re-check) share one budget; format fixes and revisions are calls too
