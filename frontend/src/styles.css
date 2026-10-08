@@ -181,7 +181,24 @@ label.field > * { margin-top: 4px; }
   height: calc(100vh - var(--titlebar-h, 0px) - 16px); border: 1px solid var(--line); border-radius: 14px;
   box-shadow: 0 2px 6px var(--shadow), 0 24px 60px -20px var(--shadow); overflow: hidden; animation: peek-in .18s ease both;
 }
+.sidebar.peek { background: var(--panel); }
+/* one way of pointing through the whole sidebar: nothing is filled in, on hover or when chosen. The text (or icon) under
+   the pointer darkens; where you are is set bold. */
+.sidebar button, .sidebar .cat-row { transition: color .12s ease; }
+.sidebar button:hover:not(:disabled), .sidebar .cat-row:hover, .sidebar .side-item.active, .sidebar .icon-btn.active,
+.sidebar .dock-button[aria-expanded="true"] { background: transparent; border-color: transparent; }
+.sidebar .side-item:hover, .sidebar .icon-btn:hover, .sidebar .cat-row:hover .side-item.cat { color: var(--ink); }
+.sidebar .side-item.active { color: var(--ink); font-weight: 600; }
+.sidebar .menu button:not(.danger), .sidebar .dock-menu-items button { color: var(--side-ink); }
+.sidebar .menu button:not(.danger):hover:not(:disabled), .sidebar .dock-menu-items button:hover:not(:disabled) { color: var(--ink); }
+.sidebar .menu button.danger:hover:not(:disabled) { color: color-mix(in srgb, var(--bad) 80%, var(--ink)); }
 .sidebar.peek .side-foot { border-top-color: var(--line); }
+/* folded and floating on the reading page: the reader's toolbar runs on to the window's left edge behind the card
+   (its height is measured by the reader into --reader-head-h), so the bar is not cut at the rail's border */
+.shell.reading .sidebar.rail.peeking::before {
+  content: ""; position: absolute; top: 0; left: 0; right: -1px; height: var(--reader-head-h, 51px);
+  background: var(--bg); border-bottom: 1px solid var(--line); box-sizing: border-box;
+}
 .sidebar.peek.leaving { animation: peek-out .16s ease-in both; pointer-events: none; }
 @keyframes peek-in { from { opacity: 0; transform: translateX(-10px); } }
 @keyframes peek-out { to { opacity: 0; transform: translateX(-12px); } }
@@ -213,7 +230,56 @@ html.grabbing, html.grabbing * { cursor: grabbing !important; user-select: none;
   box-shadow: 0 1px 2px var(--shadow), 0 10px 24px -10px var(--shadow); pointer-events: none; transform: rotate(-1.5deg);
 }
 .drag-ghost span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.side-item.leaf.active { box-shadow: inset 2px 0 0 var(--accent); }
+/* a book in the tree, as Notion lists pages: a toggle in the indent opens it in place, and what it holds sits one step
+   further in, in the same quiet rows. No fills and no lifted cards: pointing at a row darkens its text; the book, the
+   bookmark you are on and the reading being learnt now are set bold. (sb-: the bookshelf owns .book.) */
+.sb-row { position: relative; display: flex; align-items: center; }
+.tree .sb-row .side-item.leaf { background: transparent; box-shadow: none; transition: color .12s ease; }
+.tree .sb-row .side-item.leaf:hover { background: transparent; color: var(--ink); }
+.tree .sb-row .side-item.leaf.active { background: transparent; color: var(--ink); font-weight: 600; }
+.sb-chev {
+  position: absolute; left: 8px; z-index: 1; display: inline-grid; place-items: center; width: 20px; height: 20px;
+  color: var(--muted); opacity: 0; pointer-events: none; transition: opacity .12s ease, color .12s ease;
+}
+.sb-row:hover .sb-chev, .sb-row:focus-within .sb-chev, .sb-book.open .sb-chev { opacity: 1; }
+.sb-row:hover .sb-chev { color: var(--ink); }
+.sb-chev .chev { width: auto; }
+.sb-contents { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 0 0 8px 24px; }
+.sb-sec { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.sb-label {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 24px; padding: 0 10px 0 6px; border: none; border-radius: 0;
+  background: transparent; font-size: 11.5px; color: var(--muted); text-align: left;
+}
+.sb-label:hover:not(:disabled) { border: none; background: transparent; color: var(--ink); }
+/* its arrow sits in the icon column of the rows below; shown while the group is open or pointed at, as a book's is */
+.sb-label .sb-icon { opacity: 0; transition: opacity .12s ease; }
+.sb-label.open .sb-icon, .sb-label:hover .sb-icon, .sb-label:focus-visible .sb-icon { opacity: 1; }
+.sb-label .chev { width: auto; }
+.sb-label .chev .icon { width: 12px; height: 12px; }
+.sb-label .sb-n { visibility: hidden; }
+.sb-label:not(.open) .sb-n, .sb-label:hover .sb-n { visibility: visible; }
+.sb-item { position: relative; display: flex; align-items: center; min-width: 0; }
+.sb-line {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 28px; padding: 0 10px 0 6px; border: none;
+  border-radius: 0; background: transparent; color: var(--side-ink); font-size: 13.5px; text-align: left; transition: color .12s ease;
+}
+.sb-line:hover:not(:disabled) { border: none; background: transparent; color: var(--ink); }
+.sb-line.here { color: var(--ink); font-weight: 600; }
+.sb-icon { flex: none; display: inline-grid; place-items: center; width: 16px; color: var(--muted); }
+.sb-icon .icon { width: 14px; height: 14px; }
+.sb-line:hover .sb-icon, .sb-line.here .sb-icon { color: var(--ink); }
+.sb-icon.now, .sb-line.here .sb-icon.now { color: var(--accent); }
+.sb-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sb-n { flex: none; font: 400 11px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.sb-x {
+  position: absolute; right: 6px; display: none; place-items: center; width: 20px; height: 20px; padding: 0; border: none;
+  border-radius: 4px; background: transparent; color: var(--muted);
+}
+.sb-x:hover:not(:disabled) { border: none; background: transparent; color: var(--ink); }
+.sb-x .icon { width: 12px; height: 12px; }
+.sb-item:hover .sb-x, .sb-x:focus-visible { display: inline-grid; }
+.sb-item:hover .sb-n, .sb-item:focus-within .sb-n { visibility: hidden; }
+.sb-empty { padding: 2px 12px 8px 30px; font-size: 12px; line-height: 1.6; color: var(--muted); }
 
 .side-section {
   display: flex; align-items: center; justify-content: space-between; margin-top: 18px; padding: 0 8px 4px 16px;
@@ -228,9 +294,17 @@ html.grabbing, html.grabbing * { cursor: grabbing !important; user-select: none;
 .cat-row:hover { background: var(--side-hover); }
 .cat-row .side-item.cat { padding-left: 6px; gap: 4px; }
 .cat-row .side-item.cat:hover { background: transparent; }
-.cat-row .side-actions { display: none; padding-right: 4px; }
-.cat-row:hover .side-actions, .cat-row:focus-within .side-actions { display: flex; }
-.cat-row:hover .count, .cat-row:focus-within .count { display: none; }
+/* the row's actions are always laid out (over its right end) and only fade in, and the count only fades out: pointing
+   at a category changes nothing in the layout, so the row never shifts by a pixel */
+.cat-row { height: 30px; }
+.cat-row .side-item.cat { height: 30px; padding-right: 62px; }
+.cat-row .side-actions {
+  position: absolute; top: 50%; right: 4px; display: flex; transform: translateY(-50%);
+  opacity: 0; visibility: hidden; transition: opacity .12s ease, visibility .12s;
+}
+.cat-row:hover .side-actions, .cat-row:focus-within .side-actions { opacity: 1; visibility: visible; }
+.cat-row .count { position: absolute; top: 50%; right: 8px; padding: 0; transform: translateY(-50%); transition: opacity .12s ease; }
+.cat-row:hover .count, .cat-row:focus-within .count { opacity: 0; }
 .chev { display: inline-grid; place-items: center; width: 18px; color: var(--muted); transition: transform .15s ease; }
 .chev.open { transform: rotate(90deg); }
 .count { margin-left: auto; padding-right: 4px; font: 11px var(--mono); color: var(--muted); }
@@ -616,6 +690,12 @@ button.block { width: 100%; padding: 9px 14px; }
 .reader-zoom button[aria-pressed="true"] { background: var(--bg); color: var(--ink); box-shadow: 0 1px 2px var(--shadow); }
 .reader-zoom .zoom-pct { min-width: 46px; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
 .reader-zoom .zoom-sep { width: 1px; height: 14px; margin: 0 3px; background: var(--line-strong); }
+.reader-mark { width: 30px; height: 30px; }
+.reader-mark:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.reader-mark.on { color: var(--accent); }
+.reader-mark.on .icon { animation: mark-in .22s ease; }
+@keyframes mark-in { 40% { transform: scale(1.18); } }
+@media (prefers-reduced-motion: reduce) { .reader-mark.on .icon { animation: none; } }
 .reader-more { position: relative; flex: none; }
 .reader-more .icon-btn { width: 30px; height: 30px; }
 .reader-more .icon-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); }
@@ -642,18 +722,21 @@ button.block { width: 100%; padding: 9px 14px; }
 @supports not selector(::-webkit-scrollbar) { .reader-body { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; } }
 .reader-body > .prose-reader { width: 100%; }
 /* PDF: each page a sheet of paper, placed before its image arrives so the column never jumps */
-.pdf-pages { display: grid; gap: var(--s6); flex: none; }
-.paper {
-  position: relative; margin: 0; width: 100%; background: var(--paper); border-radius: 3px; overflow: visible;
+/* the pages run on as one strip: no gap and no page number between them, a hairline marks where one page ends */
+.pdf-pages {
+  display: grid; gap: 0; flex: none; border-radius: 3px;
   box-shadow: 0 0 0 1px var(--paper-edge), 0 1px 2px rgb(0 0 0 / .05), 0 18px 40px -26px rgb(0 0 0 / .35);
 }
+.paper { position: relative; margin: 0; width: 100%; background: var(--paper); overflow: visible; }
+.paper + .paper { box-shadow: 0 -1px 0 var(--paper-edge); }
+.paper:first-child, .paper:first-child img { border-top-left-radius: 3px; border-top-right-radius: 3px; }
+.paper:last-child, .paper:last-child img { border-bottom-left-radius: 3px; border-bottom-right-radius: 3px; }
 /* a page scrolled to (restore, zoom) lands just under the top bar */
 .paper, .prose-reader [data-at] { scroll-margin-top: 64px; }
-.paper img { display: block; width: 100%; height: 100%; border-radius: 3px; opacity: 0; transition: opacity .35s ease; }
+.paper img { display: block; width: 100%; height: 100%; opacity: 0; transition: opacity .35s ease; }
 .paper img.on { opacity: 1; }
 :root[data-theme="dark"] .paper img { filter: brightness(.88) contrast(1.05); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .paper img { filter: brightness(.88) contrast(1.05); } }
-.paper figcaption { position: absolute; left: 0; right: 0; top: 100%; padding-top: 8px; text-align: center; font: 11px var(--mono); color: var(--unit-no); }
 /* over the page image (components/PdfLayer.tsx): invisible text to select and copy, links, images to save. The spaces and
    line breaks between runs (there for copying) stay in the flow: font-size 0 keeps them from showing as a selected block */
 .pdf-layer { position: absolute; inset: 0; overflow: hidden; border-radius: 3px; contain: strict; }
@@ -676,10 +759,15 @@ button.block { width: 100%; padding: 9px 14px; }
 .pdf-image-save svg { width: 16px; height: 16px; }
 /* the outline: one line per bookmark, the section being read marked */
 .reader-toc { width: 340px; max-height: min(70vh, 560px); overflow-y: auto; }
-.reader-toc button { display: flex; align-items: baseline; gap: 10px; font-size: var(--t-small); line-height: 1.45; }
+.reader-toc button { display: flex; align-items: baseline; gap: 8px; font-size: var(--t-small); line-height: 1.45; white-space: normal; }
+.reader-toc button.top { font-weight: 600; }
+.reader-toc button.top:not(:first-child) { margin-top: 4px; }
 .reader-toc button.current { background: var(--accent-soft); color: var(--accent); }
-.reader-toc .toc-title { flex: 1; min-width: 0; }
-.reader-toc .toc-page { flex: none; font: 11px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+/* the heading's number (1, 1.2, 1.2.3) in the margin of its title; a long title wraps under itself, clear of the page */
+.reader-toc .toc-num { flex: none; font: 11.5px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 400; }
+.reader-toc button.current .toc-num { color: inherit; }
+.reader-toc .toc-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.reader-toc .toc-page { flex: none; padding-left: 6px; font: 11px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 400; }
 /* the material's colophon (the reader's ⋯): cover and title, category, a ledger of what the file is and holds, files, delete */
 .reader-card {
   position: absolute; z-index: 9; top: calc(100% + 8px); right: 0; width: 304px; overflow: hidden;
@@ -706,8 +794,11 @@ button.block { width: 100%; padding: 9px 14px; }
 .rc-alias { justify-self: start; max-width: 100%; margin-top: 2px; padding: 1px 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   border: 1px solid var(--line); border-radius: 999px; font-size: 11.5px; color: var(--muted); }
 .rc-about { margin: -4px 16px 14px; font: 13px/1.65 var(--serif); color: var(--ink); opacity: .86; }
-.rc-category { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line); }
-.rc-category > span { flex: none; font-size: var(--t-small); color: var(--muted); }
+.rc-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line); }
+.rc-row > span { flex: none; font-size: var(--t-small); color: var(--muted); }
+.rc-zoom .reader-zoom { flex: 1; justify-content: space-between; }
+.rc-zoom .reader-zoom button { flex: 1 1 auto; padding: 0 6px; white-space: nowrap; }
+.rc-zoom .reader-zoom .zoom-pct { flex: 1.4 1 auto; }
 .rc-category .select { flex: 1; }
 .rc-category .select-button { padding: 5px 8px 5px 10px; font-size: var(--t-small); }
 .rc-facts { display: grid; gap: 7px; margin: 0; padding: 12px 16px 14px; border-top: 1px solid var(--line); }
@@ -765,7 +856,6 @@ button.block { width: 100%; padding: 9px 14px; }
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
 
 /* a formula's card: the formula set by KaTeX and its LaTeX to copy (PdfLayer) */
-.pdf-run.math { cursor: help; }
 .pdf-math-card {
   position: fixed; z-index: 80; display: grid; gap: 8px; width: max-content; max-width: min(640px, calc(100vw - 24px)); padding: 10px 12px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink);

@@ -150,6 +150,12 @@ export const Icon = {
       <circle cx="5" cy="17.5" r="1" fill="currentColor" stroke="none" />
     </Svg>
   ),
+  /** a ribbon; filled when the page is marked */
+  bookmark: ({ filled = false }: { filled?: boolean } = {}) => (
+    <Svg>
+      <path d="M7 4.5h10v15l-5-3.6-5 3.6z" fill={filled ? "currentColor" : "none"} />
+    </Svg>
+  ),
   download: () => (
     <Svg>
       <path d="M12 4.5v10.5M7.5 11l4.5 4.5 4.5-4.5M5 19.5h14" />

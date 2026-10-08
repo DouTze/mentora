@@ -57,7 +57,7 @@ describe("Sidebar", () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: "新增分類" }));
     await userEvent.type(screen.getByLabelText("分類名稱"), "物理{Enter}");
-    await waitFor(() => expect(calls[0]?.body).toEqual({ name: "物理" }));
+    await waitFor(() => expect(calls.find((c) => c.key === "POST /api/categories")?.body).toEqual({ name: "物理" }));
   });
 
   test("the companion at the bottom opens a menu with the connection and the way into settings", async () => {
@@ -141,6 +141,48 @@ describe("Sidebar", () => {
     await userEvent.click(leaf);
     expect(visited).toEqual([{ page: "material", id: "m2" }]);
     expect(document.documentElement.classList.contains("grabbing")).toBe(false);
+  });
+});
+
+describe("Sidebar · a book opened in place", () => {
+  test("clicking a bookmarked book opens it: its bookmarks with their chapters and its guides, the current one marked", async () => {
+    mockFetch({
+      "GET /api/sessions": () => ({
+        json: [
+          { id: "s1", status: "active", created_at: "a", updated_at: "", content_title: "", content_version: "", strategy_id: "", backend: "", simulated: false, verdict: null,
+            source: { material_id: "m2", material_title: "Newton laws", unit: "page", start: 1, end: 2, label: "第 1–2 頁" }, progress: { stage: "reading", read: 1, total: 4 } },
+        ],
+      }),
+    });
+    const pages: [string, number][] = [];
+    const sessions: string[] = [];
+    const { visited } = setup({
+      sessionId: "s1",
+      bookmarks: { m2: [{ unit_no: 2, chapter: "1.1 慣性", created_at: "" }] },
+      route: { page: "material", id: "m2" },
+      readingAt: { id: "m2", n: 2 },
+      onOpenPage: (id, n) => pages.push([id, n]),
+      onOpenSession: (id) => sessions.push(id),
+    });
+    await userEvent.click(screen.getByText("Newton laws"));
+    expect(visited).toEqual([{ page: "material", id: "m2" }]);
+    const mark = await screen.findByRole("button", { name: /1\.1 慣性/ });
+    expect(mark.getAttribute("aria-current")).toBe("location");   // the page being read
+    await userEvent.click(mark);
+    expect(pages).toEqual([["m2", 2]]);
+    const guide = await screen.findByRole("button", { name: /第 1–2 頁/ });
+    expect(guide.classList.contains("here")).toBe(true);
+    await userEvent.click(guide);
+    expect(sessions).toEqual(["s1"]);
+    // a group folds by its title and stays folded
+    await userEvent.click(screen.getByRole("button", { name: /^書籤/ }));
+    expect(screen.queryByText("1.1 慣性")).toBeNull();
+    expect(screen.getByRole("button", { name: /第 1–2 頁/ })).toBeTruthy();
+    expect(JSON.parse(localStorage.getItem("mentor.foldedBookSections")!)).toEqual(["m2:marks"]);
+    await userEvent.click(screen.getByRole("button", { name: /^書籤/ }));
+    // clicking the book again folds it
+    await userEvent.click(screen.getByText("Newton laws"));
+    expect(screen.queryByText("1.1 慣性")).toBeNull();
   });
 });
 

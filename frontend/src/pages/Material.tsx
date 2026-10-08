@@ -4,9 +4,9 @@
 // The companion reads the whole material once in the background (導師全文學習, the normal learning flow over every
 // page); its reading parts tell which part the reader is on, so 導讀 starts at that part and a question is answered
 // from the units on that page.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, RequestError } from "../api";
-import type { Library, MaterialDetail, PdfInfo, PdfOutlineItem, PdfPageLayer, ReaderQuestion, StudyView } from "../types";
+import type { Bookmark, Library, MaterialDetail, PdfInfo, PdfOutlineItem, PdfPageLayer, ReaderQuestion, StudyView } from "../types";
 import type { Route } from "../route";
 import { Icon } from "../components/Icons";
 import { PdfLayer } from "../components/PdfLayer";
@@ -21,10 +21,18 @@ interface Props {
   onLibraryChange: () => Promise<unknown>;
   onNavigate: (r: Route) => void;
   onOpenSession: (id: string, opts?: { quiz?: boolean }) => void;
+  /** this material's bookmarks (App keeps every book's, the sidebar lists them) */
+  bookmarks?: Bookmark[];
+  onBookmarks?: (id: string, marks: Bookmark[]) => void;
+  /** a page to bring into view, asked for from outside (a bookmark in the sidebar); `k` makes each ask new */
+  jump?: { id: string; n: number; k: number } | null;
+  /** the page (line) being read, as it changes */
+  onPosition?: (id: string, n: number) => void;
 }
 
 const STUDY_POLL_MS = 3000;
-const POSITION_KEY = (id: string) => `mentor.reader.at.${id}`;
+const NO_MARKS: Bookmark[] = [];
+export const POSITION_KEY = (id: string) => `mentor.reader.at.${id}`;
 
 function storedAt(id: string): number {
   try {
@@ -135,7 +143,6 @@ function PdfPage({ id, n, size, width, onGoto }: { id: string; n: number; size: 
         <img src={api.materialPageUrl(id, n, px)} alt="" draggable={false} decoding="async" className={loaded ? "on" : ""} onLoad={() => setLoaded(true)} />
       )}
       {live && width > 0 && layer && <PdfLayer layer={layer} imageUrl={imageUrl} onGoto={goto} />}
-      <figcaption>{layer && layer.label !== String(n) ? `${layer.label} · ${n}` : n}</figcaption>
     </figure>
   );
 }
@@ -262,7 +269,7 @@ function PdfReader({ material, at, zoom, focus, gotoRef, onAt, onScale }: {
   );
   gotoRef.current = goto;
   return (
-    <div className="pdf-pages" ref={root} style={{ width: width || undefined, gap: Math.max(12, Math.round(width * 0.04)) }}>
+    <div className="pdf-pages" ref={root} style={{ width: width || undefined }}>
       {sizes !== null && pages.map((s, i) => <PdfPage key={i} id={material.id} n={i + 1} size={s} width={width} onGoto={goto} />)}
     </div>
   );
@@ -612,7 +619,7 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
-          placeholder={t("reader.placeholder", { where: where(at) })}
+          placeholder={t(material.unit === "page" ? "reader.placeholder" : "reader.placeholder.line")}
           aria-label={t("reader.ask")}
         />
         {error && (
@@ -647,13 +654,35 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
 }
 
 // -- outline and document info -------------------------------------------------------------------------
-type OutlineRow = { item: PdfOutlineItem; depth: number };
-function flatten(items: PdfOutlineItem[], depth = 0, out: OutlineRow[] = []): OutlineRow[] {
-  for (const item of items) {
-    out.push({ item, depth });
-    flatten(item.children, depth + 1, out);
-  }
+type OutlineRow = { item: PdfOutlineItem; depth: number; num: string };
+/** A heading whose title already carries its number ("3.2 …", "Chapter 4", "第三章", "IV. …") keeps it; the others
+ * are numbered by their place in the outline (1, 1.1, 1.1.2 …). */
+const NUMBERED = /^\s*(\d+(\.\d+)*\.?\s|[IVXLC]+\.\s|[A-Z]\.\s|(chapter|part|section|appendix)\b|第\s*[\d一二三四五六七八九十百]+\s*[章節部篇卷])/i;
+function flatten(items: PdfOutlineItem[], depth = 0, out: OutlineRow[] = [], prefix = ""): OutlineRow[] {
+  items.forEach((item, i) => {
+    const num = `${prefix}${i + 1}`;
+    out.push({ item, depth, num: NUMBERED.test(item.title) ? "" : num });
+    flatten(item.children, depth + 1, out, `${num}.`);
+  });
   return out;
+}
+export const outlineRows = (items: PdfOutlineItem[]) => flatten(items);
+
+/** The chapter a page falls in: the last outline heading (in reading order) at or before it, with its number — the
+ * one the table of contents marks as being read. */
+export function chapterAt(rows: OutlineRow[], page: number): string | null {
+  let hit: OutlineRow | null = null;
+  for (const r of rows) if (r.item.page && r.item.page <= page) hit = r;
+  return hit ? `${hit.num ? `${hit.num} ` : ""}${hit.item.title}`.trim() : null;
+}
+
+/** The Markdown heading a line falls under. */
+function headingAt(lines: string[], line: number): string | null {
+  for (let i = Math.min(line, lines.length) - 1; i >= 0; i--) {
+    const m = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(lines[i]);
+    if (m) return m[1];
+  }
+  return null;
 }
 
 /** The PDF's bookmarks, the section being read marked; picking one brings its page (and point) to the top. */
@@ -692,8 +721,8 @@ function OutlineMenu({ info, at, onGoto }: { info: PdfInfo; at: number; onGoto: 
               key={i}
               type="button"
               role="menuitem"
-              className={i === current ? "current" : undefined}
-              style={{ paddingLeft: 10 + r.depth * 14 }}
+              className={`${i === current ? "current" : ""} ${r.depth === 0 ? "top" : ""}`.trim() || undefined}
+              style={{ paddingLeft: 10 + r.depth * 16 }}
               disabled={!r.item.page}
               onClick={() => {
                 if (!r.item.page) return;
@@ -701,6 +730,12 @@ function OutlineMenu({ info, at, onGoto }: { info: PdfInfo; at: number; onGoto: 
                 onGoto(r.item.page, r.item.y);
               }}
             >
+              {r.num && (
+                // one width per depth, so the titles of a level start on one line however long the number
+                <span className="toc-num" style={{ minWidth: `${(r.depth + 1) * 2}ch` }}>
+                  {r.num}
+                </span>
+              )}
               <span className="toc-title">{r.item.title}</span>
               {r.item.page && <span className="toc-page">{info.labels?.[r.item.page - 1] ?? r.item.page}</span>}
             </button>
@@ -713,10 +748,12 @@ function OutlineMenu({ info, at, onGoto }: { info: PdfInfo; at: number; onGoto: 
 
 /** The material's colophon, opened from the reader's ⋯: its cover and title, the category it is filed under, what
  * the file is and holds (only what it has), its attachments, and deleting it. */
-function MaterialCard({ material, info, library, onCategory, onDelete }: {
+function MaterialCard({ material, info, library, zoom, onCategory, onDelete }: {
   material: MaterialDetail;
   info: PdfInfo | null;
   library: Library;
+  /** the page size controls, kept here rather than on the toolbar */
+  zoom: ReactNode;
   onCategory: (id: string | null) => void;
   onDelete: () => void;
 }) {
@@ -763,7 +800,9 @@ function MaterialCard({ material, info, library, onCategory, onDelete }: {
           {lib.description}
         </p>
       )}
-      <div className="rc-category">
+      {/* the controls name themselves (−, 100%, +, 整頁, 符合寬度) and take the whole row */}
+      <div className="rc-row rc-zoom">{zoom}</div>
+      <div className="rc-row rc-category">
         <span>{t("material.category")}</span>
         <Select
           label={t("material.category")}
@@ -864,7 +903,7 @@ function storedZoom(kind: string): Zoom {
 }
 
 // -- the page -----------------------------------------------------------------------------------------
-export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenSession }: Props) {
+export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenSession, bookmarks = NO_MARKS, onBookmarks, jump = null, onPosition }: Props) {
   const t = useT();
   const [material, setMaterial] = useState<MaterialDetail | null>(null);
   const [title, setTitle] = useState("");
@@ -1016,9 +1055,57 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
     };
   }, [menu]);
 
+  // a page asked for from the sidebar: brought to the top once the material is on screen (a material still loading
+  // opens there anyway: App stored it as the reading position)
+  useEffect(() => {
+    if (!jump || jump.id !== id || material?.id !== id) return;
+    const n = jump.n;
+    const go = () => {
+      if (gotoRef.current) return gotoRef.current(n);
+      document.querySelector(`.prose-reader [data-at="${n}"]`)?.scrollIntoView({ block: "start" });
+    };
+    requestAnimationFrame(go);
+  }, [jump, id, material?.id]);
+
+  // the toolbar's height, for the folded sidebar floating over the page: the bar's colour runs on behind it
+  const head = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const el = head.current;
+    if (!el) return;
+    const root = document.documentElement;
+    const measure = () => root.style.setProperty("--reader-head-h", `${el.offsetHeight}px`);
+    measure();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    return () => {
+      ro?.disconnect();
+      root.style.removeProperty("--reader-head-h");
+    };
+  }, [material?.id]);
+
+  const outline = useMemo(() => (info ? outlineRows(info.outline) : []), [info]);
+  const [marking, setMarking] = useState(false);
+  const marked = bookmarks.some((b) => b.unit_no === at);
+  const toggleMark = async () => {
+    if (!material || marking) return;
+    setMarking(true);
+    setError(null);
+    try {
+      const chapter = material.kind === "pdf" ? chapterAt(outline, at) : material.kind === "md" ? headingAt(material.units, at) : null;
+      onBookmarks?.(material.id, marked ? await api.removeBookmark(material.id, at) : await api.addBookmark(material.id, at, chapter));
+    } catch (e) {
+      setError((e as RequestError).body?.detail ?? String(e));
+    } finally {
+      setMarking(false);
+    }
+  };
+
+  const position = useRef(onPosition);
+  position.current = onPosition;
   const onAt = useCallback(
     (n: number) => {
       setAt(n);
+      position.current?.(id, n);
       try {
         localStorage.setItem(POSITION_KEY(id), String(n));
       } catch {}
@@ -1050,7 +1137,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
 
   return (
     <div className="reader-page">
-      <header className="reader-head">
+      <header className="reader-head" ref={head}>
         <div className="reader-title">
           <span className="reader-crumb">{category?.name ?? t("common.uncategorized")}</span>
           <input
@@ -1062,19 +1149,31 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
           />
         </div>
         <StudyBadge study={study} onAction={studyAction} />
-        <ZoomBar zoom={zoom} shown={shown} pdf={material.kind === "pdf"} onZoom={zoomFrom} />
+        <button
+          type="button"
+          className={`icon-btn reader-mark ${marked ? "on" : ""}`}
+          aria-pressed={marked}
+          aria-label={t(marked ? "reader.bookmark.remove" : "reader.bookmark.add")}
+          title={t(marked ? "reader.bookmark.remove" : "reader.bookmark.add")}
+          onClick={toggleMark}
+          disabled={marking}
+        >
+          <Icon.bookmark filled={marked} />
+        </button>
         {info && info.outline.length > 0 && <OutlineMenu info={info} at={at} onGoto={(p, y) => gotoRef.current?.(p, y)} />}
-        {material.unit === "page" && (
-          <span className="reader-pos" aria-label={t("reader.position")}>
-            {at} / {material.unit_count}
-          </span>
-        )}
         <div className="reader-more" ref={menuBox}>
           <button type="button" className="icon-btn" aria-haspopup="dialog" aria-expanded={menu} aria-label={t("reader.more")} onClick={() => setMenu((v) => !v)}>
             <Icon.more />
           </button>
           {menu && (
-            <MaterialCard material={material} info={info} library={library} onCategory={(id) => patch({ category_id: id })} onDelete={remove} />
+            <MaterialCard
+              material={material}
+              info={info}
+              library={library}
+              zoom={<ZoomBar zoom={zoom} shown={shown} pdf={material.kind === "pdf"} onZoom={zoomFrom} />}
+              onCategory={(id) => patch({ category_id: id })}
+              onDelete={remove}
+            />
           )}
         </div>
       </header>

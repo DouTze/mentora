@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMo
 import { useT, type Key } from "../i18n";
 import { api, RequestError } from "../api";
 import { importFiles } from "../library";
-import type { Category, Library, Material } from "../types";
+import type { Bookmark, Bookmarks, Category, Library, Material, SessionListItem } from "../types";
 import type { CompanionId } from "../companions";
 import { useStored, type Route } from "../route";
 import { CompanionDock, type Connection } from "./CompanionDock";
@@ -83,6 +83,14 @@ interface Props {
   companion: CompanionId;
   conn: Connection;
   hasSession: boolean;
+  /** the reading in 進行中的學習, marked among a book's guides */
+  sessionId?: string | null;
+  bookmarks?: Bookmarks;
+  /** the page (line) being read in the open book: its bookmark is shown as the one you are on */
+  readingAt?: { id: string; n: number } | null;
+  onOpenPage?: (materialId: string, n: number) => void;
+  onOpenSession?: (sessionId: string) => void;
+  onRemoveBookmark?: (materialId: string, n: number) => void;
   collapsed: boolean;
   onToggle: () => void;
   onNavigate: (r: Route) => void;
@@ -94,9 +102,28 @@ const PEEK_OPEN_MS = 120;    // a pointer only passing over the rail does not op
 const PEEK_CLOSE_MS = 300;
 const PEEK_EXIT_MS = 160;   // .sidebar.peek.leaving animation
 
-export function Sidebar({ library, route, companion, conn, hasSession, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
+export function Sidebar({ library, route, companion, conn, hasSession, sessionId = null, bookmarks = {}, readingAt = null, onOpenPage, onOpenSession, onRemoveBookmark, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
   const t = useT();
   const [folded, setFolded] = useStored<string[]>("mentor.foldedCategories", []);
+  // books shown open: their bookmarks and guided readings listed under them
+  const [openBooks, setOpenBooks] = useStored<string[]>("mentor.openBooks", []);
+  // a book's 書籤 / 導讀 groups folded on their own ("<material id>:marks" / ":guides"); open unless folded
+  const [foldedSecs, setFoldedSecs] = useStored<string[]>("mentor.foldedBookSections", []);
+  const toggleSec = (key: string) => setFoldedSecs(foldedSecs.includes(key) ? foldedSecs.filter((x) => x !== key) : [...foldedSecs, key]);
+  const toggleBook = (id: string) => setOpenBooks(openBooks.includes(id) ? openBooks.filter((x) => x !== id) : [...openBooks, id]);
+  // the guided readings of every book, read again when the page, the library or the current reading changes
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const routeKey = route.page === "material" ? `material:${route.id}` : route.page;
+  useEffect(() => {
+    let live = true;
+    api
+      .sessions()
+      .then((xs) => live && setSessions(xs))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [routeKey, library, sessionId]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -318,18 +345,50 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
                 (items.length === 0 ? (
                   <div className="tree-empty">{library.materials.length === 0 ? t("side.emptyLibrary") : t("side.emptyCategory")}</div>
                 ) : (
-                  items.map((m) => (
-                    <button
-                      key={m.id}
-                      className={`side-item leaf ${route.page === "material" && route.id === m.id ? "active" : ""}`}
-                      onPointerDown={drag.start({ kind: "material", id: m.id, label: m.title, tag: m.kind })}
-                      onClick={() => onNavigate({ page: "material", id: m.id })}
-                      title={m.filename}
-                    >
-                      <KindTag kind={m.kind} />
-                      <span>{m.title}</span>
-                    </button>
-                  ))
+                  items.map((m) => {
+                    const marks = bookmarks[m.id] ?? [];
+                    const open = openBooks.includes(m.id);
+                    return (
+                      <div key={m.id} className={`sb-book ${open ? "open" : ""}`}>
+                        <div className="sb-row">
+                          {/* where it opens: the whole row is the toggle, this only shows which way it is */}
+                          <span className="sb-chev" aria-hidden="true">
+                            <span className={`chev ${open ? "open" : ""}`}>
+                              <Icon.chevron />
+                            </span>
+                          </span>
+                          <button
+                            className={`side-item leaf ${route.page === "material" && route.id === m.id ? "active" : ""}`}
+                            onPointerDown={drag.start({ kind: "material", id: m.id, label: m.title, tag: m.kind })}
+                            onClick={() => {
+                              // one click opens the book in the reader and opens (or folds) it here, as a Notion page
+                              onNavigate({ page: "material", id: m.id });
+                              toggleBook(m.id);
+                            }}
+                            aria-expanded={open}
+                            title={m.filename}
+                          >
+                            <KindTag kind={m.kind} />
+                            <span>{m.title}</span>
+                          </button>
+                        </div>
+                        {open && (
+                          <BookContents
+                            material={m}
+                            marks={marks}
+                            guides={sessions.filter((x) => x.source?.material_id === m.id)}
+                            sessionId={sessionId}
+                            folded={(sec) => foldedSecs.includes(`${m.id}:${sec}`)}
+                            onToggleSection={(sec) => toggleSec(`${m.id}:${sec}`)}
+                            at={route.page === "material" && route.id === m.id && readingAt?.id === m.id ? readingAt.n : null}
+                            onOpenPage={(n) => (onOpenPage ? onOpenPage(m.id, n) : onNavigate({ page: "material", id: m.id }))}
+                            onOpenSession={(id) => onOpenSession?.(id)}
+                            onRemoveBookmark={onRemoveBookmark ? (n) => onRemoveBookmark(m.id, n) : undefined}
+                          />
+                        )}
+                      </div>
+                    );
+                  })
                 ))}
             </div>
           );
@@ -350,7 +409,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
   );
   if (!peek) return card;
   // the rail keeps its place in the layout (one grid cell); the card floats over it and the page
-  return <div className="sidebar rail">{card}</div>;
+  return <div className="sidebar rail peeking">{card}</div>;
 }
 
 const NAV: { page: "home" | "learn" | "history"; label: Key; icon: ReactNode }[] = [
@@ -358,6 +417,91 @@ const NAV: { page: "home" | "learn" | "history"; label: Key; icon: ReactNode }[]
   { page: "learn", label: "nav.learn", icon: <Icon.learn /> },
   { page: "history", label: "nav.history", icon: <Icon.history /> },
 ];
+
+/** Under an open book, one step in (as Notion nests pages): the pages bookmarked in it, each with the chapter it falls
+ * in, and its guided readings. The page you are on and the reading being learnt now are set bold. */
+function BookContents({ material, marks, guides, sessionId, folded, onToggleSection, at, onOpenPage, onOpenSession, onRemoveBookmark }: {
+  material: Material;
+  marks: Bookmark[];
+  guides: SessionListItem[];
+  sessionId: string | null;
+  /** whether a group is folded, and folding / opening it: a long list of bookmarks or guides is put away by its title */
+  folded: (sec: "marks" | "guides") => boolean;
+  onToggleSection: (sec: "marks" | "guides") => void;
+  /** the page being read, when this book is open in the reader */
+  at: number | null;
+  onOpenPage: (n: number) => void;
+  onOpenSession: (id: string) => void;
+  onRemoveBookmark?: (n: number) => void;
+}) {
+  const t = useT();
+  const where = (n: number) => t(material.unit === "page" ? "material.unit.pageNo" : "reader.atLine", { n });
+  const ordered = [...guides].sort((a, b) => (a.source?.start ?? 0) - (b.source?.start ?? 0) || a.created_at.localeCompare(b.created_at));
+  if (!marks.length && !ordered.length) return <div className="sb-empty">{t("side.bookEmpty")}</div>;
+  return (
+    <div className="sb-contents">
+      {marks.length > 0 && (
+        <div className="sb-sec" role="group" aria-label={t("side.bookmarks")}>
+          <SectionToggle label={t("side.bookmarks")} count={marks.length} open={!folded("marks")} onToggle={() => onToggleSection("marks")} />
+          {!folded("marks") && marks.map((b) => {
+            const here = at === b.unit_no;
+            return (
+              <div key={b.unit_no} className="sb-item">
+                <button className={`sb-line ${here ? "here" : ""}`} aria-current={here ? "location" : undefined} onClick={() => onOpenPage(b.unit_no)} title={b.chapter ? `${where(b.unit_no)} · ${b.chapter}` : where(b.unit_no)}>
+                  <span className="sb-icon">
+                    <Icon.bookmark filled={here} />
+                  </span>
+                  <span className="sb-text">{b.chapter ?? where(b.unit_no)}</span>
+                  <span className="sb-n">{b.unit_no}</span>
+                </button>
+                {onRemoveBookmark && (
+                  <button className="sb-x" onClick={() => onRemoveBookmark(b.unit_no)} aria-label={t("side.removeBookmark")} title={t("side.removeBookmark")}>
+                    <Icon.close />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {ordered.length > 0 && (
+        <div className="sb-sec" role="group" aria-label={t("side.guides")}>
+          <SectionToggle label={t("side.guides")} count={ordered.length} open={!folded("guides")} onToggle={() => onToggleSection("guides")} />
+          {!folded("guides") && ordered.map((g) => {
+            const now = g.id === sessionId;
+            const meta = g.progress.stage === "quiz" ? t("side.guideQuiz") : `${g.progress.read}/${g.progress.total}`;
+            return (
+              <div key={g.id} className="sb-item">
+                <button className={`sb-line ${now ? "here" : ""}`} onClick={() => onOpenSession(g.id)} title={now ? `${t("side.learningNow")} · ${g.source?.label ?? ""}` : g.source?.label}>
+                  <span className={`sb-icon ${now ? "now" : ""}`} aria-label={now ? t("side.learningNow") : undefined}>
+                    {now ? <Icon.learn /> : <Icon.book />}
+                  </span>
+                  <span className="sb-text">{g.source?.label ?? g.content_title}</span>
+                  <span className="sb-n">{meta}</span>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A group's title under a book (書籤, 導讀): pressing it folds or opens the group, as a book's row does. */
+function SectionToggle({ label, count, open, onToggle }: { label: string; count: number; open: boolean; onToggle: () => void }) {
+  return (
+    <button className={`sb-label ${open ? "open" : ""}`} onClick={onToggle} aria-expanded={open}>
+      <span className="sb-icon" aria-hidden="true">
+        <span className={`chev ${open ? "open" : ""}`}>
+          <Icon.chevron />
+        </span>
+      </span>
+      <span className="sb-text">{label}</span>
+      <span className="sb-n">{count}</span>
+    </button>
+  );
+}
 
 function CategoryRow({ name, count, open, onToggle, onImport, onRename, onDelete, onMove, canMove, onDragStart }: {
   name: string;

@@ -6,6 +6,7 @@ import { LOCALES, useT, type Key } from "../i18n";
 import { usePrefs, type Theme } from "../prefs";
 import type { ActiveBackend, ModelConfig, RemoteEndpoint, ShelfScope } from "../types";
 import { BackendBadge } from "./BackendBadge";
+import type { CheckResult } from "./CompanionDock";
 import { Icon } from "./Icons";
 import { ComboInput, Select } from "./Select";
 
@@ -15,9 +16,11 @@ interface Props {
   initialTab?: SettingsTab;
   onClose: () => void;
   onBackendChanged: () => void;
+  /** a check made here: the sidebar's connection light takes its answer */
+  onChecked?: (r: CheckResult) => void;
 }
 
-export function SettingsModal({ initialTab = "prefs", onClose, onBackendChanged }: Props) {
+export function SettingsModal({ initialTab = "prefs", onClose, onBackendChanged, onChecked }: Props) {
   const t = useT();
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const dialog = useRef<HTMLDivElement>(null);
@@ -58,7 +61,7 @@ export function SettingsModal({ initialTab = "prefs", onClose, onBackendChanged 
           <button className="icon-btn settings-close" onClick={onClose} aria-label={t("settings.close")} title={t("settings.close")}>
             <Icon.close />
           </button>
-          {tab === "prefs" ? <PrefsPane /> : tab === "shelf" ? <ShelfScopePane /> : <CompanionPane onBackendChanged={onBackendChanged} />}
+          {tab === "prefs" ? <PrefsPane /> : tab === "shelf" ? <ShelfScopePane /> : <CompanionPane onBackendChanged={onBackendChanged} onChecked={onChecked} />}
         </section>
       </div>
     </div>
@@ -210,7 +213,7 @@ function ShelfScopePane() {
 
 type Health = { ok: boolean; detail: string; available_models?: string[]; [k: string]: unknown };
 
-function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
+function CompanionPane({ onBackendChanged, onChecked }: { onBackendChanged: () => void; onChecked?: (r: CheckResult) => void }) {
   const t = useT();
   const [saved, setSaved] = useState<CompanionSettings | null>(null);
   const [draft, setDraft] = useState<CompanionSettings | null>(null);
@@ -281,6 +284,7 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
       setRemoteToken("");
       setHealth(null);
       setMsg({ ok: true, text: t("companion.remote.saved") });
+      onBackendChanged();
     } catch (e) {
       setMsg({ ok: false, text: (e as RequestError).body.detail });
     }
@@ -294,8 +298,10 @@ function CompanionPane({ onBackendChanged }: { onBackendChanged: () => void }) {
       const r = await api.checkSettings();
       setHealth(r.health as Health);
       setModels((r.health.available_models as string[] | undefined) ?? models);
+      onChecked?.(r);
     } catch (e) {
       setHealth({ ok: false, detail: (e as RequestError).body.detail });
+      onBackendChanged();
     }
     setChecking(false);
   };
