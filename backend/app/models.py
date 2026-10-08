@@ -89,6 +89,10 @@ class BookmarkRequest(BaseModel):
     chapter: str | None = Field(None, max_length=300)
 
 
+class LabelRequest(BaseModel):
+    label: str | None = Field(None, max_length=80)
+
+
 class CategoryOrder(BaseModel):
     ids: list[str] = Field(max_length=200)
 

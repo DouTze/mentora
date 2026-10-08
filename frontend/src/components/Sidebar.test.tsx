@@ -171,9 +171,13 @@ describe("Sidebar · a book opened in place", () => {
     await userEvent.click(mark);
     expect(pages).toEqual([["m2", 2]]);
     const guide = await screen.findByRole("button", { name: /第 1–2 頁/ });
-    expect(guide.classList.contains("here")).toBe(true);
+    expect(guide.classList.contains("here")).toBe(false);   // the current reading, but not on screen: not bold
+    expect(guide.querySelector(".sb-icon.now")).toBeTruthy();   // … only marked as being learnt
     await userEvent.click(guide);
     expect(sessions).toEqual(["s1"]);
+    cleanup();
+    setup({ sessionId: "s1", route: { page: "learn" }, bookmarks: { m2: [{ unit_no: 2, chapter: "1.1 慣性", created_at: "" }] } });
+    expect((await screen.findByRole("button", { name: /第 1–2 頁/ })).classList.contains("here")).toBe(true);   // on screen: bold
     // a group folds by its title and stays folded
     await userEvent.click(screen.getByRole("button", { name: /^書籤/ }));
     expect(screen.queryByText("1.1 慣性")).toBeNull();
@@ -183,6 +187,41 @@ describe("Sidebar · a book opened in place", () => {
     // clicking the book again folds it
     await userEvent.click(screen.getByText("Newton laws"));
     expect(screen.queryByText("1.1 慣性")).toBeNull();
+  });
+});
+
+describe("Sidebar · naming", () => {
+  test("a bookmark and a guided reading are named in place; Escape keeps the old name, an empty one the default", async () => {
+    const calls = mockFetch({
+      "GET /api/sessions": () => ({
+        json: [{ id: "s1", status: "active", created_at: "a", updated_at: "", content_title: "", content_version: "", strategy_id: "", backend: "", simulated: false, verdict: null,
+          source: { material_id: "m2", material_title: "Newton laws", unit: "page", start: 1, end: 2, label: "第 1–2 頁" }, progress: { stage: "reading", read: 1, total: 4 } }],
+      }),
+      "GET /api/labels/session": () => ({ json: {} }),
+      "PUT /api/labels/session/s1": (b) => ({ json: (b as { label: string }).label ? { s1: (b as { label: string }).label } : {} }),
+    });
+    localStorage.setItem("mentor.openBooks", JSON.stringify(["m2"]));
+    const renamed: [string, number, string][] = [];
+    setup({ bookmarks: { m2: [{ unit_no: 2, chapter: "1.1 慣性", label: null, created_at: "" }] }, onRenameBookmark: (id, n, l) => renamed.push([id, n, l]) });
+    // a bookmark: its pencil, a new name, Enter
+    await userEvent.click(await screen.findByRole("button", { name: "為書籤命名" }));
+    const field = screen.getByRole("textbox", { name: "為書籤命名" });
+    expect(field.getAttribute("placeholder")).toBe("1.1 慣性");          // the default it goes back to
+    await userEvent.type(field, "要複習的定義{Enter}");
+    expect(renamed).toEqual([["m2", 2, "要複習的定義"]]);
+    // Escape keeps the old name
+    await userEvent.click(screen.getByRole("button", { name: "為書籤命名" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "為書籤命名" }), "不要{Escape}");
+    expect(renamed.length).toBe(1);
+    // a guided reading: named, shown in place of its range; emptied, back to the range
+    await userEvent.click(await screen.findByRole("button", { name: "為導讀命名" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "為導讀命名" }), "第一次讀{Enter}");
+    expect(await screen.findByText("第一次讀")).toBeTruthy();
+    expect(calls.find((c) => c.key === "PUT /api/labels/session/s1")?.body).toEqual({ label: "第一次讀" });
+    await userEvent.click(screen.getByRole("button", { name: "為導讀命名" }));
+    await userEvent.clear(screen.getByRole("textbox", { name: "為導讀命名" }));
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByText("第 1–2 頁")).toBeTruthy();
   });
 });
 
