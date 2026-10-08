@@ -5,6 +5,7 @@ import tempfile
 os.environ["MENTOR_SHELF_WARMUP"] = "0"
 os.environ["MENTOR_SHELF_ROOTS"] = ""
 os.environ["MENTOR_SHELF_DIR"] = tempfile.mkdtemp(prefix="mentor-shelf-")
+os.environ["MENTOR_EXTRACT_IN_BACKGROUND"] = "0"   # tests use a book right after importing it (test_extract turns it on)
 os.environ["MENTOR_LIBRARY_DIR"] = tempfile.mkdtemp(prefix="mentor-library-")   # imports copy files here
 
 import pytest

@@ -17,6 +17,7 @@ import os
 import time
 from pathlib import Path
 
+from .. import config
 from ..db import Database
 from ..llm.registry import Registry
 from ..llm.runtime import BackendPool, ModelRuntime, ModelSnapshot
@@ -220,12 +221,18 @@ class ShelfService:
         e = self.index.get(eid)
         return self.meta.cover(e) if e else None
 
-    def import_books(self, ids: list[str], category_name: str | None) -> dict:
+    def import_books(self, ids: list[str], category_name: str | None, category_id: str | None = None) -> dict:
+        """Copy the chosen books into the library: into the reading area `category_id` when given (one that already
+        exists), else into the one named `category_name` (found by name or made), else unsorted."""
         entries = [self.index.get(i) for i in ids]
         if not entries or any(e is None for e in entries):
             raise MaterialError("not_found", "找不到這本書，書櫃可能已經更新。")
         category = None
-        if category_name and category_name.strip():
+        if category_id:
+            category = next((c for c in self.materials.list_categories() if c["id"] == category_id), None)
+            if not category:
+                raise MaterialError("not_found", "找不到這個閱讀區，可能已經被刪除。")
+        elif category_name and category_name.strip():
             name = category_name.strip()[:40]
             category = next((c for c in self.materials.list_categories() if c["name"] == name), None) or self.materials.create_category(name)
         imported, duplicates = [], []
@@ -239,7 +246,8 @@ class ShelfService:
             except OSError as err:
                 raise MaterialError("unreadable", f"讀不到「{e.name}」：{err.strerror or err}") from err
             try:
-                m = self.materials.add(filename, data, category["id"] if category else None, original_path=str(e.path))
+                m = self.materials.add(filename, data, category["id"] if category else None, original_path=str(e.path),
+                                       defer=config.EXTRACT_IN_BACKGROUND)
             except MaterialError as err:
                 if err.code != "duplicate":
                     raise
@@ -247,8 +255,8 @@ class ShelfService:
                 continue
             # the title the shelf showed (PDF metadata or a cleaned file name), not the raw file name
             imported.append(self.materials.update(m["id"], title=self.meta.book(e)["title"], category_id=None, set_category=False))
-            if getattr(self, "describer", None):
-                self.describer.schedule(m["id"])
+            if getattr(self, "after_import", None):   # reading the text (a PDF) and the description, in the background
+                self.after_import(m)
         if self.result:   # what was imported leaves the shelf right away
             self._save_result({**self.result, "books": [b for b in self.result["books"] if b["id"] not in ids]})
         return {"category": category, "materials": imported, "duplicates": duplicates}

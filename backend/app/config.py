@@ -19,6 +19,9 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3-vl:4b")  # same model the l
 OPENVINO_MODEL_PATH = os.environ.get("OPENVINO_MODEL_PATH", "./models/qwen3-8b-int4")
 OPENVINO_DEVICE = os.environ.get("OPENVINO_DEVICE", "GPU")
 
+# an imported PDF's text is read in the background (a long book with formulas takes half a minute); 0 reads it during
+# the import, as before (the tests, which use a book right after importing it)
+EXTRACT_IN_BACKGROUND = os.environ.get("MENTOR_EXTRACT_IN_BACKGROUND", "1") != "0"
 READING_PREFETCH = os.environ.get("MENTOR_READING_PREFETCH", "1") != "0"  # 產生目前段落的導讀後，先偷跑下一段
 # 一個區塊的導讀沒通過檢查時，自動重新產生（新的嘗試、新的預算），連同第一次最多幾次；重來也不會成功的原因不重試
 READING_BLOCK_ATTEMPTS = int(os.environ.get("MENTOR_BLOCK_ATTEMPTS", "3"))

@@ -299,6 +299,10 @@ export interface Material {
   created_at: string;
   /** a short name the connected model gave the book (null until it has) */
   alias?: string | null;
+  /** "extracting": a PDF just imported whose text is still being read in the background (it opens and shows its
+   * pages; questions and 導讀 wait); "failed": its text could not be read (`status_detail` says why) */
+  status?: "ready" | "extracting" | "failed";
+  status_detail?: string | null;
 }
 
 /** The book's copy in the person's book folder (~/.mentora) and what it stands for (backend app/library.py). */

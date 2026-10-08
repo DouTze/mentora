@@ -85,8 +85,9 @@ export const api = {
   /** saves the wish (if any) and starts a scout run in the background */
   shelfQuery: (text: string) => call<ShelfView>("/shelf/query", { method: "POST", body: JSON.stringify({ text }) }),
   shelfForget: (text: string) => call<{ interests: string[] }>("/shelf/interests", { method: "DELETE", body: JSON.stringify({ text }) }),
-  shelfImport: (ids: string[], categoryName: string | null) =>
-    call<{ category: Category | null; materials: Material[]; duplicates: Material[] }>("/shelf/import", { method: "POST", body: JSON.stringify({ ids, category_name: categoryName }) }),
+  /** into the reading area `categoryId` (one that exists), else the one named `categoryName` (found or made), else none */
+  shelfImport: (ids: string[], categoryName: string | null, categoryId: string | null = null) =>
+    call<{ category: Category | null; materials: Material[]; duplicates: Material[] }>("/shelf/import", { method: "POST", body: JSON.stringify({ ids, category_name: categoryName, category_id: categoryId }) }),
   shelfCoverUrl: (id: string) => `${API_BASE}/shelf/${id}/cover`,
   shelfScope: () => call<ShelfScope>("/shelf/scope"),
   /** saves the folders that may be searched; what lies outside is forgotten and the shelf is chosen again */

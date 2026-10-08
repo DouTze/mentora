@@ -69,6 +69,7 @@ class StudyService:
         self._blocks_cache: dict = {}
         self._chunk_cache: dict = {}
         self._focus: str | None = None
+        self._kicks: set[asyncio.Task] = set()
         self._beat = 0.0
         self._watch: asyncio.Task | None = None
         with db.conn() as c:
@@ -97,7 +98,10 @@ class StudyService:
 
     async def ensure(self, mid: str) -> dict | None:
         """Start the study when there is none (None while it is being set up: a long PDF takes a while to extract,
-        which runs off the event loop); a study whose segmentation failed on a model error is retried."""
+        which runs off the event loop); a study whose segmentation failed on a model error is retried. A book whose
+        text is still being read after its import (app.material_extract) is not started yet."""
+        if self._text_status(mid) != "ready":
+            return None
         row = self.session(mid)
         if row is None:
             if self.pref(mid) == "off":
@@ -137,8 +141,28 @@ class StudyService:
             else:
                 r.hold(row["id"])
 
+    def kick(self, mid: str) -> None:
+        """The book's text has just been read (app.material_extract): if it is the one open, start its study now
+        rather than at the reader's next heartbeat. Called on the event loop."""
+        if self._focus == mid and self.pref(mid) not in ("off", "paused"):
+            t = asyncio.create_task(self.ensure(mid))
+            self._kicks.add(t)               # kept until done (a task nobody holds may be collected)
+            t.add_done_callback(self._kicks.discard)
+
+    def _text_status(self, mid: str) -> str:
+        try:
+            return self.materials.get(mid, with_units=False).get("status") or "ready"
+        except Exception:  # noqa: BLE001 — deleted: nothing to start
+            return "gone"
+
     def view(self, mid: str) -> dict:
         """What the reader shows; starting and pausing happen through focus / leave / pause / resume / cancel."""
+        text = self._text_status(mid)
+        if text in ("extracting", "failed"):   # the book's text is still being read (or could not be): no study yet
+            m = self.materials.get(mid, with_units=False)
+            return {"status": "reading" if text == "extracting" else "failed", "session_id": None, "planner": None,
+                    "progress": 0.0, "step": {"phase": "extract"} if text == "extracting" else None,
+                    "error": m.get("status_detail") if text == "failed" else None, "parts": [], "paused": False}
         pref = self.pref(mid)
         row = self.session(mid)
         if row is None:
@@ -372,6 +396,7 @@ class StudyService:
 
     async def ask(self, mid: str, n: int, question: str) -> dict:
         m = self.materials.get(mid)
+        self.materials.require_ready(m)
         n = max(1, min(int(n), m["unit_count"]))
         found = self.part_at(mid, n)
         if found:

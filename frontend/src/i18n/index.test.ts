@@ -25,6 +25,12 @@ describe("English localization", () => {
     expect(translate("en", "shelf.pages", { count: 1 })).toBe("1 page");
     expect(translate("en", "shelf.pages", { count: 12 })).toBe("12 pages");
     expect(translate("en", "shelf.parts", { count: 1 })).toBe("1 chapter");
+    expect(translate("en", "shelf.bar.intoCount", { count: 1 })).toBe("Add 1 book to");
+    expect(translate("en", "shelf.bar.intoCount", { count: 2 })).toBe("Add 2 books to");
+    expect(translate("en", "reader.study.parts", { count: 1 })).toBe("1 part ready");
+    expect(translate("en", "reader.study.parts", { count: 2 })).toBe("2 parts ready");
+    expect(translate("en", "reading.skipped.summary", { n: 1 })).toBe("Skipped 1 section that doesn’t need guided reading (expand to view)");
+    expect(translate("en", "reading.skipped.summary", { n: 2 })).toBe("Skipped 2 sections that don’t need guided reading (expand to view)");
     expect(translate("en", "history.reading.title", { total: 1 })).toBe("Guided reading · 1 section");
     expect(translate("en", "reading.unverified.summary", { n: 1 })).toContain("Compare it with");
     expect(translate("en", "reading.unverified.summary", { n: 2 })).toContain("Compare them with");

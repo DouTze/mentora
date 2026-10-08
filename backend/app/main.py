@@ -18,6 +18,7 @@ from .db import Database
 from .llm.registry import Registry
 from .bookmarks import Bookmarks
 from .library_describe import LibraryDescriber
+from .material_extract import TextExtractor
 from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
 from .llm import remote
@@ -59,7 +60,16 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     shelf = shelf or ShelfService(db, registry, pool, materials, config.SHELF_DIR)
     workflow.close_orphans({m["id"] for m in materials.list()})   # readings of materials deleted before that closed them
     describer = LibraryDescriber(registry, pool, materials)
-    shelf.describer = describer
+    # a PDF's text is read after its import, in the background; once read, the model describes the book
+    def text_ready(mid: str) -> None:
+        describer.schedule(mid)
+        study.kick(mid)       # the book open in the reader starts its study now
+    extractor = TextExtractor(materials, on_ready=text_ready)
+
+    def after_import(m: dict) -> None:
+        """What follows an import, in the background: reading the text (a deferred PDF), then the description."""
+        (extractor.schedule if m.get("status") == "extracting" else describer.schedule)(m["id"])
+    shelf.after_import = after_import
     try:   # the books imported before the book folder named copies after their content
         materials.adopt_library()
     except Exception:  # noqa: BLE001 — the folder may be unreadable; imports still work
@@ -71,10 +81,12 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         await runner.start()
         # index the disk and prepare the shelf before the home page asks for it
         warm = asyncio.create_task(shelf.warmup()) if config.SHELF_WARMUP else None
+        extractor.resume()    # books whose text was still being read when the app stopped
         describer.sweep()     # books still without a description and an alias, when a model is connected
         try:
             yield
         finally:
+            await extractor.stop()
             await describer.stop()
             for t in (warm, shelf.task):
                 if t and not t.done():
@@ -87,6 +99,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     app.state.db, app.state.registry, app.state.svc = db, registry, svc
     app.state.repo, app.state.runner, app.state.workflow = repo, runner, workflow
     app.state.shelf, app.state.study, app.state.describer = shelf, study, describer
+    app.state.extractor = extractor
 
     @app.exception_handler(SessionError)
     async def _session_error(_, e: SessionError):
@@ -110,7 +123,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
 
     @app.exception_handler(MaterialError)
     async def _material_error(_, e: MaterialError):
-        return JSONResponse(status_code={"not_found": 404, "duplicate": 409}.get(e.code, 400),
+        return JSONResponse(status_code={"not_found": 404, "duplicate": 409, "preparing": 409}.get(e.code, 400),
                             content={"code": e.code, "detail": e.detail, "retryable": False, **e.extra})
 
     @app.get("/api/health")
@@ -159,8 +172,8 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     async def import_material(file: UploadFile = File(...), category_id: str | None = Form(None)):
         """A file from the browser (only its name is known, not its path). The same file again: 409 `duplicate` with
         the material it already is."""
-        m = materials.add(file.filename or "untitled.txt", await file.read(), category_id)
-        describer.schedule(m["id"])
+        m = materials.add(file.filename or "untitled.txt", await file.read(), category_id, defer=config.EXTRACT_IN_BACKGROUND)
+        after_import(m)
         return m
 
     @app.get("/api/materials/{mid}")
@@ -323,6 +336,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
 
     @app.post("/api/materials/{mid}/learn")
     async def reader_learn(mid: str, req: ReaderLearn):
+        materials.require_ready(materials.get(mid, with_units=False))   # 409 while its text is still being read
         row = workflow.start_at(study, mid, req.at, req.strategy_id)
         return svc.view(row["id"])
 
@@ -370,7 +384,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
 
     @app.post("/api/shelf/import")
     def shelf_import(req: ShelfImport):
-        return shelf.import_books(req.ids, req.category_name)
+        return shelf.import_books(req.ids, req.category_name, req.category_id)
 
     @app.get("/api/settings")
     async def get_settings():

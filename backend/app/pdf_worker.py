@@ -9,6 +9,7 @@ was:
               images and attachments for the reader (a small pool, one MuPDF per worker; app.pdfdoc does the reading)
     studies   setting up a whole-material study: the normal `start_from_material(1..N)` of the learning flow, whose
               text and layout extraction of a long book takes minutes
+    extract   reading an imported PDF's text, page by page (app.material_extract), one book at a time
 
 The functions below are module-level so the pool can pickle them; each worker imports only what its job needs."""
 from __future__ import annotations
@@ -20,15 +21,20 @@ from pathlib import Path
 
 _pages: ProcessPoolExecutor | None = None
 _studies: ProcessPoolExecutor | None = None
+_extract: ProcessPoolExecutor | None = None
 
 
 def _pool(kind: str) -> ProcessPoolExecutor:
-    global _pages, _studies
+    global _pages, _studies, _extract
     ctx = multiprocessing.get_context("spawn")   # never fork a process that holds MuPDF / asyncio / sqlite state
     if kind == "pages":
         if _pages is None:
             _pages = ProcessPoolExecutor(max_workers=2, mp_context=ctx)
         return _pages
+    if kind == "extract":
+        if _extract is None:
+            _extract = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+        return _extract
     if _studies is None:
         _studies = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
     return _studies
@@ -39,14 +45,25 @@ async def run(kind: str, fn, *args):
 
 
 def shutdown() -> None:
-    global _pages, _studies
-    for p in (_pages, _studies):
+    global _pages, _studies, _extract
+    for p in (_pages, _studies, _extract):
         if p:
             p.shutdown(wait=False, cancel_futures=True)
-    _pages = _studies = None
+    _pages = _studies = _extract = None
 
 
 # -- jobs (run in the child) ---------------------------------------------------------------------
+def extract_units(path: str) -> dict:
+    """An imported PDF's text, one entry per page (MaterialStore.add reads it the same way when not deferred):
+    {"units": [...]}, or {"error": why} for a file without text (MaterialError does not cross the process boundary:
+    its constructor cannot be called back from pickled args, which breaks the pool)."""
+    from .materials import MaterialError, extract_units as read
+    try:
+        return {"units": read("pdf", Path(path).read_bytes())}
+    except MaterialError as e:
+        return {"error": e.detail}
+
+
 def page_sizes(path: str) -> list[list[float]]:
     import pymupdf
     with pymupdf.open(path) as doc:
