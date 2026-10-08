@@ -35,6 +35,8 @@ export const en: Dict = {
   "side.learningNow": "In progress",
   "side.guideQuiz": "Practice questions",
   "side.removeBookmark": "Remove bookmark",
+  "side.renameBookmark": "Rename bookmark",
+  "side.renameGuide": "Rename guided reading",
   "dock.label": "{name}: {status}",
   "dock.local": "local",
   "dock.remote": "remote",

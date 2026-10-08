@@ -17,12 +17,13 @@ from . import config, export, pdf_worker
 from .db import Database
 from .llm.registry import Registry
 from .bookmarks import Bookmarks
+from .labels import KINDS as LABEL_KINDS, Labels
 from .library_describe import LibraryDescriber
 from .material_extract import TextExtractor
 from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
 from .llm import remote
-from .models import (AnswerRequest, AskRequest, BookmarkRequest, CategoryOrder, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
+from .models import (AnswerRequest, AskRequest, BookmarkRequest, LabelRequest, CategoryOrder, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
                      ReaderAsk, ReaderLearn, RemoteEndpointRequest, ShelfImport, ShelfQuery, ShelfScope, StartSessionRequest)
 from .persistence.repository import Repository
 from .reading.study import StudyService
@@ -50,6 +51,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         registry.update(ModelConfig.model_validate(saved))
     materials = MaterialStore(db)
     bookmarks = Bookmarks(db)
+    labels = Labels(db)
     svc = TutorService(db, registry, materials)
     repo = Repository(db)
     pool = BackendPool(parallel=registry.cfg.parallel)
@@ -208,6 +210,24 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         if not 1 <= n <= m["unit_count"]:
             raise HTTPException(422, f"no {m['unit']} {n}")
         return bookmarks.add(mid, n, req.chapter)
+
+    @app.patch("/api/materials/{mid}/bookmarks/{n}")
+    async def rename_bookmark(mid: str, n: int, req: LabelRequest):
+        """A bookmark's own name in the sidebar; empty: its chapter again."""
+        return bookmarks.rename(mid, n, req.label)
+
+    # names given in the sidebar (a guided reading: kind "session")
+    @app.get("/api/labels/{kind}")
+    async def get_labels(kind: str):
+        if kind not in LABEL_KINDS:
+            raise HTTPException(404)
+        return labels.of(kind)
+
+    @app.put("/api/labels/{kind}/{ref}")
+    async def set_label(kind: str, ref: str, req: LabelRequest):
+        if kind not in LABEL_KINDS:
+            raise HTTPException(404)
+        return labels.set(kind, ref, req.label)
 
     @app.delete("/api/materials/{mid}/bookmarks/{n}")
     async def remove_bookmark(mid: str, n: int):

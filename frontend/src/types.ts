@@ -278,6 +278,8 @@ export interface Source {
 export interface Bookmark {
   unit_no: number;
   chapter: string | null;
+  /** a name the person gave it, shown in the sidebar in place of the chapter */
+  label?: string | null;
   created_at: string;
 }
 export type Bookmarks = Record<string, Bookmark[]>;

@@ -116,6 +116,7 @@ export function App() {
         readingAt={readingAt}
         onOpenPage={openPage}
         onOpenSession={openSession}
+        onRenameBookmark={(id, n, label) => api.renameBookmark(id, n, label).then((m) => setBookMarks(id, m)).catch(() => {})}
         onRemoveBookmark={(id, n) => api.removeBookmark(id, n).then((m) => setBookMarks(id, m)).catch(() => {})}
         collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)}

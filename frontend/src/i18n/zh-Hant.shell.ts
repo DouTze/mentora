@@ -34,6 +34,8 @@ export const shell = {
   "side.learningNow": "學習中",
   "side.guideQuiz": "練習題",
   "side.removeBookmark": "移除書籤",
+  "side.renameBookmark": "為書籤命名",
+  "side.renameGuide": "為導讀命名",
   "dock.label": "{name}：{status}",
   "dock.local": "本地",
   "dock.remote": "遠端",

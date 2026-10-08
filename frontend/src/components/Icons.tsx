@@ -150,6 +150,11 @@ export const Icon = {
       <circle cx="5" cy="17.5" r="1" fill="currentColor" stroke="none" />
     </Svg>
   ),
+  pencil: () => (
+    <Svg>
+      <path d="M14.5 6.5 17.5 9.5M5 19l1-4 10.2-10.2a1.4 1.4 0 0 1 2 0l1 1a1.4 1.4 0 0 1 0 2L9 18z" />
+    </Svg>
+  ),
   /** a ribbon; filled when the page is marked */
   bookmark: ({ filled = false }: { filled?: boolean } = {}) => (
     <Svg>

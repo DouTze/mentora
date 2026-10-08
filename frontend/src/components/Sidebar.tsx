@@ -91,6 +91,8 @@ interface Props {
   onOpenPage?: (materialId: string, n: number) => void;
   onOpenSession?: (sessionId: string) => void;
   onRemoveBookmark?: (materialId: string, n: number) => void;
+  /** a bookmark's own name; "" goes back to its chapter */
+  onRenameBookmark?: (materialId: string, n: number, label: string) => void;
   collapsed: boolean;
   onToggle: () => void;
   onNavigate: (r: Route) => void;
@@ -102,7 +104,7 @@ const PEEK_OPEN_MS = 120;    // a pointer only passing over the rail does not op
 const PEEK_CLOSE_MS = 300;
 const PEEK_EXIT_MS = 160;   // .sidebar.peek.leaving animation
 
-export function Sidebar({ library, route, companion, conn, hasSession, sessionId = null, bookmarks = {}, readingAt = null, onOpenPage, onOpenSession, onRemoveBookmark, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
+export function Sidebar({ library, route, companion, conn, hasSession, sessionId = null, bookmarks = {}, readingAt = null, onOpenPage, onOpenSession, onRemoveBookmark, onRenameBookmark, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
   const t = useT();
   const [folded, setFolded] = useStored<string[]>("mentor.foldedCategories", []);
   // books shown open: their bookmarks and guided readings listed under them
@@ -113,12 +115,23 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
   const toggleBook = (id: string) => setOpenBooks(openBooks.includes(id) ? openBooks.filter((x) => x !== id) : [...openBooks, id]);
   // the guided readings of every book, read again when the page, the library or the current reading changes
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  // names given to guided readings here (the sidebar shows them in place of the range)
+  const [guideNames, setGuideNames] = useState<Record<string, string>>({});
+  const renameGuide = (id: string, label: string) =>
+    api
+      .setLabel("session", id, label)
+      .then(setGuideNames)
+      .catch(() => {});
   const routeKey = route.page === "material" ? `material:${route.id}` : route.page;
   useEffect(() => {
     let live = true;
     api
       .sessions()
       .then((xs) => live && setSessions(xs))
+      .catch(() => {});
+    api
+      .labels("session")
+      .then((x) => live && setGuideNames(x))
       .catch(() => {});
     return () => {
       live = false;
@@ -378,12 +391,16 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
                             marks={marks}
                             guides={sessions.filter((x) => x.source?.material_id === m.id)}
                             sessionId={sessionId}
+                            viewing={route.page === "learn" ? sessionId : null}
                             folded={(sec) => foldedSecs.includes(`${m.id}:${sec}`)}
                             onToggleSection={(sec) => toggleSec(`${m.id}:${sec}`)}
                             at={route.page === "material" && route.id === m.id && readingAt?.id === m.id ? readingAt.n : null}
                             onOpenPage={(n) => (onOpenPage ? onOpenPage(m.id, n) : onNavigate({ page: "material", id: m.id }))}
                             onOpenSession={(id) => onOpenSession?.(id)}
                             onRemoveBookmark={onRemoveBookmark ? (n) => onRemoveBookmark(m.id, n) : undefined}
+                            onRenameBookmark={onRenameBookmark ? (n, label) => onRenameBookmark(m.id, n, label) : undefined}
+                            guideNames={guideNames}
+                            onRenameGuide={renameGuide}
                           />
                         )}
                       </div>
@@ -419,12 +436,15 @@ const NAV: { page: "home" | "learn" | "history"; label: Key; icon: ReactNode }[]
 ];
 
 /** Under an open book, one step in (as Notion nests pages): the pages bookmarked in it, each with the chapter it falls
- * in, and its guided readings. The page you are on and the reading being learnt now are set bold. */
-function BookContents({ material, marks, guides, sessionId, folded, onToggleSection, at, onOpenPage, onOpenSession, onRemoveBookmark }: {
+ * in, and its guided readings. The bookmark of the page you are on and the reading on screen are set bold; the
+ * reading being learnt now (進行中的學習) carries the learning icon. */
+function BookContents({ material, marks, guides, sessionId, viewing, folded, onToggleSection, at, onOpenPage, onOpenSession, onRemoveBookmark, onRenameBookmark, guideNames, onRenameGuide }: {
   material: Material;
   marks: Bookmark[];
   guides: SessionListItem[];
   sessionId: string | null;
+  /** the reading on screen now (the learning page showing it): set bold, as the bookmark you are on is */
+  viewing: string | null;
   /** whether a group is folded, and folding / opening it: a long list of bookmarks or guides is put away by its title */
   folded: (sec: "marks" | "guides") => boolean;
   onToggleSection: (sec: "marks" | "guides") => void;
@@ -433,8 +453,14 @@ function BookContents({ material, marks, guides, sessionId, folded, onToggleSect
   onOpenPage: (n: number) => void;
   onOpenSession: (id: string) => void;
   onRemoveBookmark?: (n: number) => void;
+  /** naming: a bookmark or a guided reading shows its own name; "" goes back to the chapter / the range */
+  onRenameBookmark?: (n: number, label: string) => void;
+  guideNames: Record<string, string>;
+  onRenameGuide: (id: string, label: string) => void;
 }) {
   const t = useT();
+  // the row being named: "m:<page>" or "g:<session id>"
+  const [naming, setNaming] = useState<string | null>(null);
   const where = (n: number) => t(material.unit === "page" ? "material.unit.pageNo" : "reader.atLine", { n });
   const ordered = [...guides].sort((a, b) => (a.source?.start ?? 0) - (b.source?.start ?? 0) || a.created_at.localeCompare(b.created_at));
   if (!marks.length && !ordered.length) return <div className="sb-empty">{t("side.bookEmpty")}</div>;
@@ -445,19 +471,50 @@ function BookContents({ material, marks, guides, sessionId, folded, onToggleSect
           <SectionToggle label={t("side.bookmarks")} count={marks.length} open={!folded("marks")} onToggle={() => onToggleSection("marks")} />
           {!folded("marks") && marks.map((b) => {
             const here = at === b.unit_no;
+            const fallback = b.chapter ?? where(b.unit_no);
+            const shown = b.label || fallback;
+            const key = `m:${b.unit_no}`;
             return (
               <div key={b.unit_no} className="sb-item">
-                <button className={`sb-line ${here ? "here" : ""}`} aria-current={here ? "location" : undefined} onClick={() => onOpenPage(b.unit_no)} title={b.chapter ? `${where(b.unit_no)} · ${b.chapter}` : where(b.unit_no)}>
-                  <span className="sb-icon">
-                    <Icon.bookmark filled={here} />
-                  </span>
-                  <span className="sb-text">{b.chapter ?? where(b.unit_no)}</span>
-                  <span className="sb-n">{b.unit_no}</span>
-                </button>
-                {onRemoveBookmark && (
-                  <button className="sb-x" onClick={() => onRemoveBookmark(b.unit_no)} aria-label={t("side.removeBookmark")} title={t("side.removeBookmark")}>
-                    <Icon.close />
-                  </button>
+                {naming === key ? (
+                  <RenameInput
+                    icon={<Icon.bookmark filled={here} />}
+                    initial={b.label ?? ""}
+                    placeholder={fallback}
+                    label={t("side.renameBookmark")}
+                    onDone={(name) => {
+                      setNaming(null);
+                      if (name !== null && name !== (b.label ?? "")) onRenameBookmark?.(b.unit_no, name);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <button
+                      className={`sb-line ${here ? "here" : ""}`}
+                      aria-current={here ? "location" : undefined}
+                      onClick={() => onOpenPage(b.unit_no)}
+                      onDoubleClick={() => onRenameBookmark && setNaming(key)}
+                      title={[where(b.unit_no), b.chapter, b.label && b.label !== b.chapter ? `「${b.label}」` : null].filter(Boolean).join(" · ")}
+                    >
+                      <span className="sb-icon">
+                        <Icon.bookmark filled={here} />
+                      </span>
+                      <span className="sb-text">{shown}</span>
+                      <span className="sb-n">{b.unit_no}</span>
+                    </button>
+                    <span className="sb-acts">
+                      {onRenameBookmark && (
+                        <button className="sb-act" onClick={() => setNaming(key)} aria-label={t("side.renameBookmark")} title={t("side.renameBookmark")}>
+                          <Icon.pencil />
+                        </button>
+                      )}
+                      {onRemoveBookmark && (
+                        <button className="sb-act" onClick={() => onRemoveBookmark(b.unit_no)} aria-label={t("side.removeBookmark")} title={t("side.removeBookmark")}>
+                          <Icon.close />
+                        </button>
+                      )}
+                    </span>
+                  </>
                 )}
               </div>
             );
@@ -468,23 +525,94 @@ function BookContents({ material, marks, guides, sessionId, folded, onToggleSect
         <div className="sb-sec" role="group" aria-label={t("side.guides")}>
           <SectionToggle label={t("side.guides")} count={ordered.length} open={!folded("guides")} onToggle={() => onToggleSection("guides")} />
           {!folded("guides") && ordered.map((g) => {
-            const now = g.id === sessionId;
+            const now = g.id === sessionId;   // 進行中的學習: marked by its icon
+            const here = g.id === viewing;    // on screen now: bold
             const meta = g.progress.stage === "quiz" ? t("side.guideQuiz") : `${g.progress.read}/${g.progress.total}`;
+            const fallback = g.source?.label ?? g.content_title;
+            const name = guideNames[g.id];
+            const key = `g:${g.id}`;
+            const icon = now ? <Icon.learn /> : <Icon.book />;
             return (
               <div key={g.id} className="sb-item">
-                <button className={`sb-line ${now ? "here" : ""}`} onClick={() => onOpenSession(g.id)} title={now ? `${t("side.learningNow")} · ${g.source?.label ?? ""}` : g.source?.label}>
-                  <span className={`sb-icon ${now ? "now" : ""}`} aria-label={now ? t("side.learningNow") : undefined}>
-                    {now ? <Icon.learn /> : <Icon.book />}
-                  </span>
-                  <span className="sb-text">{g.source?.label ?? g.content_title}</span>
-                  <span className="sb-n">{meta}</span>
-                </button>
+                {naming === key ? (
+                  <RenameInput
+                    icon={icon}
+                    iconClass={now ? "now" : ""}
+                    initial={name ?? ""}
+                    placeholder={fallback}
+                    label={t("side.renameGuide")}
+                    onDone={(next) => {
+                      setNaming(null);
+                      if (next !== null && next !== (name ?? "")) onRenameGuide(g.id, next);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <button
+                      className={`sb-line ${here ? "here" : ""}`}
+                      aria-current={here ? "page" : undefined}
+                      onClick={() => onOpenSession(g.id)}
+                      onDoubleClick={() => setNaming(key)}
+                      title={[now ? t("side.learningNow") : null, fallback, name ? `「${name}」` : null].filter(Boolean).join(" · ")}
+                    >
+                      <span className={`sb-icon ${now ? "now" : ""}`} aria-label={now ? t("side.learningNow") : undefined}>
+                        {icon}
+                      </span>
+                      <span className="sb-text">{name || fallback}</span>
+                      <span className="sb-n">{meta}</span>
+                    </button>
+                    <span className="sb-acts">
+                      <button className="sb-act" onClick={() => setNaming(key)} aria-label={t("side.renameGuide")} title={t("side.renameGuide")}>
+                        <Icon.pencil />
+                      </button>
+                    </span>
+                  </>
+                )}
               </div>
             );
           })}
         </div>
       )}
     </div>
+  );
+}
+
+/** Naming a row in place: Enter or leaving the field keeps the name (an empty one goes back to the default, shown
+ * as the placeholder); Escape keeps the old one. onDone gets the new name, or null when nothing is to change. */
+function RenameInput({ icon, iconClass = "", initial, placeholder, label, onDone }: {
+  icon: ReactNode;
+  iconClass?: string;
+  initial: string;
+  placeholder: string;
+  label: string;
+  onDone: (name: string | null) => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const finish = (v: string | null) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(v === null ? null : v.trim());
+  };
+  return (
+    <span className="sb-line sb-naming">
+      <span className={`sb-icon ${iconClass}`}>{icon}</span>
+      <input
+        className="sb-name"
+        autoFocus
+        aria-label={label}
+        placeholder={placeholder}
+        value={value}
+        maxLength={80}
+        onChange={(e) => setValue(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        onBlur={() => finish(value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.nativeEvent.isComposing) finish(value);
+          if (e.key === "Escape") finish(null);
+        }}
+      />
+    </span>
   );
 }
 
