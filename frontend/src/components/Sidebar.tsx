@@ -7,6 +7,7 @@ import type { CompanionId } from "../companions";
 import { useStored, type Route } from "../route";
 import { CompanionDock, type Connection } from "./CompanionDock";
 import { Icon, KindTag } from "./Icons";
+import { composing } from "../ime";
 
 const ACCEPT = ".pdf,.md,.markdown,.txt";
 const UNSORTED = "__unsorted__";
@@ -82,14 +83,14 @@ interface Props {
   route: Route;
   companion: CompanionId;
   conn: Connection;
-  hasSession: boolean;
   /** the reading in 進行中的學習, marked among a book's guides */
   sessionId?: string | null;
   bookmarks?: Bookmarks;
   /** the page (line) being read in the open book: its bookmark is shown as the one you are on */
   readingAt?: { id: string; n: number } | null;
   onOpenPage?: (materialId: string, n: number) => void;
-  onOpenSession?: (sessionId: string) => void;
+  /** a book's 導讀 opens in that book's reader */
+  onOpenSession?: (sessionId: string, material?: string) => void;
   onRemoveBookmark?: (materialId: string, n: number) => void;
   /** a bookmark's own name; "" goes back to its chapter */
   onRenameBookmark?: (materialId: string, n: number, label: string) => void;
@@ -104,7 +105,7 @@ const PEEK_OPEN_MS = 120;    // a pointer only passing over the rail does not op
 const PEEK_CLOSE_MS = 300;
 const PEEK_EXIT_MS = 160;   // .sidebar.peek.leaving animation
 
-export function Sidebar({ library, route, companion, conn, hasSession, sessionId = null, bookmarks = {}, readingAt = null, onOpenPage, onOpenSession, onRemoveBookmark, onRenameBookmark, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
+export function Sidebar({ library, route, companion, conn, sessionId = null, bookmarks = {}, readingAt = null, onOpenPage, onOpenSession, onRemoveBookmark, onRenameBookmark, collapsed, onToggle, onNavigate, onLibraryChange, onOpenSettings }: Props) {
   const t = useT();
   const [folded, setFolded] = useStored<string[]>("mentor.foldedCategories", []);
   // books shown open: their bookmarks and guided readings listed under them
@@ -122,7 +123,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
       .setLabel("session", id, label)
       .then(setGuideNames)
       .catch(() => {});
-  const routeKey = route.page === "material" ? `material:${route.id}` : route.page;
+  const routeKey = route.page === "material" ? `material:${route.id}:${route.view?.session ?? ""}` : route.page;
   useEffect(() => {
     let live = true;
     api
@@ -256,7 +257,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
         <button className="icon-btn" onClick={onToggle} aria-label={t("side.expand")} title={t("side.expand")}>
           <Icon.expand />
         </button>
-        {NAV.filter((n) => n.page !== "learn" || hasSession).map((n) => (
+        {NAV.map((n) => (
           <button key={n.page} className={`icon-btn ${route.page === n.page ? "active" : ""}`} onClick={() => onNavigate({ page: n.page })} aria-label={t(n.label)} title={t(n.label)}>
             {n.icon}
           </button>
@@ -296,7 +297,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
       </div>
 
       <nav className="side-nav">
-        {NAV.filter((n) => n.page !== "learn" || hasSession).map((n) => (
+        {NAV.map((n) => (
           <button key={n.page} className={`side-item ${route.page === n.page ? "active" : ""}`} onClick={() => onNavigate({ page: n.page })}>
             {n.icon}
             <span>{t(n.label)}</span>
@@ -371,7 +372,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
                             </span>
                           </span>
                           <button
-                            className={`side-item leaf ${route.page === "material" && route.id === m.id ? "active" : ""}`}
+                            className={`side-item leaf ${route.page === "material" && route.id === m.id && !route.view ? "active" : ""}`}
                             onPointerDown={drag.start({ kind: "material", id: m.id, label: m.title, tag: m.kind })}
                             onClick={() => {
                               // one click opens the book in the reader and opens (or folds) it here, as a Notion page
@@ -391,12 +392,12 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
                             marks={marks}
                             guides={sessions.filter((x) => x.source?.material_id === m.id)}
                             sessionId={sessionId}
-                            viewing={route.page === "learn" ? sessionId : null}
+                            viewing={route.page === "material" ? (route.view?.session ?? null) : route.page === "learn" ? sessionId : null}
                             folded={(sec) => foldedSecs.includes(`${m.id}:${sec}`)}
                             onToggleSection={(sec) => toggleSec(`${m.id}:${sec}`)}
-                            at={route.page === "material" && route.id === m.id && readingAt?.id === m.id ? readingAt.n : null}
+                            at={route.page === "material" && route.id === m.id && !route.view && readingAt?.id === m.id ? readingAt.n : null}
                             onOpenPage={(n) => (onOpenPage ? onOpenPage(m.id, n) : onNavigate({ page: "material", id: m.id }))}
-                            onOpenSession={(id) => onOpenSession?.(id)}
+                            onOpenSession={(id) => onOpenSession?.(id, m.id)}
                             onRemoveBookmark={onRemoveBookmark ? (n) => onRemoveBookmark(m.id, n) : undefined}
                             onRenameBookmark={onRenameBookmark ? (n, label) => onRenameBookmark(m.id, n, label) : undefined}
                             guideNames={guideNames}
@@ -429,9 +430,8 @@ export function Sidebar({ library, route, companion, conn, hasSession, sessionId
   return <div className="sidebar rail peeking">{card}</div>;
 }
 
-const NAV: { page: "home" | "learn" | "history"; label: Key; icon: ReactNode }[] = [
+const NAV: { page: "home" | "history"; label: Key; icon: ReactNode }[] = [
   { page: "home", label: "nav.home", icon: <Icon.home /> },
-  { page: "learn", label: "nav.learn", icon: <Icon.learn /> },
   { page: "history", label: "nav.history", icon: <Icon.history /> },
 ];
 
@@ -608,7 +608,7 @@ function RenameInput({ icon, iconClass = "", initial, placeholder, label, onDone
         onFocus={(e) => e.target.select()}
         onBlur={() => finish(value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.nativeEvent.isComposing) finish(value);
+          if (e.key === "Enter" && !composing(e)) finish(value);
           if (e.key === "Escape") finish(null);
         }}
       />
@@ -746,7 +746,7 @@ function NameInput({ initial = "", placeholder, onDone }: { initial?: string; pl
       onFocus={(e) => e.target.select()}
       onBlur={() => finish(value)}
       onKeyDown={(e) => {
-        if (e.key === "Enter") finish(value);
+        if (e.key === "Enter" && !composing(e)) finish(value);
         if (e.key === "Escape") finish("");
       }}
     />

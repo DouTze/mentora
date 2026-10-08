@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api, RequestError } from "../api";
-import type { ApiError, Guide, SessionView } from "../types";
+import type { ApiError, Guide, Quote, ReadingQA, SessionView } from "../types";
 import { RichText } from "./RichText";
 import { Working } from "./Working";
 import { useT, type Key } from "../i18n";
 import { CommandRefused, isGraph, useCommands } from "../workflow";
+import { composing } from "../ime";
 
 interface Props {
   session: SessionView;
@@ -12,7 +13,12 @@ interface Props {
   /** 出題 from the reader: send `finish` (the same as 提前出題) once the current guide is shown */
   autoFinish?: boolean;
   onAutoFinished?: () => void;
+  /** the reader's 閱讀模式: the guides read so far run on above the current one, each its own section (the table of
+   *  contents scrolls to `#guide-quote-<index>`), and the range being read is not repeated */
+  continuous?: boolean;
 }
+
+export const quoteAnchor = (index: number) => `guide-quote-${index}`;
 
 const POLL_MS = 2000;
 
@@ -32,7 +38,7 @@ const ERROR_HEADLINE: Record<string, Key> = {
   quiz_unverified: "reading.error.quiz_unverified",
 };
 
-export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }: Props) {
+export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished, continuous = false }: Props) {
   const t = useT();
   const rd = session.reading!;
   const quote = rd.quotes[rd.index];
@@ -43,7 +49,6 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
   const [asking, setAsking] = useState(false);
   const [question, setQuestion] = useState("");
   const [error, setError] = useState<ApiError | null>(null);
-  const [showOriginal, setShowOriginal] = useState(false);
   const [showPrevious, setShowPrevious] = useState(false);
   const [confirmFinish, setConfirmFinish] = useState(false);
   const isLast = rd.index + 1 >= rd.total;
@@ -92,7 +97,6 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
     const cmd = await command("next");
     if (cmd?.status === "completed") {
       setQuestion("");
-      setShowOriginal(false);
     }
   };
 
@@ -129,11 +133,21 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
     } else if (cmd) setFailedAsk(cmd.command_id);
   };
 
+  // past the reading (on to the questions): the reader's 導讀 shows every guide, as read
+  if (continuous && rd.done) {
+    return (
+      <div className="panel reading continuous" data-testid="reading">
+        <PastQuotes session={session} upTo={rd.total} />
+      </div>
+    );
+  }
+
   const partEnds = rd.parts.length > 1 && rd.parts[quote.part]?.quote_to === rd.index;
   const shownError = job?.error ?? error;
 
   return (
-    <div className="panel reading" data-testid="reading">
+    <div className={`panel reading ${continuous ? "continuous" : ""}`} data-testid="reading">
+      {!continuous && (
       <div className="meta">
         {t("reading.meta", { n: rd.index + 1, total: rd.total, label: quote.label })}
         {rd.parts.length > 1 && ` · ${t("reading.meta.part", { part: quote.part + 1, parts: rd.parts.length })}`}
@@ -144,6 +158,7 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
           </span>
         )}
       </div>
+      )}
       {rd.index === 0 && (rd.segmentation?.skipped?.length ?? 0) > 0 && (
         <details className="skipped" data-testid="skipped">
           <summary>{t("reading.skipped.summary", { n: rd.segmentation!.skipped!.length })}</summary>
@@ -158,70 +173,25 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
           ))}
         </details>
       )}
-      {quote.heading && <h2 className="reading-heading">{quote.heading}</h2>}
-
-      {guide?.blocks ? (
-        <TopicBlocks guide={guide} retrying={sending} onRetry={!readOnly && !busy ? () => command("retry_blocks") : undefined} />
-      ) : (
-      <>
-      <blockquote className="quote">
-        <div className="label">{t("reading.quote.label", { label: quote.label })}</div>
-        <div className="excerpt">
-          {t("reading.quote.open")}<RichText text={quote.excerpt} inline />{t("reading.quote.close")}
-        </div>
-        {guide?.chinese_text && (
-          <div className="chinese">
-            <strong>{t("reading.chineseText")}</strong>
-            <RichText text={guide.chinese_text} />
-          </div>
-        )}
-        <button className="link" onClick={() => setShowOriginal((v) => !v)}>
-          {t(showOriginal ? "reading.original.hide" : "reading.original.show")}
-        </button>
-        {showOriginal && <div className="source-text">{quote.text}</div>}
-      </blockquote>
-
-      {guide ? (
-        <div className="guide" data-testid="guide">
-          <RichText text={guide.guide} />
-          {guide.check && (
-            <div className="check">
-              <span className="label">{t("reading.check")}</span>
-              <RichText text={guide.check} inline />
+      {continuous && <PastQuotes session={session} upTo={rd.index} />}
+      <section id={continuous ? quoteAnchor(rd.index) : undefined} className="reading-quote">
+      <QuoteView
+        key={quote.id}
+        quote={quote}
+        guide={guide}
+        retrying={sending}
+        onRetryBlocks={!readOnly && !busy ? () => command("retry_blocks") : undefined}
+        pending={
+          !shownError && !readOnly && (
+            <div className="tutor" data-testid="guide-loading">
+              <div className="label">{t("common.tutor")}</div>
+              <Working stage={segmenting ? "segment" : (job?.stage ?? "guide")} detail={job?.detail_stage} />
             </div>
-          )}
-          {guide.unverified && guide.unverified.length > 0 && (
-            <details className="unverified" data-testid="unverified">
-              <summary>{t("reading.unverified.summary", { n: guide.unverified.length })}</summary>
-              <ul>
-                {guide.unverified.map((u, i) => (
-                  <li key={i}>{t("reading.unverified.coverage", { source: u.source })}</li>
-                ))}
-              </ul>
-            </details>
-          )}
-        </div>
-      ) : (
-        !shownError && !readOnly && (
-          <div className="tutor" data-testid="guide-loading">
-            <div className="label">{t("common.tutor")}</div>
-            <Working stage={segmenting ? "segment" : (job?.stage ?? "guide")} detail={job?.detail_stage} />
-          </div>
-        )
-      )}
-      </>
-      )}
+          )
+        }
+      />
 
-      {qa.length > 0 && (
-        <div className="qa" data-testid="qa">
-          {qa.map((x, i) => (
-            <div key={i} className="tutor">
-              <div className="label">{t("common.youAsked", { question: x.question })}</div>
-              <RichText text={x.answer} />
-            </div>
-          ))}
-        </div>
-      )}
+      <QaList qa={qa} />
 
       {guide && busy && (
         <div className="tutor" data-testid="job">
@@ -266,7 +236,7 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
               placeholder={t("reading.ask.placeholder")}
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && ask()}
+              onKeyDown={(e) => e.key === "Enter" && !composing(e) && ask()}
               disabled={asking}
             />
             <button onClick={ask} disabled={asking || !question.trim()}>
@@ -297,7 +267,7 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
                 </button>
               ))}
             <span className="spacer" />
-            {rd.index > 0 && (
+            {rd.index > 0 && !continuous && (
               <button className="ghost" onClick={() => setShowPrevious((v) => !v)}>
                 {showPrevious ? t("reading.previous.hide") : t("reading.previous.show", { count: rd.index })}
               </button>
@@ -306,7 +276,9 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
         </>
       )}
 
-      {showPrevious && (
+      </section>
+
+      {showPrevious && !continuous && (
         <div className="previous" data-testid="previous">
           {rd.quotes.slice(0, rd.index).map((q) => {
             const g = rd.guides[String(q.index)];
@@ -323,6 +295,100 @@ export function ReadingPanel({ session, onSession, autoFinish, onAutoFinished }:
         </div>
       )}
     </div>
+  );
+}
+
+/** One quote and its guide: a 主題 written 區塊 by 區塊, or the quote with its guide under it; `pending` stands in
+ *  for a guide not written yet. */
+function QuoteView({ quote, guide, retrying = false, onRetryBlocks, pending }: {
+  quote: Quote;
+  guide: Guide | undefined;
+  retrying?: boolean;
+  onRetryBlocks?: () => void;
+  pending?: ReactNode;
+}) {
+  const t = useT();
+  const [showOriginal, setShowOriginal] = useState(false);
+  return (
+    <>
+      {quote.heading && <h2 className="reading-heading">{quote.heading}</h2>}
+      {guide?.blocks ? (
+        <TopicBlocks guide={guide} retrying={retrying} onRetry={onRetryBlocks} />
+      ) : (
+        <>
+          <blockquote className="quote">
+            <div className="label">{t("reading.quote.label", { label: quote.label })}</div>
+            <div className="excerpt">
+              {t("reading.quote.open")}<RichText text={quote.excerpt} inline />{t("reading.quote.close")}
+            </div>
+            {guide?.chinese_text && (
+              <div className="chinese">
+                <strong>{t("reading.chineseText")}</strong>
+                <RichText text={guide.chinese_text} />
+              </div>
+            )}
+            <button className="link" onClick={() => setShowOriginal((v) => !v)}>
+              {t(showOriginal ? "reading.original.hide" : "reading.original.show")}
+            </button>
+            {showOriginal && <div className="source-text">{quote.text}</div>}
+          </blockquote>
+          {guide ? (
+            <div className="guide" data-testid="guide">
+              <RichText text={guide.guide} />
+              {guide.check && (
+                <div className="check">
+                  <span className="label">{t("reading.check")}</span>
+                  <RichText text={guide.check} inline />
+                </div>
+              )}
+              {guide.unverified && guide.unverified.length > 0 && (
+                <details className="unverified" data-testid="unverified">
+                  <summary>{t("reading.unverified.summary", { n: guide.unverified.length })}</summary>
+                  <ul>
+                    {guide.unverified.map((u, i) => (
+                      <li key={i}>{t("reading.unverified.coverage", { source: u.source })}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          ) : (
+            pending
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+function QaList({ qa }: { qa: ReadingQA[] }) {
+  const t = useT();
+  if (!qa.length) return null;
+  return (
+    <div className="qa" data-testid="qa">
+      {qa.map((x, i) => (
+        <div key={i} className="tutor">
+          <div className="label">{t("common.youAsked", { question: x.question })}</div>
+          <RichText text={x.answer} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** The quotes before `upTo` with their guides and what was asked about them, each a section of its own. */
+function PastQuotes({ session, upTo }: { session: SessionView; upTo: number }) {
+  const t = useT();
+  const rd = session.reading!;
+  return (
+    <>
+      {rd.quotes.slice(0, upTo).map((q) => (
+        <section key={q.id} id={quoteAnchor(q.index)} className="reading-quote past">
+          <QuoteView quote={q} guide={rd.guides[String(q.index)]} pending={<p className="muted">{t("reading.previous.notGuided")}</p>} />
+          <QaList qa={rd.qa[String(q.index)] ?? []} />
+        </section>
+      ))}
+    </>
   );
 }
 

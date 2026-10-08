@@ -15,6 +15,7 @@ import { Bookshelf } from "../components/Bookshelf";
 import { Select } from "../components/Select";
 import { ResumeReading } from "../components/ResumeReading";
 import { useT, type Key } from "../i18n";
+import { composing } from "../ime";
 
 interface Props {
   library: Library;
@@ -168,6 +169,10 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, 
   };
 
   const onAskKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && composing(e)) {
+      e.preventDefault();   // the Enter picks the IME's word; it must not submit the form
+      return;
+    }
     if (!showHistory) return;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();

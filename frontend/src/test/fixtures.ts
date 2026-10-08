@@ -51,8 +51,10 @@ export function turn(answer: string, message: TutorMessage | null, over: Partial
   return { idx: 1, created_at: "", concept_id: "concept-01", question_id: "q-diag-01", phase: "diagnostic", student_answer: answer, tutor_message: message, ...over };
 }
 
-/** Minimal fetch mock: route table keyed by "METHOD /api/path". */
-export function mockFetch(routes: Record<string, (body?: unknown) => { status?: number; json: unknown }>) {
+type Reply = { status?: number; json: unknown };
+/** Minimal fetch mock: route table keyed by "METHOD /api/path". A handler may answer later (a Promise), to see what
+ * is shown while a request is out. */
+export function mockFetch(routes: Record<string, (body?: unknown) => Reply | Promise<Reply>>) {
   const calls: { key: string; body: unknown }[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -61,7 +63,7 @@ export function mockFetch(routes: Record<string, (body?: unknown) => { status?: 
     calls.push({ key, body });
     const handler = routes[key];
     if (!handler) return new Response(JSON.stringify({ code: "unmocked", detail: `unmocked ${key}` }), { status: 500 });
-    const r = handler(body);
+    const r = await handler(body);
     return new Response(JSON.stringify(r.json), { status: r.status ?? 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   return calls;

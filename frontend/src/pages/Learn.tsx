@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, RequestError } from "../api";
 import type { ApiError, SessionView, TutorMessage } from "../types";
 import { TutorBubble } from "../components/TutorBubble";
@@ -10,6 +10,9 @@ import { RichText } from "../components/RichText";
 import { Working } from "../components/Working";
 import { useT } from "../i18n";
 import { CommandRefused, isGraph, useCommands } from "../workflow";
+import { prepared } from "../readerMode";
+
+const PREPARE_POLL_MS = 1500;
 
 interface Props {
   sessionId: string | null;
@@ -18,9 +21,17 @@ interface Props {
   /** opened by 出題 in the reader: go on to the questions as soon as the first guide is shown */
   autoQuiz?: boolean;
   onAutoQuizDone?: () => void;
+  /** shown in the book's reader in place of its pages (閱讀模式): without the head naming the book and range, and
+   *  `view` "guide" keeps to the guides (every one so far, one under another) while "quiz" goes on to the questions */
+  embedded?: boolean;
+  view?: "guide" | "quiz";
+  /** the session as it changes (the reader lists its quotes in the table of contents) */
+  onSession?: (s: SessionView) => void;
+  /** the session could not be read */
+  onError?: () => void;
 }
 
-export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz, onAutoQuizDone }: Props) {
+export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz, onAutoQuizDone, embedded = false, view, onSession, onError }: Props) {
   const t = useT();
   const [session, setSession] = useState<SessionView | null>(null);
   const [answer, setAnswer] = useState("");
@@ -44,8 +55,29 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz
         setSession(s);
         setLast(lastMessage(s));
       })
-      .catch((e: RequestError) => setError(e.body));
+      .catch((e: RequestError) => {
+        setError(e.body);
+        onError?.();
+      });
   }, [sessionId]);
+  // in the reader, a mode being prepared is read again until it has something to show: the reader fills the button
+  // by how far it has come, and a workflow that has not reported a job yet is not polled by the reading panel
+  const unprepared = embedded && !!view && !!session && !prepared(view, session);
+  useEffect(() => {
+    if (!unprepared || !sessionId) return;
+    const timer = setInterval(() => {
+      api
+        .session(sessionId)
+        .then(setSession)
+        .catch(() => {});
+    }, PREPARE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [unprepared, sessionId]);
+  const reported = useRef(onSession);
+  reported.current = onSession;
+  useEffect(() => {
+    if (session) reported.current?.(session);
+  }, [session]);
 
   // Restarting a range-based session asks the model for fresh questions on the same range.
   const start = async () => {
@@ -109,6 +141,7 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz
     }
   };
 
+  if (!session && embedded) return error ? <div className="error">{error.detail}</div> : <p className="muted">{t("material.loading")}</p>;
   if (!session) {
     return (
       <div className="panel">
@@ -129,8 +162,20 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz
   const src = session.source;
   const concepts = Object.fromEntries(session.concepts.map((c) => [c.id, c.title]));
 
+  const reading = session.reading && (view === "guide" || !session.reading.done);
+  if (embedded && view === "guide" && session.reading) {
+    return <ReadingPanel session={session} onSession={setSession} continuous />;
+  }
+
   return (
     <>
+      {embedded ? (
+        quiz && (
+          <div className="row actions">
+            <Progress session={session} concepts={concepts} />
+          </div>
+        )
+      ) : (
       <div className="doc-head">
         <div className="doc-meta">
           {src ? (
@@ -155,13 +200,14 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz
           {restarting && <Working label={t("learn.restart.working")} />}
         </div>
       </div>
+      )}
 
       {session.status === "closed" ? (
         <div className="panel notice" data-testid="closed">
           <p>{t("learn.closed")}</p>
         </div>
-      ) : session.reading && !session.reading.done ? (
-        <ReadingPanel session={session} onSession={setSession} autoFinish={autoQuiz} onAutoFinished={onAutoQuizDone} />
+      ) : reading ? (
+        <ReadingPanel session={session} onSession={setSession} autoFinish={autoQuiz} onAutoFinished={onAutoQuizDone} continuous={embedded} />
       ) : session.status === "completed" && session.summary ? (
         <div className="panel" data-testid="summary">
           <h2>{t("learn.summary.title", { verdict: t(session.summary.verdict === "passed" ? "learn.summary.allPassed" : "learn.summary.needsReview") })}</h2>

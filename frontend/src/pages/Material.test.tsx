@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MaterialPage } from "./Material";
 import { mockFetch, session } from "../test/fixtures";
@@ -47,6 +47,15 @@ describe("MaterialPage · reader", () => {
     expect(screen.getByText("參考了這段的導讀", { exact: false })).toBeTruthy();
     expect(calls.find((c) => c.key === "POST /api/materials/m1/ask")?.body).toEqual({ at: 1, question: "葡萄糖從哪來？" });
     expect((box as HTMLTextAreaElement).value).toBe("");
+  });
+
+  test("an Enter that picks the IME's word (keyCode 229, as WebKit sends it) does not send the question", async () => {
+    const { calls } = setup();
+    const box = await screen.findByRole("textbox", { name: "向導師提問" });
+    await userEvent.type(box, "葡萄糖");
+    fireEvent.keyDown(box, { key: "Enter", keyCode: 229 });
+    expect(calls.some((c) => c.key === "POST /api/materials/m1/ask")).toBe(false);
+    expect((box as HTMLTextAreaElement).value).toBe("葡萄糖");
   });
 
   test("a failed question stays in the box with the reason", async () => {
@@ -178,5 +187,64 @@ describe("MaterialPage · English", () => {
     expect(await screen.findByPlaceholderText("Questions about this passage?")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Guide me/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Quiz me/ })).toBeTruthy();
+  });
+});
+
+describe("MaterialPage · 閱讀模式", () => {
+  const quotes = [
+    { id: "quote-01", index: 0, label: "第 1 行", heading: "光合作用", excerpt: "植物 … 葡萄糖。", text: "植物利用陽光製造葡萄糖。", chars: 12, part: 0, unit_id: "u1" },
+    { id: "quote-02", index: 1, label: "第 4 行", heading: "葉綠體", excerpt: "葉綠體 … 地方。", text: "葉綠體是進行光合作用的地方。", chars: 14, part: 0, unit_id: "u4" },
+  ];
+  const guided = session({
+    id: "s9",
+    source: { material_id: "m1", material_title: "光合作用", unit: "line", start: 1, end: 4, label: "第 1–4 行", text: "…" },
+    reading: {
+      index: 1, total: 2, done: false, quotes, parts: [{ index: 0, label: "第 1–4 行", quote_from: 0, quote_to: 1, chars: 26 }],
+      guides: { "0": { chinese_text: null, guide: "原料是水與二氧化碳。", topic_summary: "本主題探討植物如何製造養分。接著談葉綠體。", key_points: [], check: "" } },
+      qa: {}, compacts: {}, quiz_source: null,
+    },
+    concepts: [],
+    current_question: null,
+    state: { concept_order: [], concept_index: 0, phase: "reading", concepts: {} },
+  });
+
+  test("導讀 switches the pages for the guides in place; the TOC lists its parts; pressed again it switches back", async () => {
+    let load = () => {};
+    const loaded = new Promise<void>((r) => (load = r));
+    mockFetch({
+      "GET /api/materials/m1": () => ({ json: material }),
+      "GET /api/materials/m1/study": () => ({ json: study }),
+      "POST /api/materials/m1/study/focus": () => ({ json: study }),
+      "POST /api/materials/m1/study/leave": () => ({ json: study }),
+      "GET /api/materials/m1/questions": () => ({ json: [] }),
+      "GET /api/sessions/s9": () => loaded.then(() => ({ json: guided })),
+      "GET /api/labels/part": () => ({ json: { "m1:u4": "葉綠體在哪裡" } }),
+    });
+    const went: unknown[] = [];
+    render(<MaterialPage id="m1" view={{ kind: "guide", session: "s9" }} library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={(r) => went.push(r)} onOpenSession={() => {}} />);
+    // until the reading is in, the pages stay and the button shows it is working, keeping its label
+    const working = await screen.findByRole("button", { name: /導讀/, busy: true });
+    expect(working.className).toContain("filling");
+    expect(Number(working.style.getPropertyValue("--fill"))).toBeLessThan(1);
+    expect(working.textContent).toBe("導讀");
+    expect(document.querySelector(".reader-body.off")).toBeNull();
+    load();
+    // prepared: the fill runs to the end, and the mode takes the screen no sooner than half a second after the press
+    await waitFor(() => expect(working.style.getPropertyValue("--fill")).toBe("1"));
+    expect(document.querySelector(".reader-body.off")).toBeNull();
+    await waitFor(() => expect(document.querySelector(".reader-body.off")).toBeTruthy());
+    expect(await screen.findByText("原料是水與二氧化碳。")).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole("button", { name: /導讀/, pressed: true }).className).toContain("on"));
+    expect(screen.getByRole("button", { name: /導讀/, pressed: true }).className).not.toContain("filling");
+    // the bar and the box stay; the pages are kept underneath, out of sight, and the range is not named again
+    expect(screen.getByRole("textbox", { name: "向導師提問" })).toBeTruthy();
+    expect(document.querySelector(".reader-body.off")).toBeTruthy();
+    expect(screen.queryByText(/第 2 段，共 2 段/)).toBeNull();
+    const guide = screen.getByRole("button", { name: /導讀/, pressed: true });
+    await userEvent.click(screen.getByRole("button", { name: "導讀段落" }));
+    const items = screen.getAllByRole("menuitem");
+    expect(items.map((x) => x.textContent)).toEqual(["1植物如何製造養分", "2葉綠體在哪裡"]);
+    await userEvent.click(guide);
+    expect(went).toEqual([{ page: "material", id: "m1" }]);
   });
 });

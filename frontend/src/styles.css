@@ -734,6 +734,17 @@ button.block { width: 100%; padding: 9px 14px; }
 /* the standard properties only where ::-webkit-scrollbar is unknown (Firefox): Chromium would let them replace it */
 @supports not selector(::-webkit-scrollbar) { .reader-body { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; } }
 .reader-body > .prose-reader { width: 100%; }
+/* 閱讀模式 (導讀 / 出題): the pages stay laid out and scrolled underneath, out of sight, and the mode takes the body's
+   place, a column of its own with the reader's padding and scrollbar */
+.reader-body.off { position: absolute; top: var(--reader-head-h, 0px); left: 0; right: 0; bottom: 0; visibility: hidden; pointer-events: none; }
+.reader-mode { align-items: stretch; animation: reader-mode-in .18s ease-out; }
+/* loading: laid out out of sight until the reading is in, so the pages give way to it in one step */
+.reader-mode.loading { position: absolute; top: var(--reader-head-h, 0px); left: 0; right: 0; bottom: 0; visibility: hidden; pointer-events: none; animation: none; }
+@keyframes reader-mode-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .reader-mode { animation: none; } }
+.reader-mode-col { width: 100%; max-width: 760px; margin: 0 auto; }
+.reader-mode-col .reading-quote { scroll-margin-top: var(--s4); }
+.reader-mode-col .reading-quote.past { padding-bottom: var(--s5); margin-bottom: var(--s5); border-bottom: 1px solid var(--line); }
 /* PDF: each page a sheet of paper, placed before its image arrives so the column never jumps */
 /* the pages run on as one strip: no gap and no page number between them, a hairline marks where one page ends */
 .pdf-pages {
@@ -781,6 +792,16 @@ button.block { width: 100%; padding: 9px 14px; }
 .reader-toc button.current .toc-num { color: inherit; }
 .reader-toc .toc-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .reader-toc .toc-page { flex: none; padding-left: 6px; font: 11px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 400; }
+/* 閱讀模式's table of contents: a part's description, its pencil shown on hover */
+.guide-toc-row { display: flex; align-items: center; border-radius: 6px; }
+.guide-toc-row > button[role="menuitem"] { flex: 1; min-width: 0; }
+.guide-toc-row > button:disabled { opacity: .5; }
+.reader-toc .guide-toc-edit { flex: none; width: 26px; display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: none; background: transparent; color: var(--muted); opacity: 0; }
+.reader-toc .guide-toc-row:hover .guide-toc-edit, .reader-toc .guide-toc-edit:focus-visible { opacity: 1; }
+.reader-toc .guide-toc-edit:hover { color: var(--ink); background: transparent; }
+.guide-toc-row.naming { gap: 8px; padding: 4px 10px; }
+.guide-toc-row.naming .toc-num { flex: none; font: 11.5px var(--mono); color: var(--muted); }
+.guide-toc-row.naming input { flex: 1; min-width: 0; padding: 4px 6px; font-size: var(--t-small); }
 /* the material's colophon (the reader's ⋯): cover and title, category, a ledger of what the file is and holds, files, delete */
 .reader-card {
   position: absolute; z-index: 9; top: calc(100% + 8px); right: 0; width: 304px; overflow: hidden;
@@ -931,6 +952,18 @@ button.block { width: 100%; padding: 9px 14px; }
 .reader-action .icon { color: var(--muted); }
 .reader-action:hover:not(:disabled) { background: var(--hover); border-color: var(--line-strong); }
 .reader-action:disabled { opacity: .55; }
+/* 導讀 / 出題 are switches: on while the reader is in that mode */
+.reader-action.on { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.reader-action.on .icon { color: inherit; }
+.reader-action.on:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+/* a switch into a mode under way: the button fills from the left with the 'on' colour, like a charging battery, as
+   far as the mode is prepared (--fill, 0–1); the label stays. The last step takes FILL_SETTLE_MS (Material.tsx) */
+.reader-action.filling { position: relative; isolation: isolate; overflow: hidden; opacity: 1; border-color: var(--line-strong); }
+.reader-action.filling::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background: var(--accent-soft);
+  transform-origin: left center; transform: scaleX(var(--fill, 0)); transition: transform var(--fill-ms, .3s) ease-out;
+}
+.reader-action.filling .icon { color: var(--accent); }
 .reader-send {
   display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: none; border-radius: 50%;
   background: var(--accent); color: var(--accent-ink); transition: opacity .2s ease, transform .2s ease;

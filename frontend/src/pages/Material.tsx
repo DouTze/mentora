@@ -6,21 +6,28 @@
 // from the units on that page.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, RequestError } from "../api";
-import type { Bookmark, Library, MaterialDetail, PdfInfo, PdfOutlineItem, PdfPageLayer, ReaderQuestion, StudyView } from "../types";
-import type { Route } from "../route";
+import type { Bookmark, Guide, Library, MaterialDetail, PdfInfo, PdfOutlineItem, PdfPageLayer, Quote, ReaderQuestion, SessionView, StudyView } from "../types";
+import type { ReaderView, Route } from "../route";
 import { Icon } from "../components/Icons";
 import { PdfLayer } from "../components/PdfLayer";
 import { RichText } from "../components/RichText";
 import { Select } from "../components/Select";
 import { Working } from "../components/Working";
+import { quoteAnchor } from "../components/ReadingPanel";
+import { LearnPage } from "./Learn";
+import { FINDING, MIN_SWITCH_MS, prepared, progressOf, type ModeKind } from "../readerMode";
 import { useT } from "../i18n";
+import { composing } from "../ime";
 
 interface Props {
   id: string;
+  /** 閱讀模式: the book switched to the 導讀 or 出題 of one reading. The bar and the question box stay; only the
+   *  pages give way (kept as they were underneath, so switching back finds the reader where it was) */
+  view?: ReaderView | null;
   library: Library;
   onLibraryChange: () => Promise<unknown>;
   onNavigate: (r: Route) => void;
-  onOpenSession: (id: string, opts?: { quiz?: boolean }) => void;
+  onOpenSession: (id: string, opts?: { quiz?: boolean; material?: string }) => void;
   /** this material's bookmarks (App keeps every book's, the sidebar lists them) */
   bookmarks?: Bookmark[];
   onBookmarks?: (id: string, marks: Bookmark[]) => void;
@@ -31,6 +38,8 @@ interface Props {
 }
 
 const STUDY_POLL_MS = 3000;
+const FILL_STEP_MS = 300;        // the fill's steps as the mode is prepared
+const FILL_SETTLE_MS = 250;      // its last step at least: the mode takes the screen when the fill is full
 const EXTRACT_POLL_MS = 2000;
 const NO_MARKS: Bookmark[] = [];
 export const POSITION_KEY = (id: string) => `mentor.reader.at.${id}`;
@@ -503,13 +512,27 @@ function StudyBadge({ study, onAction }: { study: StudyView | null; onAction: (a
 }
 
 // -- the question box ---------------------------------------------------------------------------
-function Composer({ material, at, unitWord, onOpenSession }: { material: MaterialDetail; at: number; unitWord: string; onOpenSession: Props["onOpenSession"] }) {
+/** 導讀 and 出題 are switches: on, the reader shows that mode (the reading of the part being read, started or taken
+ * up again); pressed again, the pages come back. From one mode the other goes on with the same reading. A switch
+ * into a mode fills its button from the left, like a charging battery, as far as the mode is prepared. */
+function Composer({ material, at, unitWord, mode, fill, onPress, onOpenSession, onMode }: {
+  material: MaterialDetail;
+  at: number;
+  unitWord: string;
+  /** the mode on screen */
+  mode: ReaderView | null;
+  /** a switch under way: its button fills from the left as the mode is prepared (0–1) */
+  fill: { kind: ModeKind; p: number; ms: number } | null;
+  /** a press that has to wait for the reading (found or started first); null when that failed */
+  onPress: (kind: ModeKind | null) => void;
+  onOpenSession: Props["onOpenSession"];
+  onMode: (v: ReaderView | null) => void;
+}) {
   const t = useT();
   const [text, setText] = useState("");
   const [qa, setQa] = useState<ReaderQuestion[]>([]);
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
-  const [going, setGoing] = useState<"guide" | "quiz" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const thread = useRef<HTMLDivElement>(null);
@@ -560,18 +583,20 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
 
   const learn = async (kind: "guide" | "quiz") => {
     setError(null);
-    setGoing(kind);
+    if (mode?.kind === kind) return onMode(null);
+    if (mode) return onMode({ kind, session: mode.session });
+    onPress(kind);
     try {
       const s = await api.readerLearn(material.id, at);
-      onOpenSession(s.id, { quiz: kind === "quiz" });
+      onOpenSession(s.id, { quiz: kind === "quiz", material: material.id });
     } catch (e) {
       setError((e as RequestError).body?.detail ?? String(e));
-      setGoing(null);
+      onPress(null);
     }
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.key === "Enter" && !e.shiftKey && !composing(e)) {
       e.preventDefault();
       send();
     } else if (e.key === "Escape" && open) {
@@ -643,13 +668,13 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
             </button>
           )}
           <span className="spacer" />
-          <button type="button" className="reader-action" onClick={() => learn("guide")} disabled={!!going || blocked} title={t("reader.guide.hint", { unit: unitWord })}>
+          <button type="button" className={`reader-action ${mode?.kind === "guide" && !fill ? "on" : ""} ${fill?.kind === "guide" ? "filling" : ""}`} style={fill?.kind === "guide" ? ({ "--fill": fill.p, "--fill-ms": `${fill.ms}ms` } as React.CSSProperties) : undefined} aria-pressed={mode?.kind === "guide"} aria-busy={fill?.kind === "guide" || undefined} onClick={() => learn("guide")} disabled={!!fill || blocked} title={mode?.kind === "guide" ? t("reader.mode.off") : t("reader.guide.hint", { unit: unitWord })}>
             <Icon.book />
-            {going === "guide" ? t("reader.going") : t("reader.guide")}
+            {t("reader.guide")}
           </button>
-          <button type="button" className="reader-action" onClick={() => learn("quiz")} disabled={!!going || blocked} title={t("reader.quiz.hint", { unit: unitWord })}>
+          <button type="button" className={`reader-action ${mode?.kind === "quiz" && !fill ? "on" : ""} ${fill?.kind === "quiz" ? "filling" : ""}`} style={fill?.kind === "quiz" ? ({ "--fill": fill.p, "--fill-ms": `${fill.ms}ms` } as React.CSSProperties) : undefined} aria-pressed={mode?.kind === "quiz"} aria-busy={fill?.kind === "quiz" || undefined} onClick={() => learn("quiz")} disabled={!!fill || blocked} title={mode?.kind === "quiz" ? t("reader.mode.off") : t("reader.quiz.hint", { unit: unitWord })}>
             <Icon.quiz />
-            {going === "quiz" ? t("reader.going") : t("reader.quiz")}
+            {t("reader.quiz")}
           </button>
           <button type="submit" className="reader-send" disabled={!text.trim() || !!pending || blocked} aria-label={t("reader.send")}>
             <Icon.arrowUp />
@@ -750,6 +775,131 @@ function OutlineMenu({ info, at, onGoto }: { info: PdfInfo; at: number; onGoto: 
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** What a part of a 導讀 is called in the table of contents unless renamed: the start of its 「這一段在講」, else
+ * its heading. */
+function partDefault(q: Quote, g: Guide | undefined): string | null {
+  const s = (g?.topic_summary ?? "").replace(/\s+/g, " ").trim();
+  if (s) {
+    // the subject, without the summary's 「本主題探討…」 lead-in
+    const first = s
+      .split(/(?<=[。！？；.!?;])/)[0]
+      .replace(/[。．.；;]$/, "")
+      .replace(/^(本(主題|段落?|節|章|部分)|這一?段)(主要)?(在)?(探討|說明|介紹|講述|描述|討論|談|講)(了|的是)?[，,：:]?\s*/, "");
+    return first.length > 28 ? `${first.slice(0, 28)}…` : first;
+  }
+  return q.heading;
+}
+
+/** 閱讀模式's table of contents: the reading's 段落 (quotes), each by a short description the reader can edit
+ * (by default the start of what the guide says the part is about). The ones already guided are on the page above
+ * the current one, so picking one scrolls to it; the ones still ahead are listed, not yet open. */
+function GuideOutline({ material, session }: { material: string; session: SessionView | null }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [names, setNames] = useState<Record<string, string>>({});
+  const [editing, setEditing] = useState<string | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    api
+      .labels("part")
+      .then(setNames)
+      .catch(() => {});
+    list.current?.querySelector(".current")?.scrollIntoView({ block: "center" });
+    const onDown = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
+    const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && !(e.target instanceof HTMLInputElement) && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const rd = session?.reading ?? null;
+  const reached = rd ? (rd.done ? rd.total - 1 : rd.index) : -1;
+  const rename = (ref: string, label: string | null) => {
+    setEditing(null);
+    if (label === null) return;
+    api
+      .setLabel("part", ref, label)
+      .then(setNames)
+      .catch(() => {});
+  };
+  return (
+    <div className="reader-more" ref={box}>
+      <button type="button" className="icon-btn" aria-haspopup="menu" aria-expanded={open} aria-label={t("reader.guide.toc")} title={t("reader.guide.toc")} onClick={() => setOpen((v) => !v)} disabled={!rd}>
+        <Icon.toc />
+      </button>
+      {open && rd && (
+        <div className="menu reader-menu reader-toc guide-toc" role="menu" ref={list}>
+          {rd.quotes.map((q, i) => {
+            const ref = `${material}:${q.unit_id ?? q.id}`;
+            const fallback = partDefault(q, rd.guides[String(i)]) ?? t("reader.guide.part", { n: i + 1 });
+            const name = names[ref] ?? fallback;
+            const current = !rd.done && i === rd.index;
+            if (editing === ref) {
+              return (
+                <PartNameInput key={q.id} num={i + 1} initial={names[ref] ?? fallback} placeholder={fallback} label={t("reader.guide.rename")} onDone={(v) => rename(ref, v === fallback ? "" : v)} />
+              );
+            }
+            return (
+              <div key={q.id} className={`guide-toc-row ${current ? "current" : ""}`}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={current ? "current" : undefined}
+                  disabled={i > reached}
+                  title={i > reached ? t("reader.guide.ahead") : undefined}
+                  onClick={() => {
+                    setOpen(false);
+                    document.getElementById(quoteAnchor(i))?.scrollIntoView({ block: "start" });
+                  }}
+                >
+                  <span className="toc-num">{i + 1}</span>
+                  <span className="toc-title">{name}</span>
+                </button>
+                <button type="button" className="guide-toc-edit" aria-label={t("reader.guide.rename")} title={t("reader.guide.rename")} onClick={() => setEditing(ref)}>
+                  <Icon.pencil />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PartNameInput({ num, initial, placeholder, label, onDone }: { num: number; initial: string; placeholder: string; label: string; onDone: (v: string | null) => void }) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const finish = (v: string | null) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(v === null ? null : v.trim());
+  };
+  return (
+    <div className="guide-toc-row naming">
+      <span className="toc-num">{num}</span>
+      <input
+        autoFocus
+        aria-label={label}
+        placeholder={placeholder}
+        value={value}
+        maxLength={80}
+        onChange={(e) => setValue(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        onBlur={() => finish(value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !composing(e)) finish(value);
+          if (e.key === "Escape") finish(null);
+        }}
+      />
     </div>
   );
 }
@@ -911,7 +1061,7 @@ function storedZoom(kind: string): Zoom {
 }
 
 // -- the page -----------------------------------------------------------------------------------------
-export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenSession, bookmarks = NO_MARKS, onBookmarks, jump = null, onPosition }: Props) {
+export function MaterialPage({ id, view = null, library, onLibraryChange, onNavigate, onOpenSession, bookmarks = NO_MARKS, onBookmarks, jump = null, onPosition }: Props) {
   const t = useT();
   const [material, setMaterial] = useState<MaterialDetail | null>(null);
   const [title, setTitle] = useState("");
@@ -921,6 +1071,48 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
   const [study, studyAction] = useStudy(id);
   const menuBox = useRef<HTMLDivElement>(null);
   const gotoRef = useRef<Goto | null>(null);
+  // 閱讀模式. `view` (the route) is the mode asked for; `onScreen` the one on screen. A mode asked for is laid out out
+  // of sight while its reading is found, loaded and prepared (its button filling as it goes, for at least
+  // MIN_SWITCH_MS), and takes the screen once it has something to show; the pages or the mode before stay until then.
+  // Back to the pages is at once.
+  const [onScreen, setOnScreen] = useState<ReaderView | null>(null);
+  const [switching, setSwitching] = useState<{ kind: ModeKind; since: number } | null>(null);
+  const [sessions, setSessions] = useState<Record<string, SessionView>>({});
+  const [failed, setFailed] = useState<string | null>(null);
+  const keyOf = (v: ReaderView | null) => (v ? `${v.kind}:${v.session}` : "");
+  const viewKey = keyOf(view);
+  const shownKey = keyOf(onScreen);
+  const asked = view && viewKey !== shownKey ? view : null;
+  useEffect(() => {
+    if (!view) {
+      setOnScreen(null);
+      setSwitching(null);
+      return;
+    }
+    if (viewKey !== shownKey) setSwitching((w) => (w?.kind === view.kind ? w : { kind: view.kind, since: Date.now() }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewKey]);
+  const askedSession = asked ? (sessions[viewKey] ?? null) : null;
+  const ready = !!asked && (failed === viewKey || (!!askedSession && prepared(asked.kind, askedSession)));
+  // the last stretch of the fill runs out the switch's minimum time, then the mode takes the screen
+  const finishMs = useMemo(
+    () => (ready && switching ? Math.max(MIN_SWITCH_MS - (Date.now() - switching.since), FILL_SETTLE_MS) : 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ready, viewKey],
+  );
+  const fill = switching ? { kind: switching.kind, p: ready ? 1 : asked ? progressOf(asked.kind, askedSession) : FINDING, ms: ready ? finishMs : FILL_STEP_MS } : null;
+  useEffect(() => {
+    if (!ready || !asked || !switching) return;
+    const t = setTimeout(() => {
+      setOnScreen(asked);
+      setSwitching(null);
+    }, finishMs);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, viewKey]);
+  // zooming is for the pages: not while they are switched away
+  const viewing = useRef(false);
+  viewing.current = !!onScreen;
   const [info, setInfo] = useState<PdfInfo | null>(null);
   useEffect(() => {
     setInfo(null);
@@ -972,7 +1164,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
       if (!frame) frame = requestAnimationFrame(apply);
     };
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) {
+      if (!e.ctrlKey || viewing.current) {
         focus.current = null;
         return;
       }
@@ -983,11 +1175,13 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
     let base = 1;
     let last = 1;
     const onGestureStart = (e: Event) => {
+      if (viewing.current) return;
       e.preventDefault();
       base = zoomRef.current.shown;
       last = 1;
     };
     const onGestureChange = (e: Event) => {
+      if (viewing.current) return;
       e.preventDefault();
       const g = e as Event & { scale: number; clientX: number; clientY: number };
       const target = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, base * g.scale));
@@ -1023,7 +1217,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
   zoomRef.current = { shown, setZoom };
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || viewing.current) return;
       const { shown: cur, setZoom: set } = zoomRef.current;
       focus.current = null;
       const near = (dir: 1 | -1) => (dir > 0 ? ZOOM_STEPS.find((x) => x > cur + 0.001) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1] : [...ZOOM_STEPS].reverse().find((x) => x < cur - 0.001) ?? ZOOM_STEPS[0]);
@@ -1165,10 +1359,11 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             onBlur={() => (title.trim() && title.trim() !== material.title ? patch({ title: title.trim() }) : setTitle(material.title))}
-            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            onKeyDown={(e) => e.key === "Enter" && !composing(e) && e.currentTarget.blur()}
           />
         </div>
         <StudyBadge study={study} onAction={studyAction} />
+        {!onScreen && (
         <button
           type="button"
           className={`icon-btn reader-mark ${marked ? "on" : ""}`}
@@ -1180,7 +1375,12 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
         >
           <Icon.bookmark filled={marked} />
         </button>
-        {info && info.outline.length > 0 && <OutlineMenu info={info} at={at} onGoto={(p, y) => gotoRef.current?.(p, y)} />}
+        )}
+        {onScreen ? (
+          <GuideOutline material={material.id} session={sessions[shownKey] ?? null} />
+        ) : (
+          info && info.outline.length > 0 && <OutlineMenu info={info} at={at} onGoto={(p, y) => gotoRef.current?.(p, y)} />
+        )}
         <div className="reader-more" ref={menuBox}>
           <button type="button" className="icon-btn" aria-haspopup="dialog" aria-expanded={menu} aria-label={t("reader.more")} onClick={() => setMenu((v) => !v)}>
             <Icon.more />
@@ -1198,14 +1398,43 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
         </div>
       </header>
       {error && <div className="error reader-page-error">{error}</div>}
-      <div className="reader-body" aria-label={t("material.content")}>
+      {/* the pages stay laid out (and scrolled) under the mode, so switching back is instant and in place */}
+      <div className={`reader-body ${onScreen ? "off" : ""}`} aria-label={t("material.content")} aria-hidden={onScreen ? true : undefined}>
         {material.kind === "pdf" ? (
           <PdfReader material={material} at={at} zoom={zoom} focus={focus} gotoRef={gotoRef} onAt={onAt} onScale={setShown} />
         ) : (
           <TextReader material={material} at={at} scale={"scale" in zoom ? zoom.scale : 1} onAt={onAt} />
         )}
       </div>
-      <Composer material={material} at={at} unitWord={unitWord} onOpenSession={onOpenSession} />
+      {/* the mode on screen and the one being prepared, one list by key: the prepared one keeps its page when shown */}
+      {[onScreen, asked].filter((v): v is ReaderView => !!v).map((v) => {
+        const key = keyOf(v);
+        return (
+          <div className={`reader-body reader-mode ${key === shownKey ? "" : "loading"}`} key={key} aria-hidden={key === shownKey ? undefined : true}>
+            <div className="reader-mode-col">
+              <LearnPage
+                embedded
+                view={v.kind}
+                sessionId={v.session}
+                autoQuiz={v.kind === "quiz"}
+                onSession={(x) => setSessions((all) => (all[key] === x ? all : { ...all, [key]: x }))}
+                onError={() => setFailed(key)}
+                onSessionChange={(sid) => onNavigate({ page: "material", id: material.id, view: { kind: v.kind, session: sid } })}
+              />
+            </div>
+          </div>
+        );
+      })}
+      <Composer
+        material={material}
+        at={at}
+        unitWord={unitWord}
+        mode={onScreen}
+        fill={fill}
+        onPress={(kind) => setSwitching(kind ? { kind, since: Date.now() } : null)}
+        onOpenSession={onOpenSession}
+        onMode={(v) => onNavigate(v ? { page: "material", id: material.id, view: v } : { page: "material", id: material.id })}
+      />
     </div>
   );
 }

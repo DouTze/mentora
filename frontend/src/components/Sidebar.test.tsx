@@ -20,7 +20,7 @@ function setup(over: Partial<Parameters<typeof Sidebar>[0]> = {}) {
   let settings = 0;
   const props = {
     library, route: { page: "home" } as Route, companion: "owl" as const, conn: { status: "ok" as const, active: { backend: "ollama", model: "qwen3-vl:4b", simulated: false, host: "http://127.0.0.1:11434" }, detail: "" },
-    hasSession: false, collapsed: false,
+    collapsed: false,
     onToggle: () => toggled++, onNavigate: (r: Route) => visited.push(r), onLibraryChange: async () => {}, onOpenSettings: () => settings++, ...over,
   };
   render(<Sidebar {...props} />);
@@ -229,7 +229,7 @@ describe("Sidebar · folded", () => {
   test("hovering the rail floats the whole sidebar; leaving folds it again", async () => {
     mockFetch({});
     render(
-      <Sidebar library={{ categories: [], materials: [] }} route={{ page: "home" }} companion="owl" conn={{ status: "idle", active: null, detail: "" }} hasSession={false}
+      <Sidebar library={{ categories: [], materials: [] }} route={{ page: "home" }} companion="owl" conn={{ status: "idle", active: null, detail: "" }}
         collapsed onToggle={() => {}} onNavigate={() => {}} onLibraryChange={async () => {}} onOpenSettings={() => {}} />,
     );
     expect(document.querySelector(".sidebar.peek")).toBeNull();
