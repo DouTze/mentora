@@ -28,4 +28,5 @@ def test_bookmarks_and_guided_readings_take_names_of_their_own(client):
     assert client.put("/api/labels/session/s1", json={"label": "第一次讀"}).json() == {"s1": "第一次讀"}
     assert client.get("/api/labels/session").json() == {"s1": "第一次讀"}
     assert client.put("/api/labels/session/s1", json={"label": " "}).json() == {}      # back to its range
+    assert client.put("/api/labels/part/m1:u3", json={"label": "光反應"}).json() == {"m1:u3": "光反應"}
     assert client.get("/api/labels/other").status_code == 404

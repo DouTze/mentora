@@ -1,6 +1,10 @@
 """Names the person gives to things in the sidebar, kept apart from the things themselves: a guided reading (a
 session) shows its range ("第 3–5 頁") unless it was named. Only what the sidebar shows changes; the session is
-left as it is (its workflow owns it)."""
+left as it is (its workflow owns it).
+
+A "part" is one 段落 of a 導讀 as the reader's table of contents lists it, keyed "<material id>:<unit id>": its short
+description there, in place of the start of the guide's 「這一段在講」. Readings of one part share the unit ids, so
+the description stays with the part across readings."""
 from __future__ import annotations
 
 from .db import Database, now_iso
@@ -14,7 +18,7 @@ CREATE TABLE IF NOT EXISTS labels (
   PRIMARY KEY (kind, ref)
 );
 """
-KINDS = ("session",)
+KINDS = ("session", "part")
 
 
 class Labels:

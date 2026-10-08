@@ -106,9 +106,9 @@ export const api = {
   renameBookmark: (id: string, n: number, label: string) =>
     call<Bookmark[]>(`/materials/${id}/bookmarks/${n}`, { method: "PATCH", body: JSON.stringify({ label }) }),
   /** names given in the sidebar: a guided reading's ("session") by its session id */
-  labels: (kind: "session") => call<Record<string, string>>(`/labels/${kind}`),
-  setLabel: (kind: "session", ref: string, label: string) =>
-    call<Record<string, string>>(`/labels/${kind}/${ref}`, { method: "PUT", body: JSON.stringify({ label }) }),
+  labels: (kind: "session" | "part") => call<Record<string, string>>(`/labels/${kind}`),
+  setLabel: (kind: "session" | "part", ref: string, label: string) =>
+    call<Record<string, string>>(`/labels/${kind}/${encodeURIComponent(ref)}`, { method: "PUT", body: JSON.stringify({ label }) }),
   removeBookmark: (id: string, n: number) => call<Bookmark[]>(`/materials/${id}/bookmarks/${n}`, { method: "DELETE" }),
   materialInfo: (id: string) => call<PdfInfo>(`/materials/${id}/info`),
   materialPageLayer: (id: string, n: number) => call<PdfPageLayer>(`/materials/${id}/pages/${n}/layer`),

@@ -3,19 +3,22 @@ import { useEffect, useState } from "react";
 
 export type Route =
   | { page: "home" }
-  | { page: "material"; id: string }
+  /** `view`: the book switched to its 導讀 or 出題 of one reading, in place of the pages (the reader's 閱讀模式) */
+  | { page: "material"; id: string; view?: ReaderView }
   | { page: "learn" }
   | { page: "history" };
 
+export type ReaderView = { kind: "guide" | "quiz"; session: string };
+
 export function parseRoute(hash: string): Route {
-  const [, a, b] = hash.replace(/^#/, "").split("/");
-  if (a === "m" && b) return { page: "material", id: b };
+  const [, a, b, c, d] = hash.replace(/^#/, "").split("/");
+  if (a === "m" && b) return (c === "guide" || c === "quiz") && d ? { page: "material", id: b, view: { kind: c, session: d } } : { page: "material", id: b };
   if (a === "learn" || a === "history") return { page: a };
   return { page: "home" };
 }
 
 export function toHash(r: Route): string {
-  return r.page === "material" ? `#/m/${r.id}` : r.page === "home" ? "#/" : `#/${r.page}`;
+  return r.page === "material" ? `#/m/${r.id}${r.view ? `/${r.view.kind}/${r.view.session}` : ""}` : r.page === "home" ? "#/" : `#/${r.page}`;
 }
 
 export function useRoute(): [Route, (r: Route) => void] {

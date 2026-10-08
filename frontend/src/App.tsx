@@ -94,9 +94,13 @@ export function App() {
 
   // 出題 from the reader: the learning page goes on to the questions once the first guide is shown
   const [quizFor, setQuizFor] = useState<string | null>(null);
-  const openSession = (id: string, opts?: { quiz?: boolean }) => {
+  // a reading of a book opens in that book's reader, switched to its 導讀 (or 出題); one without a book (the demo)
+  // has the learning page
+  const openSession = async (id: string, opts?: { quiz?: boolean; material?: string }) => {
     localStorage.setItem("mentor.sessionId", id);
     setSessionId(id);
+    const material = opts?.material ?? (await api.session(id).then((s) => s.source?.material_id ?? null, () => null));
+    if (material) return navigate({ page: "material", id: material, view: { kind: opts?.quiz ? "quiz" : "guide", session: id } });
     setQuizFor(opts?.quiz ? id : null);
     navigate({ page: "learn" });
   };
@@ -110,12 +114,11 @@ export function App() {
         route={route}
         companion={companion}
         conn={conn}
-        hasSession={!!sessionId}
         sessionId={sessionId}
         bookmarks={bookmarks}
         readingAt={readingAt}
         onOpenPage={openPage}
-        onOpenSession={openSession}
+        onOpenSession={(id, material) => openSession(id, { material })}
         onRenameBookmark={(id, n, label) => api.renameBookmark(id, n, label).then((m) => setBookMarks(id, m)).catch(() => {})}
         onRemoveBookmark={(id, n) => api.removeBookmark(id, n).then((m) => setBookMarks(id, m)).catch(() => {})}
         collapsed={collapsed}
@@ -131,6 +134,7 @@ export function App() {
         {route.page === "material" && (
           <MaterialPage
             id={route.id}
+            view={route.view ?? null}
             library={library}
             onLibraryChange={refreshLibrary}
             onNavigate={navigate}
