@@ -1,5 +1,5 @@
-"""Helpers shared by the reading sessions (app/workflows): the session's initial reading state, the language test
-behind the 中文課文 rule, excerpts for labels, and the Q&A history given to the tutor when the reader asks."""
+"""Helpers shared by the reading sessions (app/workflows): the session's initial reading state, the language the
+model writes in, excerpts for labels, and the Q&A history given to the tutor when the reader asks."""
 from __future__ import annotations
 
 import re
@@ -8,7 +8,6 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 ASK_HISTORY_LIMIT = 8   # exchanges from earlier quotes kept in the prompt (the current quote's are always all kept)
-CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 def _excerpt(text: str, head: int = 24, tail: int = 16) -> str:
@@ -42,16 +41,30 @@ class Answer(BaseModel):
     answer: str = Field(min_length=1)
 
 
-def is_chinese(text: str) -> bool:
-    """True when the text is (mostly) written in Chinese; then no 中文課文 is needed."""
-    letters = [c for c in text if c.isalpha()]
-    return bool(letters) and len(CJK_RE.findall(text)) / len(letters) >= 0.3
+def guide_language(material: dict) -> str:
+    """What the model writes in for a session on this material: "zh-TW" when the material asks for its guides in
+    繁體中文, else "source" (the material's own language). Sessions from before this setting were all "zh-TW"."""
+    return "zh-TW" if material.get("translate_zh") else "source"
 
 
-def chinese_text_rule(quote: dict) -> str:
-    if is_chinese(quote["text"]):
-        return "這一段原文已經是中文：chinese_text 填 null。"
-    return "這一段原文不是中文：chinese_text **必填**，不得為 null 或空字串。"
+LANGUAGE_FIELDS = {
+    "zh-TW": {"language": "繁體中文", "language_rule": "一律使用繁體中文（台灣用語）。"},
+    "source": {"language": "原文的語言",
+               "language_rule": "一律使用原文的語言撰寫：原文是英文就用英文，原文是中文就用繁體中文（台灣用語），其他語言亦同；"
+                                "不要翻譯成其他語言。"},
+}
+
+
+def with_language(prompts: dict[str, str], language: str = "zh-TW") -> dict[str, str]:
+    """The prompts with the language fields ({{language}}, {{language_rule}}) filled for a session's guide language.
+    Prompts from before these fields have nothing to fill and stay as they were."""
+    fields = LANGUAGE_FIELDS.get(language, LANGUAGE_FIELDS["zh-TW"])
+    out = {}
+    for k, text in prompts.items():
+        for f, v in fields.items():
+            text = text.replace("{{" + f + "}}", v)
+        out[k] = text
+    return out
 
 
 def ask_history(quotes: list[dict], rd: dict, index: int) -> list[dict]:

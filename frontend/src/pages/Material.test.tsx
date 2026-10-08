@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MaterialPage } from "./Material";
 import { mockFetch, session } from "../test/fixtures";
 
-const material = { id: "m1", category_id: null, title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 4, created_at: "", units: ["# 光合作用", "", "植物利用陽光製造葡萄糖。", "葉綠體是進行光合作用的地方。"] };
+const material = { id: "m1", category_id: null, title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 4, created_at: "", translate_zh: false, units: ["# 光合作用", "", "植物利用陽光製造葡萄糖。", "葉綠體是進行光合作用的地方。"] };
 
 afterEach(cleanup);
 

@@ -65,7 +65,7 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
     setRange([n, n]);
   };
 
-  const patch = async (p: { title?: string; category_id?: string | null }) => {
+  const patch = async (p: { title?: string; category_id?: string | null; translate_zh?: boolean }) => {
     setError(null);
     try {
       const m = await api.updateMaterial(material.id, p);
@@ -220,6 +220,14 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
               <span>{t(material.unit === "page" ? "material.range.hint.page" : "material.range.hint.line")}</span>
             )}
           </div>
+
+          <label className="translate-zh">
+            <input type="checkbox" checked={material.translate_zh} onChange={(e) => patch({ translate_zh: e.target.checked })} />
+            <span>
+              {t("material.translateZh")}
+              <small className="muted">{t("material.translateZh.note")}</small>
+            </span>
+          </label>
 
           {error && (
             <div className="error" role="alert">

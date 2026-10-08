@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS materials (
   unit TEXT NOT NULL,
   unit_count INTEGER NOT NULL,
   units TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  translate_zh INTEGER NOT NULL DEFAULT 0   -- 1: guides of a non-Chinese material are written in 繁體中文
 );
 """
 
@@ -167,6 +168,8 @@ class MaterialStore:
         self.files_dir = files_dir or (Path(db.path).parent / "materials" if db.path != ":memory:" else config.DATA_DIR / "materials")
         with db.conn() as c:
             c.executescript(SCHEMA)
+            if "translate_zh" not in {r[1] for r in c.execute("PRAGMA table_info(materials)")}:
+                c.execute("ALTER TABLE materials ADD COLUMN translate_zh INTEGER NOT NULL DEFAULT 0")
 
     # -- categories ---------------------------------------------------------
     def list_categories(self) -> list[dict]:
@@ -197,11 +200,17 @@ class MaterialStore:
             raise MaterialError("not_found", "找不到這個分類")
 
     # -- materials ----------------------------------------------------------
-    META = "id, category_id, title, filename, kind, unit, unit_count, created_at"
+    META = "id, category_id, title, filename, kind, unit, unit_count, created_at, translate_zh"
+
+    @staticmethod
+    def _row(row) -> dict:
+        d = dict(row)
+        d["translate_zh"] = bool(d["translate_zh"])
+        return d
 
     def list(self) -> list[dict]:
         with self.db.conn() as c:
-            return [dict(r) for r in c.execute(f"SELECT {self.META} FROM materials ORDER BY created_at")]
+            return [self._row(r) for r in c.execute(f"SELECT {self.META} FROM materials ORDER BY created_at")]
 
     def add(self, filename: str, data: bytes, category_id: str | None) -> dict:
         kind = KINDS.get(Path(filename).suffix.lower())
@@ -213,7 +222,8 @@ class MaterialStore:
         self.files_dir.mkdir(parents=True, exist_ok=True)
         (self.files_dir / f"{mid}.{kind}").write_bytes(data)
         with self.db.conn() as c:
-            c.execute("INSERT INTO materials VALUES (?,?,?,?,?,?,?,?,?)",
+            c.execute("INSERT INTO materials (id, category_id, title, filename, kind, unit, unit_count, units, created_at) "
+                      "VALUES (?,?,?,?,?,?,?,?,?)",
                       (mid, category_id or None, Path(filename).stem, filename, kind,
                        "page" if kind == "pdf" else "line", len(units), json.dumps(units, ensure_ascii=False), now_iso()))
         return self.get(mid, with_units=False)
@@ -223,14 +233,17 @@ class MaterialStore:
             row = c.execute(f"SELECT {self.META}{', units' if with_units else ''} FROM materials WHERE id=?", (mid,)).fetchone()
         if not row:
             raise MaterialError("not_found", "找不到這份教材")
-        d = dict(row)
+        d = self._row(row)
         if with_units:
             d["units"] = json.loads(d["units"])
         return d
 
-    def update(self, mid: str, *, title: str | None, category_id: str | None, set_category: bool) -> dict:
+    def update(self, mid: str, *, title: str | None, category_id: str | None, set_category: bool,
+               translate_zh: bool | None = None) -> dict:
         self.get(mid, with_units=False)
         with self.db.conn() as c:
+            if translate_zh is not None:
+                c.execute("UPDATE materials SET translate_zh=? WHERE id=?", (int(translate_zh), mid))
             if title is not None and title.strip():
                 c.execute("UPDATE materials SET title=? WHERE id=?", (title.strip(), mid))
             if set_category:

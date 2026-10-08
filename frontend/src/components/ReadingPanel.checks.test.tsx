@@ -58,8 +58,16 @@ describe("published guides with unchecked spots", () => {
                      { kind: "coverage", source: "η 是學習率", guide: "學習率" }]));
     render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
     expect(await screen.findByTestId("guide")).toHaveTextContent("梯度下降沿負梯度更新參數");
-    expect(screen.getByTestId("unverified")).toHaveTextContent("這段導讀有 2 處沒能自動核對");
+    expect(screen.getByTestId("unverified")).toHaveTextContent("這段導讀有 2 個提醒");
     expect(screen.getByTestId("unverified")).toHaveTextContent("原文「η 是學習率」在導讀中的寫法沒能自動確認一致");
+  });
+
+  test("a handout's notes are shown as written", async () => {
+    serve(published([{ kind: "note", text: "這段講義可能沒有教到：學習率的意義", code: "point_missing" }]));
+    render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
+    await screen.findByTestId("guide");
+    expect(screen.getByTestId("unverified")).toHaveTextContent("這段導讀有 1 個提醒");
+    expect(screen.getByTestId("unverified")).toHaveTextContent("這段講義可能沒有教到：學習率的意義");
   });
 
   test("no note when everything was checked (and for guides published before the field existed)", async () => {

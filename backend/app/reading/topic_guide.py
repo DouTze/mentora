@@ -3,15 +3,16 @@
 The learning graph runs the guided-reading subgraph once per 區塊 — the same steps, checks and budget as before,
 on a paragraph instead of a whole topic — and keeps what each produced. This module holds the program side: the
 task of one 區塊, the 主題總摘要 prompt and its fallback, and the 主題's artifact assembled from its 區塊. The page
-shows source 區塊 and guide 區塊 alternately; the top-level fields (guide, source_claims, key_points …) keep the
-shape the notes, questions, Q&A and export already read."""
+shows source 區塊 and guide 區塊 alternately; the top-level fields (guide, key_points, check …) keep the shape the
+notes, questions, Q&A and export already read. Handouts carry no verified claims: notes and questions of a 主題 read
+its source text (notes.quiz_basis)."""
 from __future__ import annotations
 
 from typing import Any
 
 from .agent import ReadingTaskInput
 
-TOPIC_GUIDE_VERSION = "topic-blocks-v1"
+TOPIC_GUIDE_VERSION = "topic-blocks-v2"
 
 
 def chunks_of(q: dict) -> list[dict]:
@@ -29,28 +30,18 @@ def fallback_overview(chunks: list[dict]) -> dict:
             "by": "program"}
 
 
-# failures a new run of the same 區塊 cannot fix: the model cannot take the input, the context it needs is missing,
-# or (notation) there is no evidence / no model that can look at the page
-NO_RETRY = {"context_overflow", "context_missing", "model_unavailable"}
+# a run that broke down: the model's output could not be read (after its format fixes). Only these are run again;
+# a handout that did not pass its review was already corrected in place, and redrafting it is a gamble
+RETRY = {"invalid_model_output", "review_invalid"}
 
 
 def worth_retrying(error: dict | None) -> bool:
-    """A failed 區塊 is run again when another sample of the model can pass: a guide that did not pass its checks,
-    an invalid output, a source understanding that did not hold up, a vision reading that disagreed with the font
-    clues. Not when the input itself is the problem."""
-    if not error:
-        return True
-    code, detail = error.get("code") or "", error.get("detail") or ""
-    if code in NO_RETRY:
-        return False
-    if code == "notation_unverified":   # retry a disputed reading, not a missing page or a text-only model
-        return "不一致" in detail
-    return True
+    return bool(error) and (error.get("code") or "") in RETRY
 
 
 def block_task(task: ReadingTaskInput, q: dict, k: int, overview: dict, evidence: dict | None) -> ReadingTaskInput:
-    """The guide input of 區塊 k: its own text and source blocks (so checks, formulas and the verified-source cache
-    are per 區塊), the 主題's position and reader state, and where it sits in the 主題."""
+    """The guide input of 區塊 k: its own text and source blocks (so checks and formulas are per 區塊), the 主題's
+    position and reader state, and where it sits in the 主題 (its summary is what its handout must teach)."""
     chunks = chunks_of(q)
     ch = chunks[k]
     prev = chunks[k - 1] if k > 0 else None
@@ -70,55 +61,35 @@ def block_entry(k: int, ch: dict, out: dict, attempt: int) -> dict:
             "summary": ch.get("summary", ""), "attempt": attempt}
     if out.get("status") == "accepted":
         a = out["artifact"]
-        return {**base, "status": "accepted", "guide": a["guide"], "chinese_text": a.get("chinese_text"),
-                "key_points": a.get("key_points") or [], "check": a.get("check") or "",
+        return {**base, "status": "accepted", "guide": a["guide"], "key_points": a.get("key_points") or [],
+                "check": a.get("check") or "", "points": a.get("points") or [],
                 "unverified": a.get("unverified") or [], "warnings": a.get("warnings") or [],
-                "limits": a.get("limits") or [], "source_claims": a.get("source_claims") or [],
-                "gate1": a.get("gate1"), "gate2": a.get("gate2"), "revised": a.get("revised", False),
-                "bridges": a.get("bridges"), "bridges_used": a.get("bridges_used") or [],
-                "supplement_notes": a.get("supplement_notes") or [], "calls": a.get("calls"), "error": None,
+                "open_findings": a.get("open_findings") or [], "limits": a.get("limits") or [],
+                "review_status": a.get("review_status"), "revised": a.get("revised", False), "fixes": a.get("fixes", 0),
+                "fix_log": a.get("fix_log") or [], "symbols": a.get("symbols"), "calls": a.get("calls"), "error": None,
                 "workflow_version": a.get("workflow_version"), "contract_version": a.get("contract_version"),
                 "gate_rules": a.get("gate_rules")}
     err = out.get("error") or {"code": "quality_check_failed", "detail": ""}
-    return {**base, "status": "failed", "guide": "", "chinese_text": None, "error": err, "calls": (out.get("budget") or {}).get("calls")}
-
-
-def _gate(blocks: list[dict], key: str) -> dict | None:
-    rs = [b.get(key) for b in blocks if b.get(key)]
-    if not rs:
-        return None
-    return {"name": key, "status": "pass" if all(r.get("status") == "pass" for r in rs) else "fail",
-            "checks": [{**c, "id": f"b{b['index'] + 1}:{c.get('id')}"} for b in blocks for c in (b.get(key) or {}).get("checks") or []]}
+    return {**base, "status": "failed", "guide": "", "error": err, "calls": (out.get("budget") or {}).get("calls")}
 
 
 def assemble(task: ReadingTaskInput, q: dict, overview: dict, blocks: list[dict]) -> dict:
-    """The 主題's artifact. Claims of the accepted 區塊 are renumbered C1, C2 … across the 主題 (notes and questions
-    cite them as unit:claim), each keeping the 區塊 it came from; a failed 區塊 contributes none."""
+    """The 主題's artifact from its 區塊 (a failed 區塊 contributes no text; the page shows it as failed)."""
     ok = [b for b in blocks if b["status"] == "accepted"]
-    claims, n = [], 0
-    for b in ok:
-        ids = []
-        for c in b.get("source_claims") or []:
-            n += 1
-            ids.append(f"C{n}")
-            claims.append({**c, "id": f"C{n}", "block": b["index"], "block_claim": c.get("id")})
-        b["claims"] = ids
     single = len(blocks) == 1
     key_points = overview.get("key_points") or [p for b in ok for p in b.get("key_points") or []][:3]
     check = overview.get("check") or (ok[-1].get("check") if ok else "")
     warnings = [{**w, "block": b["index"]} for b in ok for w in b.get("warnings") or []]
-    cn = [b["chinese_text"] for b in ok if b.get("chinese_text")]
+    notes = [{**u, "block": b["index"]} for b in ok for u in b.get("unverified") or []]
     art: dict[str, Any] = {
         "mode": "blocks", "topic_version": TOPIC_GUIDE_VERSION, "unit_id": task.unit_id,
         "topic_summary": "" if single else overview.get("summary") or "", "overview_by": overview.get("by", "model"),
         "blocks": blocks, "partial": len(ok) < len(blocks),
-        "guide": "\n\n".join(b["guide"] for b in ok), "chinese_text": "\n\n".join(cn) if cn else None,
-        "key_points": key_points, "check": check, "source_claims": claims,
+        "guide": "\n\n".join(b["guide"] for b in ok), "key_points": key_points, "check": check,
         "limits": sorted({x for b in ok for x in b.get("limits") or []}),
-        "warnings": warnings, "unverified": [{**u, "block": b["index"]} for b in ok for u in b.get("unverified") or []],
-        "review_status": "passed_with_warnings" if warnings else "passed",
+        "warnings": warnings, "unverified": notes,
+        "review_status": "passed_with_notes" if notes else "passed",
         "revised": any(b.get("revised") for b in ok),
-        "gate1": _gate(ok, "gate1"), "gate2": _gate(ok, "gate2"),
         "source_refs": [i for b in blocks for i in b["block_ids"]],
         "calls": sum(b.get("calls") or 0 for b in blocks),
         "prefetched": bool(ok) and all(b.get("by") == "prefetch" for b in blocks),

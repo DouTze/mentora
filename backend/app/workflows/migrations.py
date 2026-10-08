@@ -1,16 +1,17 @@
 """Session upgrades between reading-workflow versions (R7).
 
 A LangGraph session stores the full prompt bundle and versions it started with. When the reading subgraph changes
-incompatibly (reading-graph-v1 → v2: source claims, Gate 1, bridges, Gate 2, verified notes), an existing session
-is upgraded once, in place, before its next command runs:
+incompatibly (v1 → v2: source claims, Gate 1, bridges, Gate 2, verified notes; v2 → v3: the guide is a teacher's
+handout from the 區塊 summary, reviewed for the points it must teach and for conflicts with the textbook, and
+corrected in place), an existing session is upgraded once, in place, before its next command runs:
 
 - the outer graph and its checkpoints are unchanged (same nodes, same state keys), so a session waiting for the
   reader resumes where it was; a guide attempt that was cut short restarts under the new subgraph (its operation
   key carries the workflow version, so no v1 step is reused);
-- the session keeps its own prompts for the tasks whose contract did not change (ask, assess, segmentation); the
-  v2 source / teaching / notes / quiz prompts are added from the current bundle and the bundle gets a new hash;
-- guides already published under v1 stay as they were, marked by their workflow_version (their checks were weaker;
-  exports say so); they have no verified claims, so their units enter a quiz only through their raw source text;
+- the session keeps its own prompts for the tasks whose contract did not change (ask, assess, segmentation and the
+  主題 overview); the guide / notes / quiz prompts are taken from the current bundle and the bundle gets a new hash;
+- guides already published stay as they were, marked by their workflow_version (exports say which checks they
+  passed); a v3 handout has no verified claims, so its unit enters a quiz through its source text;
 - reading parts planned by the v1 segmentation are kept (re-planning would move the reader's progress);
 - a PDF session's blocks get layout / font evidence from the stored original file (R5) when it is still there, so
   symbol-bearing units can be checked instead of being held for missing evidence; block text and ids do not change;
@@ -23,7 +24,8 @@ from ..reading.agent import READING_WORKFLOW_VERSION
 from ..reading.contracts import CONTRACT_VERSION, TaskContract
 from ..reading.prompts import BUNDLE_VERSION, load_bundle
 
-KEEP_SESSION_PROMPTS = ("segment_blocks", "segment_split", "segment_topic_summary", "segment_topic", "ask", "assess")
+KEEP_SESSION_PROMPTS = ("segment_blocks", "segment_split", "segment_topic_summary", "segment_topic", "segment_outline",
+                        "segment_matter", "segment_boundaries", "reading_topic", "ask", "assess")
 
 
 def upgrade_session(db: Database, sid: str) -> dict | None:
@@ -40,7 +42,7 @@ def upgrade_session(db: Database, sid: str) -> dict | None:
     prompts = {**current["prompts"], **{k: v for k, v in old["prompts"].items() if k in KEEP_SESSION_PROMPTS}}
     record = {"from": meta.get("reading_workflow_version"), "to": READING_WORKFLOW_VERSION, "at": now_iso(),
               "prompt_bundle_from": old.get("hash"), "kept_prompts": [k for k in KEEP_SESSION_PROMPTS if k in old["prompts"]],
-              "note": "已發布的導讀保留原檢查版本；之後的段落使用來源核對與正文核對；原有的閱讀部分不重新切分"}
+              "note": "已發布的導讀保留原檢查版本；之後的段落改為講義，審查是否教到重點、是否與課本矛盾；原有的閱讀部分不重新切分"}
     meta["prompt_bundle"] = {"version": BUNDLE_VERSION, "hash": stable_hash(prompts), "prompts": prompts,
                              "upgraded_from": old.get("hash")}
     meta["reading_workflow_version"] = READING_WORKFLOW_VERSION

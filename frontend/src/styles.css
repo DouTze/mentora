@@ -272,6 +272,8 @@ button.block { width: 100%; padding: 9px 14px; }
 .tool .row button.ghost { padding: 3px 8px; font-size: var(--t-small); }
 .range-summary { display: grid; gap: 2px; padding: var(--s3) var(--s4); margin-bottom: var(--s4); border-radius: 8px; font-size: var(--t-small); color: var(--muted); background: var(--side); line-height: 1.5; }
 .range-summary.on { background: var(--mark-soft); box-shadow: inset 4px 0 0 var(--mark-edge); color: var(--mark-ink); }
+.translate-zh { display: flex; gap: 8px; align-items: flex-start; margin-bottom: var(--s4); font-size: var(--t-small); }
+.translate-zh small { display: block; }
 .range-summary.on strong { font-size: 15px; color: var(--ink); }
 .mini-list { list-style: none; margin: 0; padding: 0; font-size: 13px; }
 .mini-list li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); }

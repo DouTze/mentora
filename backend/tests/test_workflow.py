@@ -20,6 +20,7 @@ from app.llm.mock import MockBackend
 from app.llm.registry import Registry
 from app.main import create_app
 from app.models import ModelConfig
+from app.reading.agent import READING_WORKFLOW_VERSION
 
 HELPERS = Path(__file__).parent / "helpers"
 MD = (HELPERS / "flow.md").read_text(encoding="utf-8")
@@ -94,12 +95,13 @@ def test_full_flow_through_events_api(graph_app):
     rp = c.post(f"/api/sessions/{s['id']}/replay").json()   # replay = a new record with current settings
     assert rp["replayed_answers"] == k and rp["error"] is None and rp["session"]["workflow_runner"] == "legacy"
     trace = c.get(f"/api/sessions/{s['id']}/trace").json()
-    assert {x["node"] for x in trace["llm_calls"]} >= {"understand", "plan_bridges", "draft", "body_audit", "ask.answer", "quiz_generate", "quiz_audit", "assess"}
+    assert {x["node"] for x in trace["llm_calls"]} >= {"draft", "review_points", "review_conflicts", "ask.answer",
+                                                        "quiz_generate", "quiz_audit", "assess"}
     # every task stayed inside its budget
     from app.llm.runtime import BUDGETS
     by_op: dict = {}
     for x in trace["llm_calls"]:   # a guide attempt's nodes share one budget (op prefix up to the workflow version)
-        key = x["operation_key"].split(":reading-graph-v2")[0] if x["task"] == "guide" else x["operation_key"]
+        key = x["operation_key"].split(f":{READING_WORKFLOW_VERSION}")[0] if x["task"] == "guide" else x["operation_key"]
         by_op[(x["task"], key)] = by_op.get((x["task"], key), 0) + 1
     assert all(n <= BUDGETS[task]["max_calls"] for (task, _), n in by_op.items()), by_op
 
@@ -178,7 +180,7 @@ def test_guide_failure_waits_for_retry_and_retry_resumes(graph_app, monkeypatch)
     state = {"down": True}
 
     async def flaky(self, messages, **kw):
-        if state["down"] and (kw.get("meta") or {}).get("step") == "draft":
+        if state["down"] and (kw.get("meta") or {}).get("step") == "review_conflicts":
             raise LLMError("Ollama 連線失敗：refused")
         return await real(self, messages, **kw)
 
@@ -194,7 +196,7 @@ def test_guide_failure_waits_for_retry_and_retry_resumes(graph_app, monkeypatch)
     s, cmd = run(c, s["id"], "retry", "r1", payload={"target_command_id": f"start-{s['id']}"})
     assert cmd["status"] == "completed" and "0" in s["reading"]["guides"] and s["workflow"]["waiting"] == "student"
     trace = c.get(f"/api/sessions/{s['id']}/trace").json()["llm_calls"]
-    assert [x["node"] for x in trace].count("understand") == 1   # resumed at the failed node
+    assert [x["node"] for x in trace].count("draft") == 1   # resumed at the failed node: the handout is not redrafted
 
 
 def test_failed_ask_keeps_reading_open_and_can_be_retried(graph_app, monkeypatch):
@@ -419,10 +421,10 @@ def test_next_during_a_prefetch_waits_for_it_and_adopts_the_guide(graph_app, mon
 
 
 def test_a_guide_interrupted_under_older_gate_rules_is_rechecked_not_resumed(tmp_path):
-    """Review counterexample: Gate 1 passed under the old rules, the process stopped in draft, and the resumed run
-    under new rules continued the subgraph from its checkpoint (old op, old verification) and published it. The
-    runner now restarts such a run from the start, under the new rules, keeping what it already spent."""
-    proc(tmp_path, START, fault="before:draft")              # unit 0: understood and verified, cut before draft
+    """Review counterexample: a handout was drafted under the old rules, the process stopped before its review, and
+    the resumed run under new rules continued the subgraph from its checkpoint (old op) and published it. The runner
+    now restarts such a run from the start, under the new rules, keeping what it already spent."""
+    proc(tmp_path, START, fault="before:review")             # unit 0: drafted, cut before its review
     proc_env = {"GATE_RULES": "gate1-test-next"}
     env = child_env(HOME=str(tmp_path), **proc_env)
     p = subprocess.run([sys.executable, str(HELPERS / "workflow_proc.py"), str(tmp_path), json.dumps(WAIT)],
@@ -431,7 +433,7 @@ def test_a_guide_interrupted_under_older_gate_rules_is_rechecked_not_resumed(tmp
     out = json.loads(p.stdout.strip().splitlines()[-1])
     assert out["guides"] == ["0"] and out["guide_rules"] == {"0": "gate1-test-next"}
     nodes = [n for n, _ in out["calls"]]
-    assert nodes.count("understand") == 2                    # the source was verified again under the new rules
+    assert nodes.count("draft") == 2                         # the handout was written again under the new rules
     assert out["guide_calls"]["0"] >= len([n for n in nodes if n not in ("segment",) and not n.startswith("segment")])
 
 
@@ -442,7 +444,9 @@ LONG = "# 光合作用\n\n" + "\n\n".join(
     f"這一步需要光、水與二氧化碳同時具備，缺少任何一項都無法進行，因此第 {i} 節特別強調這三個條件。" for i in range(1, 7)) + "\n"
 
 
-def test_parallel_setting_warms_coming_sources_and_their_guides_skip_source_verification(graph_app, monkeypatch):
+def test_parallel_setting_prefetches_the_next_handout_and_warms_nothing(graph_app, monkeypatch):
+    """Every step of a handout depends on the reader, so nothing is verified ahead of them any more; the next unit
+    is still written ahead of time by the prefetch."""
     c = graph_app
     monkeypatch.setattr(config, "READING_PREFETCH", True)
     cfg = {"backend": "mock", "model": "", "temperature": 0.2, "max_tokens": 512, "context_tokens": 8192, "parallel": 3}
@@ -453,16 +457,10 @@ def test_parallel_setting_warms_coming_sources_and_their_guides_skip_source_veri
     sid = s["id"]
     assert s["reading"]["total"] >= 4
     prefetch_idle(c, sid)
-    warmed = [o for x, outs in runner.warm_log if x == sid for o in outs]
-    assert warmed and set(warmed) == {"verified"}                     # units 2 and 3 (unit 1 is the prefetch's)
+    assert not [o for x, outs in runner.warm_log if x == sid for o in outs]   # nothing to warm
+    assert (sid, "written") in runner.prefetch_log                            # unit 1 written ahead of time
     s, _ = run(c, sid, "next", "n1")
-    prefetch_idle(c, sid)
-    s, _ = run(c, sid, "next", "n2")                                  # now on unit 2, warmed before the reader got there
-    u2 = s["reading"]["quotes"][2]["unit_id"]
-    calls = [x for x in c.get(f"/api/sessions/{sid}/trace").json()["llm_calls"]
-             if x["task"] == "guide" and u2 in (x["operation_key"] or "") and ":warm:" not in x["operation_key"]]
-    assert calls and not any(x["node"] == "understand" for x in calls)  # its source came from the cache
-    assert s["reading"]["guides"]["2"]["review_status"] in ("passed", "passed_with_warnings")
+    assert s["reading"]["guides"]["1"]["review_status"] in ("passed", "passed_with_notes")
 
 
 def test_parallel_one_never_warms(graph_app, monkeypatch):
@@ -538,7 +536,7 @@ def failing_draft_for(monkeypatch, marker):
 
     async def gen(self, messages, **kw):
         m = kw.get("meta") or {}
-        if m.get("step") in ("draft", "revise_body") and marker in (m.get("quote_text") or ""):
+        if m.get("step") == "draft" and marker in (m.get("quote_text") or ""):
             kw = {**kw, "meta": {**m, "force_invalid_output": True}}
         return await real(self, messages, **kw)
 
@@ -553,14 +551,12 @@ def test_a_topic_is_guided_one_block_at_a_time(graph_app):
     assert len(q["chunks"]) == 3 and g["mode"] == "blocks" and not g["partial"]
     assert [b["status"] for b in g["blocks"]] == ["accepted"] * 3 and g["topic_summary"] and g["check"]
     assert [b["source"][:4] for b in g["blocks"]] == ["光合作用", "光反應發", "暗反應發"]
-    ids = [c_["id"] for c_ in g["source_claims"]]
-    assert len(ids) == len(set(ids)) and {c_["block"] for c_ in g["source_claims"]} == {0, 1, 2}   # one numbering
     assert g["guide"] == "\n\n".join(b["guide"] for b in g["blocks"])
     calls = c.app_ref.state.repo.list_llm_calls(s["id"])   # with the requests (the trace API leaves them out)
     drafts = [x for x in calls if x["node"] == "draft"]
     assert len(drafts) == 3 and len([x for x in calls if x["node"] == "topic"]) == 1
     second = next(x for x in drafts if "-b2:" in x["operation_key"])["request"]["messages"][0]["content"]
-    assert "▶ 第 2 塊" in second and "只寫第 2 塊原文裡的內容" in second and "暗反應發生在" not in second.split("## 這一段的原文")[1].split("##")[0]
+    assert "▶ 第 2 塊" in second and "只講第 2 塊的內容" in second and "暗反應發生在" not in second.split("## 這一段的課本原文")[1].split("##")[0]
 
 
 def test_a_failed_block_leaves_the_topic_readable_and_only_it_is_retried(graph_app, monkeypatch):
@@ -570,7 +566,7 @@ def test_a_failed_block_leaves_the_topic_readable_and_only_it_is_retried(graph_a
     g = s["reading"]["guides"]["0"]
     assert s["workflow"]["waiting"] == "student" and g["partial"]
     assert [b["status"] for b in g["blocks"]] == ["accepted", "accepted", "failed"]
-    assert all(cl["block"] != 2 for cl in g["source_claims"])           # no claims from a 區塊 not shown as guided
+    assert "暗反應" not in g["guide"]                                    # a 區塊 not shown as guided adds no text
     n = config.READING_BLOCK_ATTEMPTS                                    # retried automatically before giving up
     assert g["blocks"][2]["attempt"] == n and len(g["blocks"][2]["failed_attempts"]) == n - 1
     monkeypatch.undo()
@@ -613,11 +609,13 @@ def test_a_block_that_fails_once_is_written_again_automatically(graph_app, monke
     assert b["attempt"] == 2 and [f["code"] for f in b["failed_attempts"]] == ["invalid_model_output"]
 
 
-def test_only_failures_a_new_run_can_fix_are_retried():
+def test_only_a_run_that_broke_down_is_redrafted():
+    """A handout that did not pass its review was already corrected in place; drafting it again is a gamble. Only
+    a run whose output could not be read is run again."""
     from app.reading.topic_guide import worth_retrying
-    assert worth_retrying({"code": "quality_check_failed", "detail": "主要正文照抄了 2 句英文原文"})
     assert worth_retrying({"code": "invalid_model_output", "detail": "draft: JSON 解析失敗"})
-    assert worth_retrying({"code": "notation_unverified", "detail": "PDF 符號的視覺判讀與字型線索不一致：…"})
-    assert not worth_retrying({"code": "notation_unverified", "detail": "目前的模型不支援影像輸入，無法看圖核對"})
+    assert worth_retrying({"code": "review_invalid", "detail": "review: JSON 解析失敗"})
+    assert not worth_retrying({"code": "conflict_with_textbook", "detail": "講義有和課本矛盾的地方"})
+    assert not worth_retrying({"code": "quality_check_failed", "detail": "講義沒有通過檢查"})
     assert not worth_retrying({"code": "context_overflow", "detail": "輸入約 40000 tokens"})
-    assert not worth_retrying({"code": "context_missing", "detail": "前後文讀取失敗"})
+    assert not worth_retrying(None)

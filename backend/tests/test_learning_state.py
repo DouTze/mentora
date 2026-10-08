@@ -16,9 +16,9 @@ def state_of(c, sid):
     return c.app_ref.state.db.get_session(sid)
 
 
-def bridge_prompts(c, sid):
-    """Bridge-planning requests, oldest first (the trace API hides request bodies; read the repository)."""
-    return [x for x in c.app_ref.state.repo.list_llm_calls(sid) if x["node"] == "plan_bridges"]
+def draft_prompts(c, sid):
+    """Handout-writing requests, oldest first (the trace API hides request bodies; read the repository)."""
+    return [x for x in c.app_ref.state.repo.list_llm_calls(sid) if x["node"] == "draft"]
 
 
 def test_task_contract_records_defaults_and_reader_background(graph_app):
@@ -29,7 +29,7 @@ def test_task_contract_records_defaults_and_reader_background(graph_app):
     s = start_with(c, reading_depth="skim", reader_background="高中生物學過細胞", reading_goal="準備小考")
     tc = state_of(c, s["id"])["workflow_meta"]["task_contract"]
     assert tc["depth"] == "skim" and tc["reader_background"] == "高中生物學過細胞" and tc["defaults"] == []
-    prompt = bridge_prompts(c, s["id"])[0]["request"]["messages"][0]["content"]
+    prompt = draft_prompts(c, s["id"])[0]["request"]["messages"][0]["content"]
     assert "高中生物學過細胞" in prompt and "略讀" in prompt and "準備小考" in prompt
     guide = state_of(c, s["id"])["state"]["reading"]["guides"]["0"]["guide"]
     assert "高中生物學過細胞" not in guide   # control data never becomes subject matter
@@ -44,8 +44,8 @@ def test_generated_presented_read_and_understood_are_different_states(graph_app,
     assert (sid, "written") in c.app_ref.state.runner.prefetch_log          # unit 1 generated ahead of time …
     rd = state_of(c, sid)["state"]["reading"]
     assert rd.get("presented") == [0] and not rd.get("read") and "1" not in rd["guides"]   # … but neither shown nor read
-    first = bridge_prompts(c, sid)[0]["request"]["messages"][0]["content"]
-    assert "尚未讀過其他段落" in first                                      # unit 0 assumes nothing was read
+    first = draft_prompts(c, sid)[0]["request"]["messages"][0]["content"]
+    assert "這是第一段" in first                                            # unit 0 assumes nothing was read
 
     s, _ = run(c, sid, "ask", "q1", payload={"question": "光反應發生在哪裡？"})
     s, _ = run(c, sid, "next", "n1")
@@ -54,7 +54,36 @@ def test_generated_presented_read_and_understood_are_different_states(graph_app,
     # whether unit 1's guide was written on demand or adopted from a prefetch, it was built for the reader as they
     # are now: after the question (a prefetch made before it has another key and is never adopted)
     quotes = state_of(c, sid)["content_snapshot"]["quotes"]
-    u0, u1 = quotes[0]["unit_id"], quotes[1]["unit_id"]
-    for_u1 = [x for x in bridge_prompts(c, sid) if u1 in (x["operation_key"] or "")]
+    u1 = quotes[1]["unit_id"]
+    for_u1 = [x for x in draft_prompts(c, sid) if u1 in (x["operation_key"] or "")]
     used = for_u1[-1]["request"]["messages"][0]["content"]
-    assert f"[{u0}]" in used and "已讀不代表已掌握" in used and "光反應發生在哪裡" in used
+    read = state_of(c, sid)["state"]["reading"]["guides"]["0"]["key_points"]
+    assert read and read[0] in used and "光反應發生在哪裡" in used         # what was read and asked carries on
+
+
+def test_guide_language_follows_the_material_setting(graph_app):
+    """A material's guides are in its own language unless it asks for 繁體中文; the choice is fixed per session."""
+    c = graph_app
+    s = start_with(c)
+    assert state_of(c, s["id"])["workflow_meta"]["guide_language"] == "source"
+    mid = s["source"]["material_id"]
+    assert c.patch(f"/api/materials/{mid}", json={"translate_zh": True}).json()["translate_zh"] is True
+    s2 = c.post("/api/sessions", json={"material_id": mid, "start": 1, "end": len(MD.splitlines())}).json()
+    assert state_of(c, s2["id"])["workflow_meta"]["guide_language"] == "zh-TW"
+    assert state_of(c, s["id"])["workflow_meta"]["guide_language"] == "source"   # a started session keeps its own
+
+
+def test_prompts_carry_the_session_language(graph_app):
+    """Every request of a session says which language to write in, and no language field is left unfilled."""
+    from app.tutor.reading import LANGUAGE_FIELDS
+    c = graph_app
+    s = start_with(c)
+    mid = s["source"]["material_id"]
+    c.patch(f"/api/materials/{mid}", json={"translate_zh": True})
+    s2 = c.post("/api/sessions", json={"material_id": mid, "start": 1, "end": len(MD.splitlines())}).json()
+    idle(c, s2["id"])
+    for sid, lang in ((s["id"], "source"), (s2["id"], "zh-TW")):
+        bodies = [m["content"] for x in c.app_ref.state.repo.list_llm_calls(sid) for m in x["request"]["messages"]
+                  if isinstance(m.get("content"), str)]
+        assert bodies and not any("{{language" in b or "{{write_rule}}" in b for b in bodies)
+        assert any(LANGUAGE_FIELDS[lang]["language_rule"] in b for b in bodies)

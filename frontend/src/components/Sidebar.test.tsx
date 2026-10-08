@@ -9,8 +9,8 @@ import type { Route } from "../route";
 const library: Library = {
   categories: [{ id: "c1", name: "生物", position: 1 }],
   materials: [
-    { id: "m1", category_id: "c1", title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 9, created_at: "" },
-    { id: "m2", category_id: null, title: "Newton laws", filename: "Newton laws.pdf", kind: "pdf", unit: "page", unit_count: 3, created_at: "" },
+    { id: "m1", category_id: "c1", title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 9, created_at: "", translate_zh: false },
+    { id: "m2", category_id: null, title: "Newton laws", filename: "Newton laws.pdf", kind: "pdf", unit: "page", unit_count: 3, created_at: "", translate_zh: false },
   ],
 };
 

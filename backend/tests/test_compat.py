@@ -56,7 +56,7 @@ def test_old_database_migrates_and_a_waiting_session_continues_under_v2(old_app)
     rd = after["state"]["reading"]
     assert rd["guides"]["0"] == old_guide                                  # the published v1 guide is untouched
     g1 = rd["guides"]["1"]
-    assert g1["workflow_version"] == READING_WORKFLOW_VERSION and g1["gate1"]["status"] == "pass"
+    assert g1["workflow_version"] == READING_WORKFLOW_VERSION and g1["review_status"] in ("passed", "passed_with_notes")
     assert len(rd["qa"]["0"]) == 1                                        # the question asked under v1 is kept
     assert upgrade_session(db, sid) is None                               # idempotent
     md = c.get(f"/api/sessions/{sid}/export?format=md").text

@@ -133,7 +133,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None) -> 
     @app.patch("/api/materials/{mid}")
     async def update_material(mid: str, req: MaterialUpdate):
         return materials.update(mid, title=req.title, category_id=req.category_id,
-                                set_category="category_id" in req.model_fields_set)
+                                set_category="category_id" in req.model_fields_set, translate_zh=req.translate_zh)
 
     @app.delete("/api/materials/{mid}")
     async def delete_material(mid: str):

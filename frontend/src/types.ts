@@ -68,15 +68,18 @@ export interface Quote {
   block_ids?: string[];
 }
 
+/** what a published guide tells the reader it could not settle: a passage whose wording could not be confirmed
+ *  (older guides), or a note of the handout review (a point it may not teach, a possible mismatch …) */
+export type GuideNote = { kind: "coverage"; source: string; guide: string } | { kind: "note"; text: string; code?: string };
+
 export interface Guide {
-  chinese_text: string | null;
+  chinese_text?: string | null;
   guide: string;
   key_points: string[];
   check: string;
   latency_ms?: number;
   agent?: string;
-  /** source passages whose restatement in a published guide the checks found but could not confirm */
-  unverified?: { kind: "coverage"; source: string; guide: string }[];
+  unverified?: GuideNote[];
   /** a 主題 written one 區塊 at a time: shown as source 區塊 and guide 區塊 alternately */
   mode?: "blocks";
   topic_summary?: string;
@@ -94,7 +97,7 @@ export interface GuideBlock {
   /** attempts this 區塊 has used (failed ones are retried automatically up to a limit) */
   attempt?: number;
   chinese_text?: string | null;
-  unverified?: { kind: "coverage"; source: string; guide: string }[];
+  unverified?: GuideNote[];
 }
 
 export interface ReadingQA {
@@ -282,6 +285,8 @@ export interface Material {
   unit: "page" | "line";
   unit_count: number;
   created_at: string;
+  /** guides, questions and quizzes in 繁體中文; otherwise in the material's own language */
+  translate_zh: boolean;
 }
 
 export interface MaterialDetail extends Material {

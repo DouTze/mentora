@@ -56,7 +56,7 @@ export const api = {
     return call<Material>("/materials", { method: "POST", body: form });
   },
   material: (id: string) => call<MaterialDetail>(`/materials/${id}`),
-  updateMaterial: (id: string, patch: { title?: string; category_id?: string | null }) =>
+  updateMaterial: (id: string, patch: { title?: string; category_id?: string | null; translate_zh?: boolean }) =>
     call<Material>(`/materials/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteMaterial: (id: string) => call<{ ok: boolean }>(`/materials/${id}`, { method: "DELETE" }),
   materialFileUrl: (id: string) => `/api/materials/${id}/file`,

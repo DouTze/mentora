@@ -9,9 +9,11 @@ glyphs have no Unicode mapping. For each extracted paragraph block this module k
   layer lost (control / private-use characters);
 - images on the page next to the paragraph (a caption-like paragraph near an image is a figure reference).
 
-These are clues, not verdicts. Font names and flags never decide how a symbol is written; only a rendered region
-read by a vision-capable model of the session (or the author's own LaTeX, for md sources) can confirm notation.
-Without that, a unit with symbols stays `unverified` and is not published as a checked guide."""
+Flags and text-font names are clues, not verdicts. A math font of a known family is different: the embedded font
+is what draws the glyph, so its name is rendering evidence of the letter's style (CMMI = math italic, EUSM =
+calligraphic, MSBM = blackboard …). `letter_fonts` lists, per letter, the styles the unit's math fonts drew it in;
+the vision reading must choose among them (which occurrence is which still needs the rendered region). Without a
+confirmed reading a unit with symbols stays `unverified` and is not published as a checked guide."""
 from __future__ import annotations
 
 import hashlib
@@ -22,7 +24,37 @@ from pathlib import Path
 EVIDENCE_VERSION = "pdf-evidence-v1"
 MATH_FONT_RE = re.compile(r"CM(MI|SY|EX|BX|MIB|BSY)|MSBM|MSAM|Symbol|Math|STIX|Euler|EUFM|EUSM|rsfs|mathptmx|TeXGyre.*Math", re.I)
 CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.|Table|圖|表)\s*[\dA-Z一二三四五六七八九十.\-:：]", re.I)
-MAX_SPANS = 80
+MAX_SPANS = 300
+# math font families whose name says how a letter is drawn (the more specific name first: CMMIB before CMMI)
+FONT_STYLES = [(re.compile(p, re.I), style) for p, style in (
+    (r"^(CMMIB|CMBSY|CMBX|LMMathItalic\d*-Bold|.*Math.*Bold)", "bold"),
+    (r"^(CMMI|LMMathItalic|EURM)", "italic"),
+    (r"^(EUSM|EUSB|CMSY|LMMathSymbols)", "calligraphic"),   # the capital letters of a symbol font are \mathcal
+    (r"^(RSFS|RSFSO)", "script"),
+    (r"^(MSBM|BBOLD|DSROM)", "blackboard"),
+    (r"^(EUFM|EUFB)", "fraktur"),
+)]
+LETTER_RUN_RE = re.compile(r"[A-Za-z]+")
+
+
+def font_style(font: str) -> str | None:
+    """The style a math font draws letters in; None for a text font or an unknown family (no evidence then)."""
+    name = font.split("+", 1)[-1]   # subset prefix "ABCDEF+CMMI10"
+    return next((style for rx, style in FONT_STYLES if rx.search(name)), None)
+
+
+def letter_fonts(spans: list[dict]) -> dict[str, list[str]]:
+    """{letter: styles it was drawn in} from single letters set in known math fonts (a math variable is one letter;
+    a word in a text font is prose, and a run of letters in a math font such as "Pr" or a heading is not a variable)."""
+    out: dict[str, set[str]] = {}
+    for s in spans:
+        style = font_style(s.get("font", ""))
+        if not style:
+            continue
+        for run in LETTER_RUN_RE.findall(s.get("t", "")):
+            if len(run) == 1 and not (style == "calligraphic" and run.islower()):   # lowercase CMSY glyphs are not letters
+                out.setdefault(run, set()).add(style)
+    return {k: sorted(v) for k, v in sorted(out.items())}
 
 
 def _lost(text: str) -> bool:
@@ -140,7 +172,8 @@ def unit_symbol_evidence(blocks: list, pdf_path: str | None, has_math_text: bool
              "italic_tokens": sorted({t for e in evs for t in e["italic_tokens"]}),
              "superscripts": sorted({t for e in evs for t in e["superscripts"]}),
              "math_fonts": sorted({f for e in evs for f in e["math_fonts"]}),
-             "lost_glyphs": any(e["lost_glyphs"] for e in evs)}
+             "lost_glyphs": any(e["lost_glyphs"] for e in evs),
+             "letter_fonts": letter_fonts([s for e in evs for s in e.get("spans") or []])}
     # superscripts alone are often footnote marks and short bold words are often emphasis ("AI"): they are recorded as
     # clues but only math-like evidence makes a unit symbol-bearing
     bold_letters = [t for t in clues["bold_tokens"] if len(t) == 1 and t.isalpha()]

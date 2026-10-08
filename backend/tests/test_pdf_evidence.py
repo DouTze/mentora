@@ -66,13 +66,14 @@ def upload_pdf(c, name):
     return idle(c, s["id"])
 
 
-def test_a_text_only_model_holds_a_symbol_unit_with_an_actionable_reason(graph_app):
+def test_a_text_only_model_writes_the_handout_with_a_note_on_its_symbols(graph_app):
+    """Without a model that can look at the page the symbols cannot be confirmed: the handout is still written, and
+    it tells the reader which symbols to check against the textbook (with what would fix it)."""
     c = graph_app
     s = upload_pdf(c, "symbols")
-    wf = s["workflow"]
-    assert wf["waiting"] == "retry" and wf["error"]["code"] == "notation_unverified"
-    assert "支援影像" in wf["error"]["detail"] and "第 1 頁" in wf["error"]["detail"]
-    assert "0" not in s["reading"]["guides"]                         # nothing published as a checked guide
+    g = s["reading"]["guides"]["0"]
+    notes = [u for u in g["unverified"] if u.get("code") == "notation_unverified"]
+    assert g["guide"] and notes and "支援影像" in notes[0]["text"]
     snap = c.app_ref.state.db.get_session(s["id"])["workflow_meta"]["snapshot_id"]
     blocks = c.app_ref.state.repo.load_blocks(snap)
     assert any((b.meta.get("pdf") or {}).get("bold_tokens") == ["w"] for b in blocks)   # evidence persisted
@@ -99,7 +100,7 @@ def test_a_vision_model_reads_the_region_and_the_unit_passes(graph_app, monkeypa
     c = graph_app
     s = upload_pdf(c, "symbols")
     g = s["reading"]["guides"]["0"]
-    assert g["gate1"]["status"] == "pass"
+    assert g["review_status"] == "passed" and r"\mathbf{w}" in g["guide"]   # the equation as the region shows it
     trace = c.app_ref.state.repo.list_llm_calls(s["id"])
     assert [x["node"] for x in trace][:2] == ["segment.w01", "symbols"] or "symbols" in [x["node"] for x in trace]
     ev_dir = Path(c.app_ref.state.svc.reading_dir).parent / "evidence"
@@ -115,3 +116,28 @@ def test_footnote_marks_and_bold_words_alone_do_not_make_a_unit_symbolic():
                            extraction_version="v", locator=Locator(unit="page", start=1, end=1, para=1), meta={"pdf": ev})
     assert unit_symbol_evidence([block(superscripts=["1"], bold_tokens=["AI"])], "/x.pdf", False) is None
     assert unit_symbol_evidence([block(bold_tokens=["w"])], "/x.pdf", False)["status"] == "needs_visual"
+
+
+def test_math_fonts_settle_letter_styles_and_correct_a_vision_misreading():
+    """qwen3-vl read S_t, A_t, R_t (CMMI, math italic) as bold and listed them again and again until its output was
+    cut off. The embedded math font is what draws the glyph: a letter drawn in one style is corrected; a letter drawn
+    in two (S_t and a calligraphic S) is left to the rendered region, and a reading outside both is a conflict."""
+    from app.reading.contracts import SymbolItem, SymbolTranscription
+    from app.reading.gates import fix_by_fonts
+    from app.reading.pdf_evidence import font_style, letter_fonts
+    assert [font_style(f) for f in ("ABCDEF+CMMI10", "CMMIB10", "CMBX12", "EUSM10", "MSBM10", "CMR10", "Times-Italic")] \
+        == ["italic", "bold", "bold", "calligraphic", "blackboard", None, None]
+    spans = [{"t": "S", "font": "CMMI10"}, {"t": ", A", "font": "CMMI10"}, {"t": "Pr", "font": "CMR10"},
+             {"t": "a", "font": "CMR10"}, {"t": "S", "font": "EUSM10"}, {"t": "R", "font": "CMMI10"},
+             {"t": "Finite", "font": "CMBX12"}]
+    assert letter_fonts(spans) == {"A": ["italic"], "R": ["italic"], "S": ["calligraphic", "italic"]}
+    bold = lambda s: SymbolItem(symbol=s, latex=rf"\mathbf{{{s}}}", style="bold")  # noqa: E731
+    tr = SymbolTranscription(formulas=[r"\mathbf{A}_0, \mathbf{R}_1", r"\mathbf{A}_0, \mathbf{R}_1", r"S_t \in \mathcal{S}"],
+                             symbols=[bold("A"), bold("R"), bold("A"), SymbolItem(symbol="S", latex="S", style="italic")])
+    fixed, fixes, conflicts = fix_by_fonts(tr, {"A": ["italic"], "R": ["italic"], "S": ["calligraphic", "italic"]})
+    assert fixed.formulas == ["A_0, R_1", r"S_t \in \mathcal{S}"] and not conflicts
+    assert [(x.symbol, x.latex, x.style) for x in fixed.symbols] == [("A", "A", "italic"), ("R", "R", "italic"),
+                                                                       ("S", "S", "italic")]
+    assert fixes == ["A：粗體 → 斜體", "R：粗體 → 斜體"]
+    _, _, conflicts = fix_by_fonts(SymbolTranscription(formulas=[r"\mathbf{S}_t"]), {"S": ["calligraphic", "italic"]})
+    assert conflicts and "書法體或斜體" in conflicts[0]

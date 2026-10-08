@@ -24,7 +24,9 @@ def load_strategies() -> dict[str, dict]:
 
 
 def load_prompt(prompt_id: str) -> str:
-    return (config.PROMPT_DIR / f"{prompt_id}.md").read_text(encoding="utf-8")
+    """A prompt of the legacy tutor (always 繁體中文)."""
+    from .reading import with_language
+    return with_language({"p": (config.PROMPT_DIR / f"{prompt_id}.md").read_text(encoding="utf-8")})["p"]
 
 
 def render_prompt(template: str, fields: dict[str, str]) -> str:
