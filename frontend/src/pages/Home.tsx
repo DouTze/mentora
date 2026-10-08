@@ -12,6 +12,7 @@ import type { Library, SessionListItem, ShelfBook, ShelfView } from "../types";
 import type { Route } from "../route";
 import { Icon } from "../components/Icons";
 import { Bookshelf } from "../components/Bookshelf";
+import { Select } from "../components/Select";
 import { ResumeReading } from "../components/ResumeReading";
 import { useT, type Key } from "../i18n";
 
@@ -131,6 +132,16 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, 
     return top ?? view?.query ?? view?.tendencies[0] ?? t("shelf.area.default");
   }, [chosen.map((b) => b.id).join(), view]);
   useEffect(() => setAreaName(suggestedName), [suggestedName]);
+  // where the chosen books go: a reading area that already exists, a new one (named below), or none (未分類). It starts
+  // on the area already named after them if there is one, else a new area for several books and none for one.
+  const NEW_AREA = "__new__";
+  const [target, setTarget] = useState<string>("");
+  const many = chosen.length > 1;
+  useEffect(() => {
+    const same = library.categories.find((c) => c.name === suggestedName);
+    setTarget(same ? same.id : many ? NEW_AREA : "");
+  }, [suggestedName, many, library.categories.length]);
+  const targetName = library.categories.find((c) => c.id === target)?.name;
 
   const ask = async (wish: string) => {
     const q = wish.trim();
@@ -195,7 +206,10 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, 
     setBusy(true);
     setError(null);
     try {
-      const r = await api.shelfImport(chosen.map((b) => b.id), chosen.length > 1 ? areaName.trim() || suggestedName : null);
+      const r =
+        target === NEW_AREA
+          ? await api.shelfImport(chosen.map((b) => b.id), areaName.trim() || suggestedName)
+          : await api.shelfImport(chosen.map((b) => b.id), null, targetName ? target : null);
       const open = (id: string) => onNavigate({ page: "material", id });
       r.duplicates.forEach((m) => noticeDuplicate(m, t as never, open));   // already in the library: named, not added
       await onLibraryChange();
@@ -346,19 +360,28 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, 
 
         {chosen.length > 0 && (
           <div className="shelf-bar" role="region" aria-label={t("shelf.bar.label")}>
-            {chosen.length === 1 ? (
-              <span className="shelf-bar-text grow">{chosen[0].title}</span>
+            <span className="shelf-bar-text">{many ? t("shelf.bar.intoCount", { count: chosen.length }) : t("shelf.bar.into", { title: chosen[0].title })}</span>
+            <Select
+              className="shelf-bar-target"
+              label={t("shelf.target.label")}
+              value={target}
+              onChange={setTarget}
+              options={[
+                ...library.categories.map((c) => ({ value: c.id, label: c.name })),
+                { value: NEW_AREA, label: t("shelf.target.new") },
+                { value: "", label: t("common.uncategorized") },
+              ]}
+            />
+            {target === NEW_AREA ? (
+              <input className="shelf-bar-name grow" value={areaName} onChange={(e) => setAreaName(e.target.value)} maxLength={40} aria-label={t("shelf.area.name")} placeholder={t("shelf.area.name")} />
             ) : (
-              <label className="shelf-bar-area grow">
-                <span>{t("shelf.area.prefix", { count: chosen.length })}</span>
-                <input value={areaName} onChange={(e) => setAreaName(e.target.value)} maxLength={40} aria-label={t("shelf.area.name")} />
-              </label>
+              <span className="grow" />
             )}
             <button type="button" className="ghost" onClick={() => setSelected(new Set())} disabled={busy}>
               {t("common.cancel")}
             </button>
             <button type="button" className="primary" onClick={importChosen} disabled={busy}>
-              {t(chosen.length === 1 ? "shelf.bar.read" : "shelf.bar.area")}
+              {t(target === NEW_AREA ? "shelf.bar.area" : targetName ? "shelf.bar.join" : "shelf.bar.read")}
             </button>
           </div>
         )}

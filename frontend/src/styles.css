@@ -508,9 +508,13 @@ button.block { width: 100%; padding: 9px 14px; }
   border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: 0 10px 30px -18px var(--shadow);
   animation: pop-in .25s ease both;
 }
-.shelf-bar-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--t-small); }
-.shelf-bar-area { display: flex; align-items: center; gap: var(--s2); min-width: 0; font-size: var(--t-small); color: var(--muted); }
-.shelf-bar-area input { flex: 1; min-width: 80px; padding: 4px 8px; font-size: var(--t-small); }
+.shelf-bar-text { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--t-small); color: var(--muted); }
+/* the reading area they go into: one that exists, a new one (named in the field beside it), or none */
+.shelf-bar-target { flex: none; min-width: 132px; max-width: 220px; }
+.shelf-bar-target .select-menu { right: auto; width: max-content; min-width: 100%; max-width: 280px; }
+.shelf-bar-target [role=option] { white-space: nowrap; }
+.shelf-bar-target .select-button { padding: 4px 8px 4px 10px; font-size: var(--t-small); }
+.shelf-bar-name { min-width: 80px; padding: 4px 8px; font-size: var(--t-small); }
 
 .home-hint { margin: var(--s4) 0 0; text-align: center; font-size: var(--t-small); color: var(--muted); }
 .home-label { margin: 0 0 var(--s2); font-size: var(--t-meta); font-weight: 600; letter-spacing: .08em; color: var(--muted); }

@@ -35,23 +35,45 @@ class LibraryDescriber:
         self.materials = materials
         self._tasks: set[asyncio.Task] = set()
         self._sweeping: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None   # the app's loop, seen at start (lifespan sweep)
 
     def available(self) -> bool:
         return not self.registry.backend.simulated
 
+    def _on_loop(self, start) -> None:
+        """Run `start()` (which makes the task) on the app's event loop: at once when called on it, else handed to it —
+        a sync endpoint (the shelf import) runs in a worker thread, where there is no loop to make a task on."""
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if self._loop is None or self._loop.is_closed():
+                log.warning("no event loop to describe books on")
+                return
+            self._loop.call_soon_threadsafe(start)
+            return
+        start()
+
     def schedule(self, mid: str) -> None:
-        """Describe one book in the background (right after its import)."""
+        """Describe one book in the background (right after its import). Safe to call from any thread."""
         if not self.available():
             return
-        t = asyncio.create_task(self._quiet(mid))
-        self._tasks.add(t)
-        t.add_done_callback(self._tasks.discard)
+
+        def start():
+            t = asyncio.create_task(self._quiet(mid))
+            self._tasks.add(t)
+            t.add_done_callback(self._tasks.discard)
+        self._on_loop(start)
 
     def sweep(self) -> None:
-        """Describe, one after another in the background, every book that has no description yet."""
-        if not self.available() or (self._sweeping and not self._sweeping.done()):
+        """Describe, one after another in the background, every book that has no description yet. Safe to call from
+        any thread."""
+        if not self.available():
             return
-        self._sweeping = asyncio.create_task(self._sweep())
+
+        def start():
+            if not (self._sweeping and not self._sweeping.done()):
+                self._sweeping = asyncio.create_task(self._sweep())
+        self._on_loop(start)
 
     async def stop(self) -> None:
         tasks = [t for t in [*self._tasks, self._sweeping] if t and not t.done()]
@@ -87,7 +109,7 @@ class LibraryDescriber:
         except Exception:  # noqa: BLE001 — deleted meanwhile
             return None
         rec = m.get("library")
-        if not rec:
+        if not rec or (m.get("status") or "ready") != "ready":   # its text is still being read: described after that
             return None
         excerpt, n = [], 0
         for u in m["units"]:

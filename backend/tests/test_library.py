@@ -77,3 +77,39 @@ def test_nothing_is_written_without_a_real_model(tmp_path):
     d.schedule("whatever")
     d.sweep()
     assert d._sweeping is None and not d._tasks
+
+
+def test_a_book_imported_from_a_worker_thread_is_described_on_the_apps_loop(tmp_path):
+    """The shelf import is a sync endpoint (run in a worker thread, no event loop there): scheduling its description
+    must hand the work to the app's loop instead of failing with "no running event loop"."""
+    import threading
+
+    s = store(tmp_path)
+    m = s.add("book.txt", "某本書\n".encode(), None)
+    d = LibraryDescriber(SimpleNamespace(backend=Backend(), cfg=None), None, s)
+    done = []
+
+    async def describe(mid):
+        done.append(mid)
+    d.describe = describe
+
+    async def app():
+        d.sweep()   # at start, on the loop: the loop is remembered
+        errors = []
+
+        def import_in_thread():
+            try:
+                d.schedule(m["id"])
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+        t = threading.Thread(target=import_in_thread)
+        t.start()
+        t.join()
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if done.count(m["id"]) >= 2:
+                break
+        return errors
+
+    assert asyncio.run(app()) == []
+    assert done.count(m["id"]) == 2   # once by the start sweep, once for the import

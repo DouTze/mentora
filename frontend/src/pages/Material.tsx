@@ -31,6 +31,7 @@ interface Props {
 }
 
 const STUDY_POLL_MS = 3000;
+const EXTRACT_POLL_MS = 2000;
 const NO_MARKS: Bookmark[] = [];
 export const POSITION_KEY = (id: string) => `mentor.reader.at.${id}`;
 
@@ -534,9 +535,14 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
     if (open) thread.current?.scrollTo({ top: thread.current.scrollHeight, behavior: "smooth" });
   }, [open, qa.length, pending]);
 
+  // the text of a book just imported is still being read (or could not be): asking and 導讀 / 出題 wait for it
+  const preparing = material.status === "extracting";
+  const unreadable = material.status === "failed";
+  const blocked = preparing || unreadable;
+
   const send = async () => {
     const q = text.trim();
-    if (!q || pending) return;
+    if (!q || pending || blocked) return;
     setError(null);
     setPending(q);
     setOpen(true);
@@ -619,7 +625,9 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
-          placeholder={t(material.unit === "page" ? "reader.placeholder" : "reader.placeholder.line")}
+          placeholder={preparing ? t("reader.preparing") : unreadable ? t("reader.unreadable") : t(material.unit === "page" ? "reader.placeholder" : "reader.placeholder.line")}
+          disabled={blocked}
+          title={unreadable && material.status_detail ? material.status_detail : undefined}
           aria-label={t("reader.ask")}
         />
         {error && (
@@ -635,15 +643,15 @@ function Composer({ material, at, unitWord, onOpenSession }: { material: Materia
             </button>
           )}
           <span className="spacer" />
-          <button type="button" className="reader-action" onClick={() => learn("guide")} disabled={!!going} title={t("reader.guide.hint", { unit: unitWord })}>
+          <button type="button" className="reader-action" onClick={() => learn("guide")} disabled={!!going || blocked} title={t("reader.guide.hint", { unit: unitWord })}>
             <Icon.book />
             {going === "guide" ? t("reader.going") : t("reader.guide")}
           </button>
-          <button type="button" className="reader-action" onClick={() => learn("quiz")} disabled={!!going} title={t("reader.quiz.hint", { unit: unitWord })}>
+          <button type="button" className="reader-action" onClick={() => learn("quiz")} disabled={!!going || blocked} title={t("reader.quiz.hint", { unit: unitWord })}>
             <Icon.quiz />
             {going === "quiz" ? t("reader.going") : t("reader.quiz")}
           </button>
-          <button type="submit" className="reader-send" disabled={!text.trim() || !!pending} aria-label={t("reader.send")}>
+          <button type="submit" className="reader-send" disabled={!text.trim() || !!pending || blocked} aria-label={t("reader.send")}>
             <Icon.arrowUp />
           </button>
         </div>
@@ -1028,6 +1036,18 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // a book just imported may still have its text read in the background: ask again until it is
+  useEffect(() => {
+    if (material?.id !== id || material.status !== "extracting") return;
+    const timer = setTimeout(() => {
+      api
+        .material(id)
+        .then((m) => setMaterial((cur) => (cur?.id === m.id ? { ...cur, ...m } : cur)))
+        .catch(() => {});
+    }, EXTRACT_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [id, material]);
 
   useEffect(() => {
     setMaterial(null);

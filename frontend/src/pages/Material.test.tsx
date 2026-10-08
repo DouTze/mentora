@@ -148,6 +148,19 @@ describe("MaterialPage · toolbar", () => {
   });
 });
 
+describe("MaterialPage · a book just imported", () => {
+  test("while its text is read in the background, asking and 導讀 wait; they open once it is ready", async () => {
+    let reads = 0;
+    setup({ "GET /api/materials/m1": () => ({ json: { ...material, status: reads++ === 0 ? "extracting" : "ready" } }) });
+    const box = await screen.findByRole("textbox", { name: "向導師提問" });
+    expect(box.getAttribute("placeholder")).toBe("正在整理這本書的文字，完成後就能提問與導讀…");
+    expect((box as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /導讀/ }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect((box as HTMLTextAreaElement).disabled).toBe(false), { timeout: 4000 });
+    expect(box.getAttribute("placeholder")).toBe("對這段有疑問？");
+  });
+});
+
 describe("MaterialPage · English", () => {
   test("labels the box and actions in English", async () => {
     mockFetch({

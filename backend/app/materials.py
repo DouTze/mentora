@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS materials (
   unit_count INTEGER NOT NULL,
   units TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  text_version INTEGER NOT NULL DEFAULT 1
+  text_version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'ready',
+  status_detail TEXT
 );
 """
 
@@ -179,6 +181,19 @@ def _pdf_pages_pypdf(data: bytes) -> list[str]:
         raise MaterialError("unreadable", f"無法讀取這個 PDF：{e}") from e
 
 
+def pdf_page_count(data: bytes) -> int:
+    """Pages of a PDF, without reading its text (a damaged file is refused here, as extract_units would)."""
+    try:
+        import pymupdf
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            n = doc.page_count
+    except Exception as e:  # noqa: BLE001
+        raise MaterialError("unreadable", f"無法開啟這份 PDF：{e}") from e
+    if n == 0:
+        raise MaterialError("empty", "這份 PDF 沒有頁面。")
+    return n
+
+
 def extract_units(kind: str, data: bytes) -> list[str]:
     if kind == "pdf":
         try:
@@ -215,8 +230,12 @@ class MaterialStore:
         self.files_dir = files_dir or (Path(db.path).parent / "materials" if db.path != ":memory:" else config.DATA_DIR / "materials")
         with db.conn() as c:
             c.executescript(SCHEMA)
-            if "text_version" not in {r[1] for r in c.execute("PRAGMA table_info(materials)")}:   # materials before it
+            cols = {r[1] for r in c.execute("PRAGMA table_info(materials)")}
+            if "text_version" not in cols:   # materials before it
                 c.execute("ALTER TABLE materials ADD COLUMN text_version INTEGER NOT NULL DEFAULT 1")
+            if "status" not in cols:         # materials before the background text reading: all read
+                c.execute("ALTER TABLE materials ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'")
+                c.execute("ALTER TABLE materials ADD COLUMN status_detail TEXT")
 
     @property
     def library_dir(self) -> Path:
@@ -255,7 +274,9 @@ class MaterialStore:
             raise MaterialError("not_found", "找不到這個分類")
 
     # -- materials ----------------------------------------------------------
-    META = "id, category_id, title, filename, kind, unit, unit_count, created_at, text_version"
+    # status: "ready" (its text is read), "extracting" (a PDF whose text is being read in the background, see
+    # app.material_extract) or "failed" (status_detail says why); the file itself is in place in every case
+    META = "id, category_id, title, filename, kind, unit, unit_count, created_at, text_version, status, status_detail"
 
     def list(self) -> list[dict]:
         lib = self.library.all()
@@ -269,9 +290,12 @@ class MaterialStore:
         """Give the materials imported before content names theirs (app.library.Library.adopt)."""
         return self.library.adopt(self.list(), lambda m: self.files_dir / f"{m['id']}.{m['kind']}")
 
-    def add(self, filename: str, data: bytes, category_id: str | None, *, original_path: str | None = None) -> dict:
+    def add(self, filename: str, data: bytes, category_id: str | None, *, original_path: str | None = None,
+            defer: bool = False) -> dict:
         """Import a file. The same file (same content, whatever its name) is refused as a duplicate, naming the
-        material it already is. `original_path`: where the file came from, when known (the home bookshelf)."""
+        material it already is. `original_path`: where the file came from, when known (the home bookshelf).
+        `defer`: a PDF is recorded with its page count only (status "extracting") and its text read afterwards
+        (app.material_extract); the caller schedules that."""
         from .library import sha256
         kind = KINDS.get(Path(filename).suffix.lower())
         if not kind:
@@ -287,18 +311,43 @@ class MaterialStore:
             if existing:
                 raise MaterialError("duplicate", f"「{existing['title']}」已經在書庫中，不會重複匯入。",
                                     {"material": existing})
-        units = extract_units(kind, data)
+        deferred = defer and kind == "pdf"
+        units = [""] * pdf_page_count(data) if deferred else extract_units(kind, data)
         mid = new_id()
         self.files_dir.mkdir(parents=True, exist_ok=True)
         (self.files_dir / f"{mid}.{kind}").write_bytes(data)
         with self.db.conn() as c:
             c.execute("INSERT INTO materials (id, category_id, title, filename, kind, unit, unit_count, units, created_at, "
-                      "text_version) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      "text_version, status) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                       (mid, category_id or None, Path(filename).stem, filename, kind,
                        "page" if kind == "pdf" else "line", len(units), json.dumps(units, ensure_ascii=False), now_iso(),
-                       TEXT_VERSION if kind == "pdf" else 1))
+                       TEXT_VERSION if kind == "pdf" else 1, "extracting" if deferred else "ready"))
         self.library.keep(mid, filename, data, digest, original_path)
         return self.get(mid, with_units=False)
+
+    # -- the text, read in the background ------------------------------------------------------
+    def extracting(self) -> list[str]:
+        """Materials whose text is still to be read (also those left half done when the app stopped)."""
+        with self.db.conn() as c:
+            return [r["id"] for r in c.execute("SELECT id FROM materials WHERE status='extracting' ORDER BY created_at")]
+
+    def set_units(self, mid: str, units: list[str]) -> None:
+        with self.db.conn() as c:
+            c.execute("UPDATE materials SET units=?, unit_count=?, status='ready', status_detail=NULL WHERE id=?",
+                      (json.dumps(units, ensure_ascii=False), len(units), mid))
+
+    def set_failed(self, mid: str, detail: str) -> None:
+        with self.db.conn() as c:
+            c.execute("UPDATE materials SET status='failed', status_detail=? WHERE id=?", (detail[:300], mid))
+
+    @staticmethod
+    def require_ready(m: dict) -> None:
+        """What needs the text (a question, 導讀, the companion's study) waits until it is read."""
+        status = m.get("status") or "ready"
+        if status == "extracting":
+            raise MaterialError("preparing", f"正在整理「{m['title']}」的文字，完成後就能使用。", {"retryable": True})
+        if status == "failed":
+            raise MaterialError("unreadable", f"讀不到「{m['title']}」的文字：{m.get('status_detail') or '未知原因'}")
 
     def reorder_categories(self, ids: list[str]) -> list[dict]:
         """Categories in the given order; any not named keep their relative order after them."""
@@ -398,6 +447,7 @@ class MaterialStore:
     def range_units(self, mid: str, start: int, end: int) -> tuple[dict, list[str]]:
         """Raw units start..end (1-based, inclusive) plus the material row without its units."""
         m = self.get(mid)
+        self.require_ready(m)
         if not (1 <= start <= end <= m["unit_count"]):
             raise MaterialError("bad_range", f"範圍需在 1–{m['unit_count']} 之間，且起點不大於終點。")
         return m, m.pop("units")[start - 1:end]

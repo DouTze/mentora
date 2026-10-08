@@ -110,6 +110,8 @@ class ShelfScope(BaseModel):
 class ShelfImport(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=20)
     category_name: str | None = Field(default=None, max_length=40)
+    # an existing reading area to put the books in (wins over category_name, which makes or finds one by name)
+    category_id: str | None = Field(default=None, max_length=64)
 
 
 class AnswerRequest(BaseModel):

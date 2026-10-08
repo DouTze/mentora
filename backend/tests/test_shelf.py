@@ -136,6 +136,18 @@ def test_query_runs_scout_saves_interest_and_imports_into_a_reading_area(client)
     assert book["id"] not in [b["id"] for b in client.get("/api/shelf").json()["books"]]
 
 
+def test_books_join_an_existing_reading_area(client):
+    client.post("/api/shelf/query", json={"text": ""})
+    v = wait_ready(client)
+    area = client.post("/api/categories", json={"name": "已有的閱讀區"}).json()
+    book = v["books"][0]
+    out = client.post("/api/shelf/import", json={"ids": [book["id"]], "category_id": area["id"], "category_name": "不會用到"}).json()
+    assert out["category"]["id"] == area["id"] and out["materials"][0]["category_id"] == area["id"]
+    assert [c["name"] for c in client.get("/api/library").json()["categories"]] == ["已有的閱讀區"]   # none made
+    other = client.get("/api/shelf").json()["books"][0]
+    assert client.post("/api/shelf/import", json={"ids": [other["id"]], "category_id": "gone"}).status_code == 404
+
+
 def test_import_refuses_ids_not_in_the_index(client):
     r = client.post("/api/shelf/import", json={"ids": ["deadbeef0000"]})
     assert r.status_code == 404
