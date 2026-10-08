@@ -7,6 +7,7 @@
 // works the companion only murmurs that it is getting ready. Files can still be dropped or picked by hand.
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, RequestError } from "../api";
+import { importFiles as importIntoLibrary, noticeDuplicate } from "../library";
 import type { Library, SessionListItem, ShelfBook, ShelfView } from "../types";
 import type { Route } from "../route";
 import { Icon } from "../components/Icons";
@@ -178,10 +179,9 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, 
     setBusy(true);
     setError(null);
     try {
-      let lastId = "";
-      for (const f of files) lastId = (await api.importMaterial(f, null)).id;
+      const last = await importIntoLibrary(files, null, t as never, (id) => onNavigate({ page: "material", id }));
       await onLibraryChange();
-      onNavigate({ page: "material", id: lastId });
+      if (last) onNavigate({ page: "material", id: last.id });
     } catch (e) {
       setError((e as RequestError).body.detail);
       await onLibraryChange();
@@ -196,8 +196,12 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, 
     setError(null);
     try {
       const r = await api.shelfImport(chosen.map((b) => b.id), chosen.length > 1 ? areaName.trim() || suggestedName : null);
+      const open = (id: string) => onNavigate({ page: "material", id });
+      r.duplicates.forEach((m) => noticeDuplicate(m, t as never, open));   // already in the library: named, not added
       await onLibraryChange();
-      onNavigate({ page: "material", id: r.materials[0].id });
+      const first = r.materials[0] ?? r.duplicates[0];
+      if (first) open(first.id);
+      else setBusy(false);
     } catch (e) {
       setError((e as RequestError).body.detail);
       setBusy(false);

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,6 +16,7 @@ import json
 from . import config, export, pdf_worker
 from .db import Database
 from .llm.registry import Registry
+from .library_describe import LibraryDescriber
 from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
 from .llm import remote
@@ -53,6 +55,13 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     svc.workflow = workflow
     study = StudyService(db, registry, pool, materials, repo, workflow)
     shelf = shelf or ShelfService(db, registry, pool, materials, config.SHELF_DIR)
+    workflow.close_orphans({m["id"] for m in materials.list()})   # readings of materials deleted before that closed them
+    describer = LibraryDescriber(registry, pool, materials)
+    shelf.describer = describer
+    try:   # the books imported before the book folder named copies after their content
+        materials.adopt_library()
+    except Exception:  # noqa: BLE001 — the folder may be unreadable; imports still work
+        logging.getLogger("mentor.library").warning("could not adopt the book folder", exc_info=True)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -60,9 +69,11 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         await runner.start()
         # index the disk and prepare the shelf before the home page asks for it
         warm = asyncio.create_task(shelf.warmup()) if config.SHELF_WARMUP else None
+        describer.sweep()     # books still without a description and an alias, when a model is connected
         try:
             yield
         finally:
+            await describer.stop()
             for t in (warm, shelf.task):
                 if t and not t.done():
                     t.cancel()
@@ -73,7 +84,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     app.state.db, app.state.registry, app.state.svc = db, registry, svc
     app.state.repo, app.state.runner, app.state.workflow = repo, runner, workflow
-    app.state.shelf, app.state.study = shelf, study
+    app.state.shelf, app.state.study, app.state.describer = shelf, study, describer
 
     @app.exception_handler(SessionError)
     async def _session_error(_, e: SessionError):
@@ -97,8 +108,8 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
 
     @app.exception_handler(MaterialError)
     async def _material_error(_, e: MaterialError):
-        return JSONResponse(status_code=404 if e.code == "not_found" else 400,
-                            content={"code": e.code, "detail": e.detail, "retryable": False})
+        return JSONResponse(status_code={"not_found": 404, "duplicate": 409}.get(e.code, 400),
+                            content={"code": e.code, "detail": e.detail, "retryable": False, **e.extra})
 
     @app.get("/api/health")
     async def health():
@@ -144,7 +155,11 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
 
     @app.post("/api/materials")
     async def import_material(file: UploadFile = File(...), category_id: str | None = Form(None)):
-        return materials.add(file.filename or "untitled.txt", await file.read(), category_id)
+        """A file from the browser (only its name is known, not its path). The same file again: 409 `duplicate` with
+        the material it already is."""
+        m = materials.add(file.filename or "untitled.txt", await file.read(), category_id)
+        describer.schedule(m["id"])
+        return m
 
     @app.get("/api/materials/{mid}")
     async def get_material(mid: str):
@@ -157,9 +172,13 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
 
     @app.delete("/api/materials/{mid}")
     async def delete_material(mid: str):
+        """The material and what only it needs (its study, the questions asked from its pages); its unfinished
+        readings are closed and kept as learning records."""
+        materials.get(mid, with_units=False)
+        await study.drop(mid)
+        closed = await workflow.close_material(mid)
         materials.delete(mid)
-        study.forget(mid)
-        return {"ok": True}
+        return {"ok": True, "closed": closed}
 
     @app.get("/api/materials/{mid}/cover")
     def material_cover(mid: str):
@@ -342,6 +361,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         registry.update(cfg)
         pool.set_parallel(cfg.parallel)
         db.set_setting("model_config", cfg.model_dump())
+        describer.sweep()
         return {"config": registry.cfg.model_dump(), "active": registry.backend.describe(), "remote": remote.public()}
 
     @app.put("/api/settings/remote")
@@ -364,6 +384,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         pool.set_parallel(cfg.parallel)
         db.set_setting("model_config", cfg.model_dump())
         db.set_setting("companions", req.model_dump())
+        describer.sweep()
         return {"companions": req.model_dump(), "config": cfg.model_dump(), "active": registry.backend.describe()}
 
     @app.post("/api/settings/check")

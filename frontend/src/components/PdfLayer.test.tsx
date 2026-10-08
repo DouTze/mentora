@@ -44,4 +44,20 @@ describe("PdfLayer", () => {
     expect(links[2].getAttribute("href")).toBeNull();
     expect(container.querySelector(".pdf-image-save")?.getAttribute("href")).toBe("/img/7");
   });
+
+  test("a formula run holds its LaTeX, and hovering it opens a card with the formula and its source", async () => {
+    const withMath: PdfPageLayer = {
+      ...layer,
+      lines: [{ block: 0, runs: [{ t: "$$y=a\\times b \\tag{1.2}$$", rect: [10, 60, 200, 72], sp: true, math: 0 }] }],
+      math: [{ rect: [10, 55, 200, 78], latex: "y=a\\times b", display: true, tag: "1.2" }],
+    };
+    const { container } = render(<PdfLayer layer={withMath} imageUrl={(x) => `/img/${x}`} onGoto={() => {}} />);
+    const run = container.querySelector<HTMLElement>(".pdf-run.math")!;
+    expect(container.querySelector(".pdf-text")?.textContent).toBe(" $$y=a\\times b \\tag{1.2}$$\n");
+    fireEvent.mouseEnter(run);
+    await new Promise((r) => setTimeout(r, 400));
+    const card = document.body.querySelector(".pdf-math-card")!;   // a portal: it floats over the whole app
+    expect(card.querySelector(".katex")).toBeTruthy();
+    expect(card.querySelector("code")?.textContent).toBe("$$y=a\\times b \\tag{1.2}$$");
+  });
 });

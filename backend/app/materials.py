@@ -15,6 +15,10 @@ from .db import Database, new_id, now_iso
 
 log = logging.getLogger("mentor.materials")
 KINDS = {".pdf": "pdf", ".md": "md", ".markdown": "md", ".txt": "txt"}
+# how a PDF's text was extracted: 1 PyMuPDF's characters as they are; 2 glyphs read through their names (TeX fonts)
+# and formulas as $…$ / $$…$$ (app.pdfdoc.math). Stored per material: the paragraph evidence re-reads the original
+# the same way its units were made, so a (page, paragraph) locator keeps pointing at the same block.
+TEXT_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
@@ -32,16 +36,18 @@ CREATE TABLE IF NOT EXISTS materials (
   unit TEXT NOT NULL,
   unit_count INTEGER NOT NULL,
   units TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  text_version INTEGER NOT NULL DEFAULT 1
 );
 """
 
 
 class MaterialError(Exception):
-    def __init__(self, code: str, detail: str):
+    def __init__(self, code: str, detail: str, extra: dict | None = None):
         super().__init__(detail)
         self.code = code
         self.detail = detail
+        self.extra = extra or {}    # e.g. the material a duplicate file already is
 
 
 PAGE_MARGIN_RE = re.compile(r"^(\d{1,4}|[ivxlc]{1,6})\b|\b(\d{1,4})$", re.I)   # running header/footer with a page number
@@ -73,19 +79,44 @@ def _join_lines(lines: list[str]) -> str:
     return re.sub(r"[ \t]+", " ", out).strip()
 
 
-def _page_text_blocks(page) -> list[tuple[str, tuple[float, float, float, float], bool]]:
-    """(joined text, bbox, at the top / bottom edge) of the page's text blocks, in PyMuPDF's reading order."""
+def _page_text_blocks(page, math=None) -> list[tuple[str, tuple[float, float, float, float], bool, str]]:
+    """(joined text, bbox, at the top / bottom edge, the plain text) of the page's text blocks, in PyMuPDF's reading
+    order. With `math` (app.pdfdoc.math.PageMath of the page, same flags) the text has glyphs read through their names
+    and formulas as $…$ / $$…$$; a block whose glyphs all went into a formula of another block is left out. The plain
+    text is PyMuPDF's own, for the margin decisions (the same with or without formulas)."""
     import pymupdf
 
     height = page.rect.height or 1
     out = []
-    for x0, y0, x1, y1, text, *_rest in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE):
-        if _rest[1] != 0:   # block type: 0 text, 1 image
-            continue
-        lines = [PUA_BULLET_RE.sub("• ", ln.strip()) for ln in text.split("\n") if ln.strip()]
+    if math is None:
+        for x0, y0, x1, y1, text, *_rest in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE):
+            if _rest[1] != 0:   # block type: 0 text, 1 image
+                continue
+            lines = [PUA_BULLET_RE.sub("• ", ln.strip()) for ln in text.split("\n") if ln.strip()]
+            if lines:
+                joined = _join_lines(lines)
+                out.append((joined, (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE), joined))
+        return out
+    for bi, b in enumerate(math.blocks):
+        plain = [PUA_BULLET_RE.sub("• ", "".join(g.c for g in ln["glyphs"]).strip()) for ln in b["lines"]]
+        plain = [ln for ln in plain if ln]
+        lines = [PUA_BULLET_RE.sub("• ", ln.strip()) for ln in math.block_text(bi) if ln.strip()]
         if lines:
-            out.append((_join_lines(lines), (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE)))
+            x0, y0, x1, y1 = b["bbox"]
+            out.append((_join_lines(lines), (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE),
+                        _join_lines(plain)))
     return out
+
+
+def pdf_page_math(doc, page, fonts=None):
+    """The page's glyphs and formulas (app.pdfdoc.math) for text version 2; None on a page without TeX or math fonts,
+    whose text is PyMuPDF's own."""
+    import pymupdf
+
+    from .pdfdoc.math import FontNames, page_math, wants_math
+    if not wants_math(doc, page.number):
+        return None
+    return page_math(page, fonts or FontNames(doc), pymupdf.TEXT_DEHYPHENATE)
 
 
 def pdf_running_margins(doc) -> frozenset[str]:
@@ -95,21 +126,22 @@ def pdf_running_margins(doc) -> frozenset[str]:
         return frozenset()
     seen: dict[str, int] = {}
     for page in doc:
-        for key in {_margin_key(t) for t, _, edge in _page_text_blocks(page) if edge and len(t) <= 80}:
+        for key in {_margin_key(t) for t, _, edge, _plain in _page_text_blocks(page) if edge and len(t) <= 80}:
             seen[key] = seen.get(key, 0) + 1
     return frozenset(k for k, n in seen.items() if n >= MARGIN_REPEAT_PAGES)
 
 
-def pdf_page_paragraphs(page, margins: frozenset[str] = frozenset()) -> list[tuple[str, tuple[float, float, float, float]]]:
+def pdf_page_paragraphs(page, margins: frozenset[str] = frozenset(), math=None) -> list[tuple[str, tuple[float, float, float, float]]]:
     """(paragraph text, bbox) of one PyMuPDF page, in reading order. A PyMuPDF text block is a paragraph in typeset
     books, but only a line in PDFs whose line spacing is wide (Word exports): the reading pipeline rebuilds
     paragraphs from the text itself (reading/source.py), so this layer does not guess. Hyphenated line breaks are
     joined, Office bullet glyphs become "• ", and edge blocks are dropped when they carry a page number or are one of
     the document's running `margins` (pdf_running_margins). The importer and the evidence extractor both use this, so
-    a block's (page, paragraph index) locator points at the same region in both."""
+    a block's (page, paragraph index) locator points at the same region in both. `math` (pdf_page_math, text version 2)
+    gives the text with formulas as LaTeX; whether an edge block is dropped is decided on the plain text either way."""
     out: list[tuple[str, tuple[float, float, float, float]]] = []
-    for text, bbox, edge in _page_text_blocks(page):
-        if edge and len(text) <= 80 and (PAGE_MARGIN_RE.search(text) or _margin_key(text) in margins):
+    for text, bbox, edge, plain in _page_text_blocks(page, math):
+        if edge and len(plain) <= 80 and (PAGE_MARGIN_RE.search(plain) or _margin_key(plain) in margins):
             continue
         out.append((text, bbox))
     return out
@@ -123,8 +155,18 @@ def _pdf_pages_pymupdf(data: bytes) -> list[str]:
         doc = pymupdf.open(stream=data, filetype="pdf")
     except Exception as e:  # noqa: BLE001 — pymupdf raises plain exceptions for broken files
         raise MaterialError("unreadable", f"無法讀取這個 PDF：{e}") from e
+    from .pdfdoc.math import FontNames
     margins = pdf_running_margins(doc)
-    return ["\n\n".join(t for t, _ in pdf_page_paragraphs(page, margins)) for page in doc]
+    fonts = FontNames(doc)
+    out = []
+    for page in doc:
+        try:
+            math = pdf_page_math(doc, page, fonts)
+        except Exception:  # noqa: BLE001 — a page the formula reader cannot take keeps PyMuPDF's text
+            log.warning("formula reading failed on page %s", page.number + 1, exc_info=True)
+            math = None
+        out.append("\n\n".join(t for t, _ in pdf_page_paragraphs(page, margins, math)))
+    return out
 
 
 def _pdf_pages_pypdf(data: bytes) -> list[str]:
@@ -165,12 +207,24 @@ def extract_units(kind: str, data: bytes) -> list[str]:
 
 class MaterialStore:
     def __init__(self, db: Database, files_dir: Path | None = None, library_dir: Path | None = None):
-        """`library_dir`: the person's own book folder (~/.mentora); every import leaves a copy of the file there."""
+        """`library_dir`: the person's own book folder (~/.mentora); every import leaves a copy of the file there,
+        named after its content (app.library)."""
+        from .library import Library
         self.db = db
-        self.library_dir = library_dir or config.LIBRARY_DIR
+        self.library = Library(db, library_dir or config.LIBRARY_DIR)
         self.files_dir = files_dir or (Path(db.path).parent / "materials" if db.path != ":memory:" else config.DATA_DIR / "materials")
         with db.conn() as c:
             c.executescript(SCHEMA)
+            if "text_version" not in {r[1] for r in c.execute("PRAGMA table_info(materials)")}:   # materials before it
+                c.execute("ALTER TABLE materials ADD COLUMN text_version INTEGER NOT NULL DEFAULT 1")
+
+    @property
+    def library_dir(self) -> Path:
+        return self.library.folder
+
+    @library_dir.setter
+    def library_dir(self, folder: Path) -> None:
+        self.library.folder = folder
 
     # -- categories ---------------------------------------------------------
     def list_categories(self) -> list[dict]:
@@ -201,44 +255,50 @@ class MaterialStore:
             raise MaterialError("not_found", "找不到這個分類")
 
     # -- materials ----------------------------------------------------------
-    META = "id, category_id, title, filename, kind, unit, unit_count, created_at"
+    META = "id, category_id, title, filename, kind, unit, unit_count, created_at, text_version"
 
     def list(self) -> list[dict]:
+        lib = self.library.all()
         with self.db.conn() as c:
-            return [dict(r) for r in c.execute(f"SELECT {self.META} FROM materials ORDER BY created_at")]
+            rows = [dict(r) for r in c.execute(f"SELECT {self.META} FROM materials ORDER BY created_at")]
+        for r in rows:
+            r["alias"] = (lib.get(r["id"]) or {}).get("alias")
+        return rows
 
-    def add(self, filename: str, data: bytes, category_id: str | None) -> dict:
+    def adopt_library(self) -> int:
+        """Give the materials imported before content names theirs (app.library.Library.adopt)."""
+        return self.library.adopt(self.list(), lambda m: self.files_dir / f"{m['id']}.{m['kind']}")
+
+    def add(self, filename: str, data: bytes, category_id: str | None, *, original_path: str | None = None) -> dict:
+        """Import a file. The same file (same content, whatever its name) is refused as a duplicate, naming the
+        material it already is. `original_path`: where the file came from, when known (the home bookshelf)."""
+        from .library import sha256
         kind = KINDS.get(Path(filename).suffix.lower())
         if not kind:
             raise MaterialError("unsupported", "目前只支援 pdf、md、txt。")
         self._check_category(category_id)
+        digest = sha256(data)
+        same = self.library.by_hash(digest)
+        if same:
+            try:
+                existing = self.get(same, with_units=False)
+            except MaterialError:
+                existing = None
+            if existing:
+                raise MaterialError("duplicate", f"「{existing['title']}」已經在書庫中，不會重複匯入。",
+                                    {"material": existing})
         units = extract_units(kind, data)
-        self.keep_copy(filename, data)
         mid = new_id()
         self.files_dir.mkdir(parents=True, exist_ok=True)
         (self.files_dir / f"{mid}.{kind}").write_bytes(data)
         with self.db.conn() as c:
-            c.execute("INSERT INTO materials VALUES (?,?,?,?,?,?,?,?,?)",
+            c.execute("INSERT INTO materials (id, category_id, title, filename, kind, unit, unit_count, units, created_at, "
+                      "text_version) VALUES (?,?,?,?,?,?,?,?,?,?)",
                       (mid, category_id or None, Path(filename).stem, filename, kind,
-                       "page" if kind == "pdf" else "line", len(units), json.dumps(units, ensure_ascii=False), now_iso()))
+                       "page" if kind == "pdf" else "line", len(units), json.dumps(units, ensure_ascii=False), now_iso(),
+                       TEXT_VERSION if kind == "pdf" else 1))
+        self.library.keep(mid, filename, data, digest, original_path)
         return self.get(mid, with_units=False)
-
-    def keep_copy(self, filename: str, data: bytes) -> Path | None:
-        """Put the file in the library folder under its own name: skipped when the same file is already there, given
-        a " (2)" suffix when another file has that name. A failure (permissions, full disk) does not stop the import."""
-        try:
-            self.library_dir.mkdir(parents=True, exist_ok=True)
-            stem, ext = Path(filename).stem, Path(filename).suffix
-            target, n = self.library_dir / Path(filename).name, 2
-            while target.exists():
-                if target.stat().st_size == len(data) and target.read_bytes() == data:
-                    return target
-                target, n = self.library_dir / f"{stem} ({n}){ext}", n + 1
-            target.write_bytes(data)
-            return target
-        except OSError:
-            log.warning("could not copy %s into %s", filename, self.library_dir, exc_info=True)
-            return None
 
     def reorder_categories(self, ids: list[str]) -> list[dict]:
         """Categories in the given order; any not named keep their relative order after them."""
@@ -257,6 +317,9 @@ class MaterialStore:
         d = dict(row)
         if with_units:
             d["units"] = json.loads(d["units"])
+        lib = self.library.get(mid)
+        d["alias"] = (lib or {}).get("alias")
+        d["library"] = lib    # the copy in the book folder and what it stands for (app.library)
         return d
 
     def update(self, mid: str, *, title: str | None, category_id: str | None, set_category: bool) -> dict:
@@ -273,6 +336,7 @@ class MaterialStore:
         m = self.get(mid, with_units=False)
         with self.db.conn() as c:
             c.execute("DELETE FROM materials WHERE id=?", (mid,))
+        self.library.remove(mid)      # its copy in the book folder goes too
         (self.files_dir / f"{mid}.{m['kind']}").unlink(missing_ok=True)
         (self.files_dir / "covers" / f"{mid}.png").unlink(missing_ok=True)
         import shutil

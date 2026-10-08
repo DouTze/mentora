@@ -234,14 +234,41 @@ def test_imported_pdf_has_a_cover_and_sessions_report_progress(client):
 
 
 def test_every_import_leaves_a_copy_in_the_library_folder(client, tmp_path):
+    from app.library import sha256, stored_name
     lib = tmp_path / "library"
     client.app.state.svc.materials.library_dir = lib    # the store behind /api/materials
-    r = client.post("/api/materials", files={"file": ("notes.txt", "第一行\n第二行\n".encode(), "text/plain")})
+    data = "第一行\n第二行\n".encode()
+    r = client.post("/api/materials", files={"file": ("notes.txt", data, "text/plain")})
     assert r.status_code == 200
-    assert (lib / "notes.txt").read_text(encoding="utf-8") == "第一行\n第二行\n"
-    client.post("/api/materials", files={"file": ("notes.txt", "第一行\n第二行\n".encode(), "text/plain")})
-    client.post("/api/materials", files={"file": ("notes.txt", "另一份\n".encode(), "text/plain")})
-    assert sorted(p.name for p in lib.iterdir()) == ["notes (2).txt", "notes.txt"]   # same file once; another name for a different one
+    name = stored_name(sha256(data), "notes.txt")          # named after its content, recorded with what it was
+    assert (lib / name).read_bytes() == data
+    rec = client.get(f"/api/materials/{r.json()['id']}").json()["library"]
+    assert (rec["stored_name"], rec["original_name"], rec["sha256"], rec["size"]) == (name, "notes.txt", sha256(data), len(data))
+    # the same file again, under another name: refused, naming the book it already is
+    again = client.post("/api/materials", files={"file": ("copy of notes.txt", data, "text/plain")})
+    assert again.status_code == 409 and again.json()["code"] == "duplicate" and again.json()["material"]["id"] == r.json()["id"]
+    other = client.post("/api/materials", files={"file": ("notes.txt", "另一份\n".encode(), "text/plain")})
+    assert sorted(p.name for p in lib.iterdir()) == sorted([name, stored_name(sha256("另一份\n".encode()), "notes.txt")])
+    # removing a book removes its copy
+    client.delete(f"/api/materials/{other.json()['id']}")
+    assert [p.name for p in lib.iterdir()] == [name]
+
+
+def test_copies_from_before_are_renamed_to_content_names(tmp_path):
+    from app.db import Database
+    from app.library import sha256, stored_name
+    from app.materials import MaterialStore
+    db, lib = Database(tmp_path / "db.sqlite3"), tmp_path / "library"
+    store = MaterialStore(db, files_dir=tmp_path / "files", library_dir=lib)
+    data = "舊的講義\n".encode()
+    m = store.add("handout.txt", data, None)
+    # as an older version left it: no record, the copy under its own name
+    with db.conn() as c:
+        c.execute("DELETE FROM library_files")
+    (lib / stored_name(sha256(data), "handout.txt")).rename(lib / "handout.txt")
+    assert MaterialStore(db, files_dir=tmp_path / "files", library_dir=lib).adopt_library() == 1
+    assert [p.name for p in lib.iterdir()] == [stored_name(sha256(data), "handout.txt")]
+    assert store.get(m["id"])["library"]["original_name"] == "handout.txt"
 
 
 def test_categories_can_be_reordered(client):

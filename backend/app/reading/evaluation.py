@@ -28,9 +28,10 @@ async def run_case(case: dict, cfg, counter, stages: list[str], tmp: Path, *, ev
     _, blocks = extract_blocks(case["id"], unit, 1, len(units), units)
     pdf_path = None
     if case.get("kind") == "pdf":   # R5: layout / font evidence from the original file, as the session does
+        from ..materials import TEXT_VERSION
         from .pdf_evidence import attach_evidence
         pdf_path = str(ev.EVAL_DIR / case["source"])
-        blocks = attach_evidence(pdf_path, blocks)
+        blocks = attach_evidence(pdf_path, blocks, TEXT_VERSION)   # units come from extract_units, the current version
     deps = PlannerDeps(make_ctx=make_ctx if "segment" in stages else None, prompts=bundle["prompts"],
                        prompt_version=bundle["hash"], material_title=case["id"])
     plan = await plan_units(blocks, deps, window_chars=case.get("window_chars") or 5000)

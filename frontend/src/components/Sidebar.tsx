@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useT, type Key } from "../i18n";
 import { api, RequestError } from "../api";
+import { importFiles } from "../library";
 import type { Category, Library, Material } from "../types";
 import type { CompanionId } from "../companions";
 import { useStored, type Route } from "../route";
@@ -143,12 +144,12 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
     }
   };
 
-  const importFiles = async (files: File[], categoryId: string | null) => {
+  const addFiles = async (files: File[], categoryId: string | null) => {
     if (files.length === 0) return;
     setBusy(true);
     let last: Material | null = null;
     await run(async () => {
-      for (const f of files) last = await api.importMaterial(f, categoryId);
+      last = await importFiles(files, categoryId, t as never, (id) => onNavigate({ page: "material", id }));
     });
     setBusy(false);
     if (categoryId) setFolded(folded.filter((id) => id !== categoryId));
@@ -205,7 +206,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
     onDrop: (e: DragEvent) => {
       e.preventDefault();
       setDropTarget(null);
-      importFiles([...e.dataTransfer.files], categoryId);
+      addFiles([...e.dataTransfer.files], categoryId);
     },
   });
 
@@ -275,7 +276,7 @@ export function Sidebar({ library, route, companion, conn, hasSession, collapsed
         </span>
       </div>
       <input ref={fileInput} type="file" accept={ACCEPT} multiple hidden onChange={(e) => {
-        importFiles([...(e.target.files ?? [])], importInto.current);
+        addFiles([...(e.target.files ?? [])], importInto.current);
         e.target.value = "";
       }} />
 

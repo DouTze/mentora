@@ -72,6 +72,88 @@ def test_learn_from_the_reader_starts_the_part_range_once(c):
     assert again["id"] == s["id"]
 
 
+def guided(c, sid, timeout=20):
+    """The session once its first guide is in."""
+    end = time.time() + timeout
+    while time.time() < end:
+        s = c.get(f"/api/sessions/{sid}").json()
+        if "0" in s["reading"]["guides"]:
+            return s
+        time.sleep(0.02)
+    raise AssertionError("no guide")
+
+
+def test_learn_from_the_reader_reuses_the_study_units_and_guides(c):
+    m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
+    v = ready(c, m["id"])
+    db = c.app.state.db
+    study = db.get_session(v["session_id"])
+    guided(c, study["id"])                                   # the study wrote the guide of its first unit
+    part = v["parts"][0]
+    s = c.post(f"/api/materials/{m['id']}/learn", json={"at": part["from"]}).json()
+    row = db.get_session(s["id"])
+    # the part's units as the study cut them: same snapshot and unit ids, nothing segmented again
+    sp = study["content_snapshot"]["parts"][0]
+    want = [q["unit_id"] for q in study["content_snapshot"]["quotes"][sp["quote_from"]:sp["quote_to"] + 1]]
+    assert [q["unit_id"] for q in row["content_snapshot"]["quotes"]] == want
+    assert [q["index"] for q in row["content_snapshot"]["quotes"]] == list(range(len(want)))
+    assert row["workflow_meta"]["snapshot_id"] == study["workflow_meta"]["snapshot_id"]
+    seg = row["content_snapshot"]["segmentation"]
+    assert seg["status"] == "done" and seg["reused_from"] == study["id"]
+    # the study's guide is shown as it is, not written again
+    g = guided(c, s["id"])["reading"]["guides"]["0"]
+    assert g["reused_from"] == study["id"]
+    assert {k: x for k, x in g.items() if k != "reused_from"} == study_guide(db, study["id"], want[0])
+
+
+def study_guide(db, sid, unit_id):
+    import json
+    with db.conn() as conn:
+        r = conn.execute("SELECT payload FROM reading_artifacts WHERE session_id=? AND unit_id=? AND kind='guide' "
+                         "AND status='accepted' ORDER BY created_at DESC", (sid, unit_id)).fetchone()
+    return json.loads(r["payload"])
+
+
+def test_an_older_reading_cut_on_its_own_is_not_taken_up(c):
+    m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
+    v = ready(c, m["id"])
+    part = v["parts"][0]
+    old = c.app.state.workflow.start_from_material(m["id"], part["from"], part["to"], "rules-v1", notify=False)
+    s = c.post(f"/api/materials/{m['id']}/learn", json={"at": part["from"]}).json()
+    assert s["id"] != old["id"]
+    assert c.app.state.db.get_session(s["id"])["content_snapshot"]["segmentation"]["reused_from"] == v["session_id"]
+
+
+def test_deleting_a_material_closes_its_unfinished_readings(c):
+    m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
+    v = ready(c, m["id"])
+    s = c.post(f"/api/materials/{m['id']}/learn", json={"at": v["parts"][0]["from"]}).json()
+    guided(c, s["id"])
+    other = c.post("/api/materials", files={"file": ("other.md", io.BytesIO((MD + "\n另一本。\n").encode()))}).json()
+    keep = c.app.state.workflow.start_from_material(other["id"], 1, 3, "rules-v1", notify=False)
+    r = c.delete(f"/api/materials/{m['id']}").json()
+    assert r["closed"] == [s["id"]]
+    listed = {x["id"]: x for x in c.get("/api/sessions").json()}
+    assert listed[s["id"]]["status"] == "closed"                  # kept as a record, no longer in progress
+    assert v["session_id"] not in listed                          # the material's study went with it
+    assert listed[keep["id"]]["status"] == "active"               # other books' readings are untouched
+    assert c.get(f"/api/sessions/{s['id']}").status_code == 200
+    refused = c.post(f"/api/sessions/{s['id']}/events", json={"type": "next"})
+    assert refused.status_code == 409 and refused.json()["code"] == "closed"
+
+
+def test_readings_of_materials_deleted_before_are_closed_at_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "READING_PREFETCH", False)
+    db = Database(tmp_path / "db.sqlite3")
+    with TestClient(create_app(db, Registry(ModelConfig(backend="mock")))) as c:
+        m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
+        s = c.app.state.workflow.start_from_material(m["id"], 1, 3, "rules-v1", notify=False)
+        with db.conn() as conn:   # as an older version deleted it: the row gone, the reading left active
+            conn.execute("DELETE FROM materials WHERE id=?", (m["id"],))
+    with TestClient(create_app(db, Registry(ModelConfig(backend="mock")))) as c:
+        assert c.get(f"/api/sessions/{s['id']}").json()["status"] == "closed"
+
+
 def test_reader_question_is_kept(c):
     m = c.post("/api/materials", files={"file": ("flow.md", io.BytesIO(MD.encode()))}).json()
     ready(c, m["id"])
@@ -138,7 +220,7 @@ def test_progress_counts_the_saved_segmentation_batches(c):
 
 def test_a_study_runs_only_while_its_book_is_read(c):
     a = c.post("/api/materials", files={"file": ("a.md", io.BytesIO(MD.encode()))}).json()
-    b = c.post("/api/materials", files={"file": ("b.md", io.BytesIO(MD.encode()))}).json()
+    b = c.post("/api/materials", files={"file": ("b.md", io.BytesIO((MD + "\n另一本。\n").encode()))}).json()   # not the same file
     # never opened: nothing runs
     assert c.get(f"/api/materials/{a['id']}/study").json()["status"] == "off"
     runner = c.app.state.runner

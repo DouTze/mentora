@@ -711,27 +711,108 @@ function OutlineMenu({ info, at, onGoto }: { info: PdfInfo; at: number; onGoto: 
   );
 }
 
-/** What the PDF says about itself and what it holds, in the material menu; attachments can be saved. */
-function PdfFacts({ id, info }: { id: string; info: PdfInfo }) {
+/** The material's colophon, opened from the reader's ⋯: its cover and title, the category it is filed under, what
+ * the file is and holds (only what it has), its attachments, and deleting it. */
+function MaterialCard({ material, info, library, onCategory, onDelete }: {
+  material: MaterialDetail;
+  info: PdfInfo | null;
+  library: Library;
+  onCategory: (id: string | null) => void;
+  onDelete: () => void;
+}) {
   const t = useT();
-  const who = [info.title, info.author].filter(Boolean).join(" · ");
+  const [confirm, setConfirm] = useState(false);
+  const [cover, setCover] = useState(material.kind === "pdf");
+  const n = (v: number) => v.toLocaleString();
+  const unit = t(material.unit === "page" ? "material.unit.page" : "material.unit.line", { count: material.unit_count });
+  const format = material.kind === "pdf" ? `PDF${info?.pdf_version ? ` ${info.pdf_version}` : ""}` : material.kind === "md" ? "Markdown" : t("reader.info.plain");
+  const facts: [string, string, string?][] = [
+    [t("reader.info.length"), t("material.unitCount", { count: n(material.unit_count), unit })],
+    [t("reader.info.format"), format],
+    [t("reader.info.file"), material.library?.original_name ?? material.filename, material.library?.original_name ?? material.filename],
+  ];
+  const lib = material.library;
+  if (lib) {
+    facts.push([t("reader.info.source"), lib.original_path ? lib.original_path.replace(/^\/Users\/[^/]+/, "~") : t("reader.info.upload"), lib.original_path ?? undefined]);
+    facts.push([t("reader.info.copy"), lib.stored_name, `~/.mentora/${lib.stored_name}\nSHA-256 ${lib.sha256}`]);
+  }
+  if (info) {
+    if (info.counts.links) facts.push([t("reader.info.links"), n(info.counts.links)]);
+    if (info.counts.images) facts.push([t("reader.info.images"), n(info.counts.images)]);
+    if (info.counts.annotations) facts.push([t("reader.info.annotations"), n(info.counts.annotations)]);
+  }
+  const byline = info?.author || (info?.title && info.title !== material.title ? info.title : null);
   return (
-    <>
-      {who && <p className="reader-menu-facts" title={who}>{who}</p>}
-      <p className="reader-menu-facts">
-        {t("reader.info.counts", { version: info.pdf_version ?? "?", links: info.counts.links, images: info.counts.images, annotations: info.counts.annotations })}
-      </p>
-      {info.attachments.length > 0 && (
-        <div className="reader-attachments">
-          <span>{t("reader.info.attachments")}</span>
+    <div className="reader-card" role="dialog" aria-label={t("reader.more")}>
+      <header className="rc-head">
+        <span className={`rc-cover${cover ? "" : " plain"}`} aria-hidden="true">
+          {cover ? <img src={api.materialCoverUrl(material.id)} alt="" onError={() => setCover(false)} /> : <span>{material.title.trim().slice(0, 1)}</span>}
+        </span>
+        <span className="rc-title">
+          <strong title={material.title}>{material.title}</strong>
+          {byline && <small title={byline}>{byline}</small>}
+          {lib?.alias && (
+            <span className="rc-alias" title={t("reader.info.alias")}>
+              {lib.alias}
+            </span>
+          )}
+        </span>
+      </header>
+      {lib?.description && (
+        <p className="rc-about" title={lib.described_by ? t("reader.info.describedBy", { model: lib.described_by.split(":").slice(1).join(":") || lib.described_by }) : undefined}>
+          {lib.description}
+        </p>
+      )}
+      <div className="rc-category">
+        <span>{t("material.category")}</span>
+        <Select
+          label={t("material.category")}
+          value={material.category_id ?? ""}
+          onChange={(v) => onCategory(v || null)}
+          options={[{ value: "", label: t("common.uncategorized") }, ...library.categories.map((c) => ({ value: c.id, label: c.name }))]}
+        />
+      </div>
+      <dl className="rc-facts">
+        {facts.map(([k, v, title]) => (
+          <div key={k}>
+            <dt>{k}</dt>
+            <i aria-hidden="true" />
+            <dd title={title}>{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {info && info.attachments.length > 0 && (
+        <div className="rc-files">
+          <span className="rc-label">{t("reader.info.attachments")}</span>
           {info.attachments.map((a, i) => (
-            <a key={i} href={api.materialAttachmentUrl(id, i)} download={a.name} title={a.description ?? a.name}>
-              <Icon.download /> {a.name}
+            <a key={i} href={api.materialAttachmentUrl(material.id, i)} download={a.name} title={a.description ?? a.name}>
+              <Icon.download />
+              <span>{a.name}</span>
+              {a.size ? <small>{a.size < 1024 ? `${a.size} B` : a.size < 1048576 ? `${Math.round(a.size / 1024)} KB` : `${(a.size / 1048576).toFixed(1)} MB`}</small> : null}
             </a>
           ))}
         </div>
       )}
-    </>
+      <footer className={`rc-foot${confirm ? " confirm" : ""}`}>
+        {confirm ? (
+          <>
+            <p>{t("material.delete.confirmText")}</p>
+            <div className="rc-actions">
+              <button type="button" className="rc-danger" onClick={onDelete} autoFocus>
+                {t("material.delete.confirm")}
+              </button>
+              <button type="button" className="rc-ghost" onClick={() => setConfirm(false)}>
+                {t("common.cancel")}
+              </button>
+            </div>
+          </>
+        ) : (
+          <button type="button" className="rc-delete" onClick={() => setConfirm(true)}>
+            <Icon.trash /> {t("material.delete")}
+          </button>
+        )}
+      </footer>
+    </div>
   );
 }
 
@@ -789,7 +870,6 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
   const [title, setTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [at, setAt] = useState(() => storedAt(id));
   const [study, studyAction] = useStudy(id);
   const menuBox = useRef<HTMLDivElement>(null);
@@ -914,7 +994,6 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
     setMaterial(null);
     setError(null);
     setMenu(false);
-    setConfirmDelete(false);
     setAt(storedAt(id));
     api
       .material(id)
@@ -991,40 +1070,11 @@ export function MaterialPage({ id, library, onLibraryChange, onNavigate, onOpenS
           </span>
         )}
         <div className="reader-more" ref={menuBox}>
-          <button type="button" className="icon-btn" aria-haspopup="menu" aria-expanded={menu} aria-label={t("reader.more")} onClick={() => setMenu((v) => !v)}>
+          <button type="button" className="icon-btn" aria-haspopup="dialog" aria-expanded={menu} aria-label={t("reader.more")} onClick={() => setMenu((v) => !v)}>
             <Icon.more />
           </button>
           {menu && (
-            <div className="menu reader-menu" role="menu">
-              <label className="reader-menu-field">
-                <span>{t("material.category")}</span>
-                <Select
-                  value={material.category_id ?? ""}
-                  onChange={(v) => patch({ category_id: v || null })}
-                  options={[{ value: "", label: t("common.uncategorized") }, ...library.categories.map((c) => ({ value: c.id, label: c.name }))]}
-                />
-              </label>
-              <p className="reader-menu-facts">
-                {material.filename} · {t("material.unitCount", { count: material.unit_count, unit: t(material.unit === "page" ? "material.unit.page" : "material.unit.line", { count: material.unit_count }) })}
-              </p>
-              {info && <PdfFacts id={material.id} info={info} />}
-              <div className="menu-sep" />
-              {confirmDelete ? (
-                <div className="reader-menu-confirm">
-                  <span>{t("material.delete.confirmText")}</span>
-                  <span className="row">
-                    <button className="danger" onClick={remove}>
-                      {t("material.delete.confirm")}
-                    </button>
-                    <button onClick={() => setConfirmDelete(false)}>{t("common.cancel")}</button>
-                  </span>
-                </div>
-              ) : (
-                <button type="button" role="menuitem" className="danger-item" onClick={() => setConfirmDelete(true)}>
-                  <Icon.trash /> {t("material.delete")}
-                </button>
-              )}
-            </div>
+            <MaterialCard material={material} info={info} library={library} onCategory={(id) => patch({ category_id: id })} onDelete={remove} />
           )}
         </div>
       </header>

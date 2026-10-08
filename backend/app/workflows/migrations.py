@@ -75,12 +75,12 @@ def backfill_pdf_evidence(db: Database, row: dict, meta: dict) -> str:
     if not blocks or all(b.meta.get("pdf") for b in blocks):
         return "present"
     try:
-        path, _ = MaterialStore(db).file_path(src["material_id"])
+        path, material = MaterialStore(db).file_path(src["material_id"])
     except Exception:  # noqa: BLE001 — the material was deleted
         return "original_missing"
     if not Path(path).exists():
         return "original_missing"
-    filled = attach_evidence(path, blocks)
+    filled = attach_evidence(path, blocks, material.get("text_version") or 1)
     with db.conn() as c:
         for b in filled:
             if b.meta.get("pdf"):

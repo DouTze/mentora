@@ -20,6 +20,18 @@ describe("LearnPage", () => {
     expect(calls[0].body).toEqual({ content_id: "correlation-causation", strategy_id: "rules-v1" });
   });
 
+  test("a reading closed because its material was deleted is shown read-only", async () => {
+    mockFetch({
+      "GET /api/sessions/abc123": () => ({ json: session({ status: "closed", turns: [turn("兩者一起發生", hintMessage)] }) }),
+      "GET /api/content/correlation-causation": () => content,
+    });
+    render(<LearnPage sessionId="abc123" onSessionChange={() => {}} />);
+    expect(await screen.findByTestId("closed")).toHaveTextContent("這份教材已刪除");
+    expect(screen.queryByTestId("question")).toBeNull();
+    expect(screen.queryByRole("button", { name: /重新開始|再學一次/ })).toBeNull();
+    expect(screen.getAllByTestId("turn")).toHaveLength(1);       // every earlier turn stays to look at
+  });
+
   test("submits an answer and shows the tutor hint", async () => {
     mockFetch({
       "GET /api/sessions/abc123": () => ({ json: session() }),

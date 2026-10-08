@@ -42,11 +42,12 @@ def _is_bullet_span(line_spans: list[dict], k: int) -> bool:
     return bool(t) and all("" <= ch <= "" for ch in t) and not "".join(s["text"] for s in line_spans[:k]).strip()
 
 
-def page_evidence(page, margins: frozenset[str] = frozenset()) -> list[dict]:
-    """Evidence of every paragraph of one page, in the importer's paragraph order."""
+def page_evidence(page, margins: frozenset[str] = frozenset(), math=None) -> list[dict]:
+    """Evidence of every paragraph of one page, in the importer's paragraph order (`math`: the page's formulas when
+    the material's text was made with them, materials.TEXT_VERSION 2)."""
     from ..materials import pdf_page_paragraphs
 
-    paras = pdf_page_paragraphs(page, margins)
+    paras = pdf_page_paragraphs(page, margins, math)
     spans = [s for b in page.get_text("dict")["blocks"] if b.get("type") == 0
              for ln in b["lines"] for k, s in enumerate(ln["spans"]) if s["text"].strip() and not _is_bullet_span(ln["spans"], k)]
     images = [tuple(round(v, 1) for v in im["bbox"]) for im in page.get_image_info()]
@@ -92,21 +93,31 @@ def merge_evidence(evs: list[dict]) -> dict:
     }
 
 
-def attach_evidence(pdf_path: str | Path, blocks: list) -> list:
+def attach_evidence(pdf_path: str | Path, blocks: list, text_version: int = 1) -> list:
     """Copies of the PDF blocks with `meta["pdf"]` filled from the original file (blocks of other kinds unchanged).
     A block rebuilt from several layout paragraphs (`meta["pdf_paras"]`, [[page, para], …]) pools their evidence;
     a block cut from a long paragraph shares its paragraph's evidence."""
     import pymupdf
 
-    from ..materials import pdf_running_margins
+    from ..materials import pdf_page_math, pdf_running_margins
+    from ..pdfdoc.math import FontNames
 
     doc = pymupdf.open(str(pdf_path))
     margins = pdf_running_margins(doc)
+    fonts = FontNames(doc) if text_version >= 2 else None
     cache: dict[int, list[dict]] = {}
 
     def para_ev(page_no: int, para: int) -> dict | None:
         if page_no not in cache:
-            cache[page_no] = page_evidence(doc[page_no - 1], margins) if 1 <= page_no <= len(doc) else []
+            if 1 <= page_no <= len(doc):
+                page = doc[page_no - 1]
+                try:   # the paragraphs as the material's units were cut (text version 2: formulas as LaTeX)
+                    math = pdf_page_math(doc, page, fonts) if fonts else None
+                except Exception:  # noqa: BLE001 — as the importer: a page the formula reader cannot take
+                    math = None
+                cache[page_no] = page_evidence(page, margins, math)
+            else:
+                cache[page_no] = []
         evs = cache[page_no]
         return evs[para - 1] if 0 < para <= len(evs) else None
 

@@ -147,14 +147,20 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz
         <div className="row actions">
           <Progress session={session} concepts={concepts} />
           <span className="spacer" />
-          <button className="ghost" onClick={start} disabled={busy}>
-            {t(restarting ? "learn.restart.preparing" : src ? "learn.restart.sameRange" : "learn.restart")}
-          </button>
+          {session.status !== "closed" && (
+            <button className="ghost" onClick={start} disabled={busy}>
+              {t(restarting ? "learn.restart.preparing" : src ? "learn.restart.sameRange" : "learn.restart")}
+            </button>
+          )}
           {restarting && <Working label={t("learn.restart.working")} />}
         </div>
       </div>
 
-      {session.reading && !session.reading.done ? (
+      {session.status === "closed" ? (
+        <div className="panel notice" data-testid="closed">
+          <p>{t("learn.closed")}</p>
+        </div>
+      ) : session.reading && !session.reading.done ? (
         <ReadingPanel session={session} onSession={setSession} autoFinish={autoQuiz} onAutoFinished={onAutoQuizDone} />
       ) : session.status === "completed" && session.summary ? (
         <div className="panel" data-testid="summary">
@@ -233,9 +239,9 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz
 
       {session.turns.length > 0 && (
       <div className="panel">
-        <h2>{t(session.status === "completed" ? "learn.turns.completed" : "learn.turns.previous")}</h2>
+        <h2>{t(session.status !== "active" ? "learn.turns.completed" : "learn.turns.previous")}</h2>
         {/* while active, the latest tutor message is already shown under the question */}
-        <TurnList turns={session.status === "completed" || !last ? session.turns : session.turns.slice(0, -1)} questions={session.questions} />
+        <TurnList turns={session.status !== "active" || !last ? session.turns : session.turns.slice(0, -1)} questions={session.questions} />
       </div>
       )}
     </>
