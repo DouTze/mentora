@@ -167,12 +167,31 @@ async def test_a_passage_written_back_as_it_was_is_reviewed_again_and_the_new_ve
     assert b.steps() == ["intent", "draft", "review_points", "review_conflicts", "fix", "review_conflicts"]
 
 
-async def test_a_correction_that_changes_nothing_stops_the_loop():
+async def test_a_correction_that_cannot_be_applied_is_asked_again_and_stops_when_the_corrections_are_spent():
+    """An edit whose passage is not in the handout changes nothing: the next correction is told which one was not
+    found (no review in between: it would see the same handout); after MAX_FIXES the handout settles."""
     no = {"points": [{"id": "P1", "taught": "no", "guide_quote": ""}]}
-    b = Scripted({"review_points": [no, no], "fix": [{"edits": [{"action": "replace", "old": "講義裡沒有的句子", "new": "x"}]}]})
+    miss = {"edits": [{"action": "replace", "old": "講義裡沒有的句子", "new": "x"}]}
+    b = Scripted({"review_points": [no, no], "fix": [miss, miss, miss]})
     out = await run(b)
-    assert out["status"] == "accepted" and out["artifact"]["fixes"] == 1 and b.steps().count("fix") == 1
+    assert out["status"] == "accepted" and out["artifact"]["fixes"] == 3 and b.steps().count("fix") == 3
+    assert b.steps().count("review_points") == 1
+    fixes = [c["prompt"] for c in b.calls if c["step"] == "fix"]
+    assert "上一次的修正沒有套用" not in fixes[0] and "上一次的修正沒有套用" in fixes[1]
     assert out["fix_log"][0]["skipped"] == ["?：要換掉的句子不在講義中"]
+
+
+async def test_a_passage_copied_with_a_slip_is_still_found():
+    r"""A model copying a long passage rewrites a symbol on the way (\max → \text{max}): the edit still lands."""
+    from app.reading.gates import apply_edits
+    from app.reading.contracts import Edit
+    guide = (r"Value functions give expected returns. For instance, the optimal value satisfies $v(s) = \max_{a} q(s, a)$, "
+             "which links states and actions.\n\nThe next paragraph stays.")
+    old = r"For instance, the optimal value satisfies $v(s) = \text{max}_{a} q(s, a)$, which links states and actions."
+    new, applied, skipped = apply_edits(guide, [Edit(action="replace", old=old, new="Rewritten.")])
+    assert applied and not skipped and new == "Value functions give expected returns. Rewritten.\n\nThe next paragraph stays."
+    _, applied, _ = apply_edits(guide, [Edit(action="replace", old="Something the handout never says at all, anywhere.", new="x")])
+    assert not applied
 
 
 async def test_a_conflict_the_reviewer_cannot_quote_is_a_note_not_a_correction():

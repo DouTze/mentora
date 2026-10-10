@@ -159,3 +159,21 @@ def test_footnotes_leave_the_sentence_flow_and_figure_labels_are_dropped():
     assert not any("state s" in t for t in texts)                    # a label drawn inside the figure
     assert any(t.startswith("Figure 1") for t in texts)              # the caption stays
     assert texts[-1] == "[^1]: A note explaining a term."
+
+
+def test_labels_of_a_drawing_without_a_caption_are_dropped_but_a_larger_heading_beside_one_is_kept():
+    """A backup diagram in an exercise has no caption: its short labels level with the drawing are part of it. A
+    section heading set larger than the text inside a decorated frame is not a label."""
+    import pymupdf
+    from app.materials import pdf_page_paragraphs
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_textbox((50, 50, 550, 130), "Exercise 3.18 The value of a state depends on the values of the actions"
+                        + " possible in that state" * 8 + ".", fontsize=10)
+    page.draw_circle((300, 180), 20, color=(0, 0, 0))
+    page.insert_text((330, 185), "v(s)", fontsize=9)
+    page.draw_rect((50, 300, 550, 340), color=(0, 0, 0))
+    page.insert_text((60, 325), "4.1 Evaluation", fontsize=16)
+    page.insert_textbox((50, 360, 550, 440), "Body text continues after the heading" + " and keeps going" * 10 + ".", fontsize=10)
+    texts = [t for t, _ in pdf_page_paragraphs(page)]
+    assert "v(s)" not in texts and "4.1 Evaluation" in texts and len(texts) == 3

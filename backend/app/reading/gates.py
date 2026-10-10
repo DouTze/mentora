@@ -266,10 +266,31 @@ def handout_points(t: ra.ReadingTaskInput) -> list[tuple[str, str]]:
     return []
 
 
+CONFLICTS_MAX = 5   # contradictions one review reports: more is a review copying the handout, not finding problems
+
+
+def conflicts_schema() -> dict:
+    """Review B's answer, bounded: short quotes (FREE_TEXT_MAX) and at most CONFLICTS_MAX items."""
+    from .contracts import ConflictsReview
+    sch = bound_strings(ConflictsReview.model_json_schema())
+    sch["properties"]["conflicts"] = {**sch["properties"]["conflicts"], "maxItems": CONFLICTS_MAX}
+    return sch
+
+
+def fix_schema(source: str, problems: int) -> dict:
+    """A correction: one edit per problem; `old` is the passage to find (a sentence or two), `new` may be longer."""
+    from .contracts import HandoutFix
+    sch = bound_strings(HandoutFix.model_json_schema(), handout_chars(source))
+    sch["properties"]["edits"] = {**sch["properties"]["edits"], "maxItems": max(1, problems)}
+    return sch
+
+
 def handout_tokens(source: str) -> int:
-    """Output reserved for a handout: about twice the textbook passage, 2048–4096 tokens."""
+    """Output reserved for a handout: about three times the textbook passage plus room for its explanations,
+    2048–5120 tokens. A handout explains more than its passage says (a short passage often three to five times over);
+    cut off at the limit, its JSON does not parse and the whole 導讀段 is lost."""
     from ..llm.context import estimate_tokens
-    return max(2048, min(4096, 2 * estimate_tokens(source) + 512))
+    return max(2048, min(5120, 3 * estimate_tokens(source) + 1024))
 
 
 def handout_chars(source: str) -> int:
@@ -501,9 +522,36 @@ def _locate(text: str, quote: str) -> tuple[int, int] | None:
             where.append(k)
     flat, nq = "".join(chars), ra.norm_text(q).strip("「」\"'")
     i = flat.find(nq) if nq else -1
-    if i == -1:
+    if i != -1:
+        return where[i], where[i + len(nq) - 1] + 1
+    span = _near(flat, nq)
+    return (where[span[0]], where[span[1] - 1] + 1) if span else None
+
+
+NEAR_MIN_SHARE = 0.9   # a copied passage found only approximately: this share of it must be found word for word …
+NEAR_MAX_SPREAD = 1.1  # … within a stretch at most this much longer than the passage
+NEAR_MIN_RUN = 8       # shorter common runs are chance (single letters, spaces)
+
+
+def _near(flat: str, q: str) -> tuple[int, int] | None:
+    """Where a passage copied with small slips lies in `flat` (a model copying a long passage rewrites a symbol or a
+    word on the way): the stretch holding nearly all of it in order."""
+    if len(q) < 2 * NEAR_MIN_RUN:
         return None
-    return where[i], where[i + len(nq) - 1] + 1
+    import difflib
+    sm = difflib.SequenceMatcher(None, flat, q, autojunk=False)
+    runs = [m for m in sm.get_matching_blocks() if m.size >= NEAR_MIN_RUN]
+    if not runs:
+        return None
+    # the stretch around the longest run: the runs before / after it that keep the stretch compact
+    best = max(runs, key=lambda m: m.size)
+    keep = [m for m in runs if abs((m.a - m.b) - (best.a - best.b)) <= (NEAR_MAX_SPREAD - 1) * len(q) + NEAR_MIN_RUN]
+    # widened by what the passage has before its first / after its last common run (a slip at either end)
+    a = max(0, keep[0].a - keep[0].b)
+    b = min(len(flat), keep[-1].a + keep[-1].size + len(q) - (keep[-1].b + keep[-1].size))
+    if sum(m.size for m in keep) >= NEAR_MIN_SHARE * len(q) and b - a <= NEAR_MAX_SPREAD * len(q):
+        return a, b
+    return None
 
 
 def apply_edits(guide: str, edits: list) -> tuple[str, list[dict], list[str]]:

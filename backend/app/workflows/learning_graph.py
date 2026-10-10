@@ -275,6 +275,8 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         want = contract_of(row(sid))
         for g in repo.accepted_guides(q["unit_id"], stable_hash([q["unit_id"], q["text"], q["block_ids"]]),
                                       ra.READING_WORKFLOW_VERSION, exclude_session=sid):
+            if any(b.get("status") != "accepted" for b in (g.get("payload") or {}).get("blocks") or []):
+                continue   # a guide with a part that did not pass is written again, not passed on as it is
             other = deps.db.get_session(g["session_id"]) if g.get("session_id") else None
             if other and contract_of(other) == want:
                 return g

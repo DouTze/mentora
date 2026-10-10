@@ -833,3 +833,18 @@ def test_an_equation_number_does_not_hide_the_sentence_end_before_it():
     texts = [" ".join(blocks[i].text for i in c) for c in chunks]
     assert len(texts) == 2 and texts[0].endswith("(3.3)")              # the paragraph ends after the formula
     assert texts[1].endswith("for every state the agent can visit.")   # a reference "Eq. (3.3)" keeps it open
+
+
+async def test_a_numbered_section_always_opens_a_unit_and_topics_are_judged_inside_each_section():
+    """The model saw only summaries and called every pair "same" across 3.6–3.8 (one unit of 28,000 characters):
+    the book's numbered sections open units whatever it answers, and no judgement straddles two sections."""
+    body = "The agent observes the state and picks an action, and the environment answers with a reward signal. "
+    lines = ["## 3.1 First Section", "", body * 3, "", body * 3, "", "## 3.2 Second Section", "", body * 3, "", body * 3]
+    _, blocks = extract_blocks("m", "line", 1, len(lines), lines)
+    b = Scripted([{"paragraphs": [{"topic": "t", "aspect": "", "summary": f"s{k}"} for k in range(1, 5)]},
+                  {"boundaries": ["same"]}, {"boundaries": ["same"]}])
+    deps, _ = deps_for(b, outline=True, boundaries=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert [u.boundary_reason for u in plan.units] == ["t", "t"] and len(plan.units) == 2
+    asks = [r["messages"][0]["content"] for r in b.requests if r["meta"]["step"] == "segment_boundaries"]
+    assert len(asks) == 2 and all("P3" not in a for a in asks)        # one judgement per section, two paragraphs each

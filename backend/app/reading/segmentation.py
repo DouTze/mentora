@@ -39,7 +39,7 @@ from ..llm.tasks import TaskContext, TaskError, run_structured
 from .schemas import (Boundaries, MatterLabels, Outline, ParagraphTopic, PlannedUnit, PassageJoins, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
                       TopicSummary, UnitChunk, WindowPlan)
 
-SEGMENTATION_VERSION = "units-v11"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out; v11: the model groups a unit's paragraphs into 導讀段 by content, no size rule merges them
+SEGMENTATION_VERSION = "units-v12"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out; v11: the model groups a unit's paragraphs into 導讀段 by content, no size rule merges them; v12: numbered sections open units
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -811,7 +811,7 @@ def _topic_key(t: str) -> str:
 
 
 async def topic_starts(outline: list[ParagraphTopic], deps: PlannerDeps, done: dict, on_window,
-                       notes: list[str], ids: list[list[str]]) -> list[int]:
+                       notes: list[str], ids: list[list[str]], prefix: str = "") -> list[int]:
     """Indices of the 區塊 where a new unit begins (0 always). The lines go in batches; the last topic of a batch
     may continue, so the next batch starts at its first 區塊 (or, when a batch saw no change, at its last 區塊, so
     a change right after it can still be named). A 區塊 that opens a batch is never cut there."""
@@ -823,7 +823,7 @@ async def topic_starts(outline: list[ParagraphTopic], deps: PlannerDeps, done: d
         b += 1
         hi = min(n, pos + batch)
         lines = outline[pos:hi]
-        key = f"t{b:02d}"
+        key = f"{prefix}t{b:02d}"
         owned = [x for c in ids[pos:hi] for x in c]
         saved = done.get(key)
         if saved and saved.get("owned") == owned:
@@ -1024,6 +1024,12 @@ def skipped_view(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock
     return out
 
 
+def section_opens(blocks: list[SourceBlock], chunk: list[int]) -> bool:
+    """The 區塊 opens with a numbered section heading of the book ("3.6 Optimal Policies", "2.1 模型評估")."""
+    from .source import SECTION_HEAD_RE
+    return any(blocks[i].kind == "heading" and SECTION_HEAD_RE.match(blocks[i].text) for i in chunk)
+
+
 def passage_chunk(ps: list[int], ids: list[list[str]], outline: list[ParagraphTopic]) -> UnitChunk:
     """One 導讀段 of several paragraphs: their blocks, the first one's topic, every paragraph's aspect and summary."""
     def joined(field: str, sep: str) -> str:
@@ -1061,9 +1067,17 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
         notes.append("所有區塊都被判斷為不需要導讀，改為全部保留")
         skip = {}
     kept = [k for k in range(len(chunks)) if k not in skip]
-    local = await topic_starts([outline[k] for k in kept], deps, done_windows, on_window, notes, [ids[k] for k in kept])
-    # the units are where the topics change, nothing else: no size rule merges or splits them
-    bounds = local + [len(kept)]
+    # a numbered section of the book ("3.6 Optimal Policies …") always opens a unit: the book's own division. Inside
+    # a section the model decides where topics change, section by section, so no judgement straddles two of them
+    opens = [0] + [j for j, k in enumerate(kept) if j and section_opens(blocks, chunks[k])]
+    local: list[int] = []
+    for si, (a, b) in enumerate(zip(opens, opens[1:] + [len(kept)])):
+        part = kept[a:b]
+        found = await topic_starts([outline[k] for k in part], deps, done_windows, on_window, notes,
+                                   [ids[k] for k in part], prefix=f"s{si:02d}" if len(opens) > 1 else "")
+        local += [a + x for x in found]
+    # beyond that, the units are where the topics change, nothing else: no size rule merges or splits them
+    bounds = sorted(set(local)) + [len(kept)]
     units_k = [[kept[j] for j in range(a, b)] for a, b in zip(bounds, bounds[1:]) if b > a]
     counts: dict[str, int] = {}
     for role in ["toc"] * len(tocs) + list(skip.values()):

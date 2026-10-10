@@ -85,7 +85,11 @@ def repair_latex_escapes(text: str) -> str:
         while j < n and text[j].isascii() and text[j].isalpha():
             j += 1
         word = text[i + 1:j]
-        if c in "bfnrt" and word not in LATEX_ESC:
+        # a model writing prose never means a backspace or form feed, nor a tab / carriage return glued to a word:
+        # \b…, \f… and \t / \r + letters are LaTeX (\tag, \theta, \rho), known command or not. Only \n + letters stays
+        # a line break unless it is a known command (\nabla, \neq), since "\nThe …" is a line break before a word
+        latex = c in "bf" or (c in "tr" and len(word) > 1) or word in LATEX_ESC
+        if c in "bfnrt" and not latex:
             out.append(text[i:i + 2])          # a real JSON escape (newline, tab …)
             i += 2
             continue
@@ -118,7 +122,7 @@ def _latex_eaten(obj) -> bool:
     """True when a strictly decoded value shows a LaTeX command turned into a control character: a backspace or form
     feed (\bar, \frac), or a tab / line break followed by the rest of a command inside a formula (\top, \nabla)."""
     for s in _strings(obj):
-        if "\x08" in s or "\x0c" in s:
+        if "\x08" in s or "\x0c" in s or re.search(r"[\t\r][A-Za-z]", s):
             return True
         for m in MATH_SPAN_RE.finditer(s):
             if any(rx.search(m.group(0)) for rx in _EATEN.values()):

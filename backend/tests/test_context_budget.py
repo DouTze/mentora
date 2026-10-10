@@ -177,7 +177,7 @@ def test_the_guide_schema_bounds_its_strings_by_the_output_budget():
     """A degenerate repetition cannot run to the token limit and leave unparsable JSON: the handout string is bounded."""
     from app.reading.gates import handout_schema, handout_tokens
     short, long_ = "短句。" * 10, "這是一個很長的段落。" * 200
-    assert handout_tokens(short) == 2048 and handout_tokens(long_) == 4096
+    assert handout_tokens(short) == 2048 and handout_tokens(long_) == 5120
     sch = handout_schema(short)
     assert sch["properties"]["guide"]["maxLength"] == int(2048 * 0.8)
     assert sch["properties"]["key_points"]["maxItems"] == 3 and sch["properties"]["check"]["maxLength"] == 240
@@ -211,3 +211,15 @@ async def test_repetition_abort_is_an_invalid_output_retried_once_not_an_outage(
     with pytest.raises(TaskError) as e:
         await run_structured(ctx_for(b), [HumanMessage(content="問題")], Out, task="ask", node="answer", prompt_version="t")
     assert e.value.kind == "invalid_output" and len(b.requests) == 2      # one retry only, then a held output
+
+
+def test_tex_commands_a_json_decoder_would_turn_into_control_characters_are_kept():
+    """\t, \b, \f and \r are JSON escapes, so a model's single-backslash \tag or \boldsymbol decoded strictly
+    became a tab or backspace (32 of 59 recorded handouts and corrections). A model writing prose never means a
+    backspace, form feed, or a tab glued to a word; a line break before a word ("\nThe") stays a line break."""
+    from app.llm.tasks import parse_model_json
+    from app.reading.contracts import HandoutDraft
+    raw = r'{"guide":"Sequence $S_0,A_0,R_1 \tag{3.1}$ with $\boldsymbol{w}$ and $\rho$.\nThe next line.","key_points":[],"check":""}'
+    g = parse_model_json(raw, HandoutDraft, ("guide",)).guide
+    assert r"\tag{3.1}" in g and r"\boldsymbol{w}" in g and r"\rho" in g and "\nThe next line." in g
+    assert not any(ch in g for ch in "\t\b\f\r")

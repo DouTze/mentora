@@ -68,6 +68,8 @@ FIGURE_CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.|圖)\s*[\dA-Z一二三四五�
 NOTE_END_RE = re.compile(r"[.?!。？！)）]\s*$")
 FIGURE_CAPTION_GAP = 36     # points between a figure's drawing and its caption
 FIGURE_MAX_HEIGHT = 0.8     # a drawing region taller than this share of the page is a page frame, not a figure
+LABEL_MAX_CHARS = 40        # a figure label: a word, a symbol, a short formula …
+LABEL_MAX_WIDTH = 0.5       # … in a block narrower than this share of the text column
 
 
 def _margin_key(text: str) -> str:
@@ -155,6 +157,34 @@ def _figure_regions(page, blocks) -> list[tuple[float, float, float, float]]:
     return out
 
 
+def _drawing_labels(page, blocks) -> set[int]:
+    """Blocks that are labels of a drawing with no caption next to it (a backup diagram in an exercise, a figure whose
+    caption is set inside its frame): a short, narrow block, not larger than the text, level with a vector drawing. Table cells are short
+    and drawn around too, so blocks inside a table PyMuPDF finds are never labels."""
+    drawings = [tuple(r) for r in page.cluster_drawings() if r[3] - r[1] <= FIGURE_MAX_HEIGHT * page.rect.height]
+    if not drawings:
+        return set()
+    try:
+        tables = [tuple(t.bbox) for t in page.find_tables().tables]
+    except Exception:  # noqa: BLE001 — table finding is a refinement; without it no block counts as a cell
+        tables = []
+    wide = [b[1][2] - b[1][0] for b in blocks if len(_plain(b)) > 200]
+    column = max(wide) if wide else 0.6 * page.rect.width
+    body = _body_size(blocks)
+    out = set()
+    for i, b in enumerate(blocks):
+        x0, y0, x1, y1 = b[1]
+        if len(_plain(b)) > LABEL_MAX_CHARS or x1 - x0 > LABEL_MAX_WIDTH * column or FIGURE_CAPTION_RE.match(_plain(b)):
+            continue
+        if body and b[3] > 1.05 * body:   # set larger than the text: a heading in a decorated frame, not a label
+            continue
+        if any(_inside(b[1], t) for t in tables):
+            continue
+        if any(min(y1, r[3]) > max(y0, r[1]) for r in drawings):   # level with a drawing
+            out.add(i)
+    return out
+
+
 def _inside(b: tuple, r: tuple, pad: float = 3.0) -> bool:
     return b[0] >= r[0] - pad and b[1] >= r[1] - pad and b[2] <= r[2] + pad and b[3] <= r[3] + pad
 
@@ -228,7 +258,9 @@ def pdf_page_paragraphs(page, margins: frozenset[str] = frozenset(), math=None) 
     blocks = [b for b in blocks if _is_note(b, body) or not (b[2] and len(_plain(b)) <= 80 and (
         PAGE_MARGIN_RE.search(_plain(b)) or _margin_key(_plain(b)) in margins))]
     figures = _figure_regions(page, blocks)
-    blocks = [b for b in blocks if FIGURE_CAPTION_RE.match(_plain(b)) or not any(_inside(b[1], r) for r in figures)]
+    labels = _drawing_labels(page, blocks)
+    blocks = [b for i, b in enumerate(blocks) if i not in labels
+              and (FIGURE_CAPTION_RE.match(_plain(b)) or not any(_inside(b[1], r) for r in figures))]
     height = page.rect.height or 1
     n = len(blocks)
     while n and body and blocks[n - 1][3] <= FOOTNOTE_SIZE * body and blocks[n - 1][1][1] > FOOTNOTE_ZONE * height:

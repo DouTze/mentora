@@ -70,6 +70,7 @@ class GuideState(TypedDict, total=False):
     fixes: int                   # corrections applied
     changed: list[str]           # passages the last correction wrote (reviewed for conflicts again)
     stalled: bool                # the last correction changed nothing
+    refix: list[str]             # edits of the last correction that could not be applied: the next one is told why
     fix_log: list[dict]
     decision: str | None
     status: str                  # running | accepted | failed
@@ -348,7 +349,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                         {"guide": passages}, 1024)
             b, _ = await run_structured(ctx, [HumanMessage(content=msg)], ConflictsReview, task="guide",
                                         node="review_conflicts", prompt_version=t.prompt_bundle_hash, packet=rec,
-                                        source_ids=t.block_ids, json_schema=gates.bound_strings(ConflictsReview.model_json_schema()),
+                                        source_ids=t.block_ids, json_schema=gates.conflicts_schema(),
                                         meta={"step": "review_conflicts", "quote_text": t.text, "guide": passages},
                                         min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
             found += gates.conflict_findings(b, guide, t.text)
@@ -368,19 +369,26 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         guide = state["guide"]
         blocking = [ra.Finding.model_validate(f) for f in state["findings"]
                     if f["severity"] == "major" and f["status"] == "confirmed"]
+        problems = gates.problems_text(blocking)
+        if state.get("refix"):   # the last correction's edits pointed at passages the handout does not have
+            problems += ("\n\n上一次的修正沒有套用，因為 old 在講義中找不到：" + "；".join(state["refix"])
+                         + "。old 要從上面「目前的講義」一字不改地複製，只複製要換掉的那一兩句。")
         msg, rec = await prompt_for(ctx, state, "fix", "reading_fix", ("quote_text", "symbol_evidence"),
-                                    {"guide": guide, "problems": gates.problems_text(blocking)}, gates.handout_tokens(t.text))
+                                    {"guide": guide, "problems": problems}, gates.handout_tokens(t.text))
         x, _ = await run_structured(ctx, [HumanMessage(content=msg)], HandoutFix, task="guide", node="fix",
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
-                                    purpose="revision", json_schema=gates.bound_strings(HandoutFix.model_json_schema(), gates.handout_chars(t.text)),
+                                    purpose="revision", json_schema=gates.fix_schema(t.text, len(blocking)),
                                     meta={"step": "fix", "quote_text": t.text, "guide": guide, "language": t.language,
                                           "problems": [f.model_dump() for f in blocking]},
                                     min_max_tokens=gates.handout_tokens(t.text), min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         new, applied, skipped = gates.apply_edits(guide, x.edits)
-        # no edit could be applied: another review would see the same handout. A passage written back as it was is
-        # the corrector disputing the problem; it is reviewed again (the new verdict replaces the old one)
-        stalled = not applied
-        return {"guide": new, "fixes": int(state.get("fixes") or 0) + 1, "stalled": stalled,
+        fixes = int(state.get("fixes") or 0) + 1
+        # no edit could be applied: another review would see the same handout, so the next correction is asked
+        # again, told which passages were not found; with the corrections spent it settles. A passage written back
+        # as it was is the corrector disputing the problem; it is reviewed again (the new verdict replaces the old one)
+        retry = not applied and fixes < MAX_FIXES and can(ctx.budget, 3)
+        stalled = not applied and not retry
+        return {"guide": new, "fixes": fixes, "stalled": stalled, "refix": (skipped or ["沒有給出任何 edit"]) if retry else [],
                 "changed": [a["passage"] for a in applied if a["passage"]],
                 "fix_log": (state.get("fix_log") or []) + [{"problems": [f.detail[:160] for f in blocking],
                                                              "applied": applied, "skipped": skipped}],
@@ -446,7 +454,8 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
     g.add_conditional_edges("intent", failed_or(lambda s: "draft"), ["draft", "hold"])
     g.add_conditional_edges("draft", failed_or(lambda s: "review"), ["review", "hold"])
     g.add_conditional_edges("review", failed_or(lambda s: s["decision"]), ["accept", "fix", "settle", "hold"])
-    g.add_conditional_edges("fix", failed_or(lambda s: "settle" if s.get("stalled") else "review"), ["review", "settle", "hold"])
+    g.add_conditional_edges("fix", failed_or(lambda s: "fix" if s.get("refix") else "settle" if s.get("stalled") else "review"),
+                            ["fix", "review", "settle", "hold"])
     g.add_conditional_edges("settle", lambda s: "hold" if s.get("status") == "failed" else "accept", ["accept", "hold"])
     g.add_edge("accept", END)
     g.add_edge("hold", END)
