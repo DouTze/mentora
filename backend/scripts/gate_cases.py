@@ -43,12 +43,11 @@ from app import config  # noqa: E402
 from app.llm.base import Capabilities, DegenerateOutput, LLMBackend, LLMResult  # noqa: E402
 from app.llm.runtime import BackendPool, ListSink, ModelRuntime, ModelSnapshot  # noqa: E402
 from app.reading import gates  # noqa: E402
-from app.reading.tools import ReadingScope  # noqa: E402
 from app.workflows import invoke  # noqa: E402
 from app.workflows.reading_graph import ReadingDeps, build_reading_graph  # noqa: E402
 
 OUT = config.DATA_DIR / "evals" / "gate-cases"
-SOURCE_NODES = ("symbols", "understand", "source_audit", "revise_source", "context")
+SOURCE_NODES = ("symbols",)
 
 
 def digest(x) -> str:
@@ -256,8 +255,7 @@ async def replay_case(c: dict) -> dict:
     snap = ModelSnapshot.from_config(c["model_snapshot"])
     pool = BackendPool(build=lambda _: tape)
     deps = ReadingDeps(runtime_for=lambda s: ModelRuntime(snap, pool), prompts_for=lambda s: c["prompts"],
-                       scope_for=lambda s, i: ReadingScope(quotes=c["quotes"], current_index=i),
-                       sink=ListSink(), vsrc_cache={}, render_region=lambda *a, **k: b"")
+                       sink=ListSink(), render_region=lambda *a, **k: b"")
     state = {**c["state0"], "gate_rules": gates.GATE_RULES_VERSION}
     try:
         out = await invoke(build_reading_graph(deps), state, {"configurable": {"thread_id": c["id"]}})

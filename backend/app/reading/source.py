@@ -23,8 +23,14 @@ import re
 
 from .schemas import Locator, SourceBlock
 
-EXTRACTION_VERSION = "blocks-v4"   # v2: heading levels and structure confidence; v3: PDF text stream cut into sentences;
-                                   # v4: numbered PDF headings confirmed by their siblings, runs of cell-like lines are tables
+EXTRACTION_VERSION = "blocks-v6"   # v2: heading levels and structure confidence; v3: PDF text stream cut into sentences;
+                                   # v4: numbered PDF headings confirmed by their siblings, runs of cell-like lines are tables;
+                                   # v5: PDF footnotes kept out of the sentence they interrupt, figure-internal text dropped;
+                                   # v6: a Latin "." closes a PDF paragraph, figure captions marked, a numbered section
+                                   # heading after any line, a formula line never a heading, an equation number does not hide
+                                   # the sentence end before it
+# a footnote as the importer writes it (materials.pdf_page_paragraphs): "[^1]: text"
+FOOTNOTE_RE = re.compile(r"^\[\^[^\]\s]{1,6}\]:")
 MAX_BLOCK_CHARS = 700
 TARGET_PIECE_CHARS = 350
 HARD_MAX_BLOCK_CHARS = 8000
@@ -190,7 +196,24 @@ HEADING_LINE_SHARE = 0.75   # a heading is clearly narrower than the page's full
 NO_HEADING_END_RE = re.compile(r"[。．.!?！？,，;；：:、]$")
 BULLET_RE = re.compile(r"^\s*[•○●■□◆◇▪▫–\-*+]\s")
 PDF_ITEM_RE = re.compile(r"^\s*(•|[-*+]\s|\d{1,3}[.)、]\s*\S|[（(]\d{1,2}[）)]|[A-Za-z][.)]\s)")
-PARA_END = SENT_END + "：:"   # a layout line ending with one of these may close a paragraph
+# a figure caption ("Figure 3.1: …", "圖 2 …"): it belongs to its figure, so it never stands as a 區塊 of its own
+CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.|圖)\s*[\dA-Z一二三四五六七八九十]", re.I)
+PARA_END = SENT_END + "：:."   # a layout line ending with one of these may close a paragraph ("." for Latin text)
+# a numbered section heading ("3.2 Goals and Rewards", "2.1.3 模型評估"): its number says it is one, whatever the
+# line before it ends with (an exercise, a table, a formula)
+SECTION_HEAD_RE = re.compile(r"^\s*\d{1,2}(?:\.\d{1,2}){1,3}\s+[A-Z㐀-鿿]")
+LEADER_RE = re.compile(r"[.．·・…]{4,}")   # dot leaders of a table-of-contents entry ("3.1 Title ....... 3")
+# a relation or operator sign: a line of a formula, never a heading ("r(s, a) .= E[…] =")
+MATH_SIGN_RE = re.compile(r"[=<>≤≥≠≈≡∈∉⊂⊆∑∏∫→←⇒⇔±×÷]")
+# a displayed equation's number closing a layout line ("… a ∈ A(s). (3.3)"): whether the line ends a sentence is
+# decided by what comes before it, unless that is a reference to an equation ("as in Eq. (3.3)")
+EQ_NUMBER_RE = re.compile(r"(?<!Eq\.)(?<!Eqs\.)\s+[(（]\d{1,3}(?:\.\d{1,3}){0,2}[a-z]?[)）]\s*$")
+
+
+def without_eq_number(text: str) -> str:
+    return EQ_NUMBER_RE.sub("", text.rstrip())
+
+
 TABLE_RUN = 4   # this many heading guesses in a row without a section number are table cells, not headings
 # a section number that opens a heading: "A. …", "一、…", "（1）…", "1. …" (not "3.1 …")
 ENUM_HEAD_RE = re.compile(r"^\s*(?:([A-Z])[.．]|([一二三四五六七八九十]{1,3})、|[（(](\d{1,2})[）)]|(\d{1,2})[.．](?!\d))\s*(?=\S)")
@@ -260,20 +283,25 @@ def _layout_pass(units: list[str], siblings: frozenset[tuple[str, int]]) -> list
         for a, b in paras:
             p = page[a:b]
             s = p.strip()
+            if FOOTNOTE_RE.match(s):   # outside the text flow: the paragraph it sits next to may still be open
+                kinds.append((a, b, "footnote"))
+                continue
             if s.startswith("$$") and s.endswith("$$"):
                 kind = "formula"
             elif ENUM_ONLY_RE.match(s):
                 kind = "label"   # a list label alone on its line ("A."): it opens the item that follows
             elif BULLET_RE.match(p):
                 kind = "item"
-            elif "\n" not in p and len(paras) > 1 and (prev_closed or enum_label(s) in siblings) \
-                    and len(s) <= HEADING_MAX_CHARS and _width(s) <= HEADING_LINE_SHARE * full and not NO_HEADING_END_RE.search(s):
+            elif "\n" not in p and len(paras) > 1 and (prev_closed or enum_label(s) in siblings or SECTION_HEAD_RE.match(s)) \
+                    and (len(s) <= HEADING_MAX_CHARS or SECTION_HEAD_RE.match(s) and not LEADER_RE.search(s)) \
+                    and _width(s) <= HEADING_LINE_SHARE * full and not NO_HEADING_END_RE.search(s) \
+                    and not MATH_SIGN_RE.search(s):
                 kind = "heading"
             elif PDF_ITEM_RE.match(p) or LIST_RE.match(p):
                 kind = "item"
             else:
                 kind = "body"
-            prev_closed = kind in ("heading", "formula") or (kind != "label" and (ends_sentence(p) or s.endswith(("：", ":"))))
+            prev_closed = kind in ("heading", "formula") or (kind != "label" and (ends_sentence(without_eq_number(p)) or s.endswith(("：", ":"))))
             kinds.append((a, b, kind))
         out.append(kinds)
     return out
@@ -358,8 +386,19 @@ def _page_blocks(units: list[str], start: int) -> list[dict]:
     layout = pdf_layout(units)
     out: list[dict] = []
     group: list[tuple[int, int, int, int]] = []   # (page index, para k, char_start, char_end) of the open paragraph
+    # footnotes met while a paragraph is open (at a page foot, mid-sentence): each becomes a block of its own once
+    # that paragraph closes, so it never lands inside the sentence it interrupted
+    notes: list[tuple[int, int, int, int]] = []
 
     def flush() -> None:
+        _flush_group()
+        for pi, k, a, b in notes:
+            out.append({"kind": "paragraph", "text": units[pi][a:b].replace("\n", " ").strip(), "start": start + pi,
+                        "end": start + pi, "para": k, "paras": len(layout[pi]), "char_start": a, "char_end": b,
+                        "meta": {"pdf_paras": [[start + pi, k]], "footnote": True}})
+        notes.clear()
+
+    def _flush_group() -> None:
         nonlocal group
         if not group:
             return
@@ -379,6 +418,7 @@ def _page_blocks(units: list[str], start: int) -> list[dict]:
             t0, pi, k, a, n = pieces[-1] if end else pieces[0]
             return pi, k, a + (n if end else 0)
 
+        caption = {"caption": True} if CAPTION_RE.match(text) else {}
         cuts = sentence_cuts(text)
         spans = [(a, b) for a, b in zip([0] + cuts, cuts + [len(text)])]
         for a, b in spans:
@@ -393,11 +433,16 @@ def _page_blocks(units: list[str], start: int) -> list[dict]:
             refs = sorted({(start + pi, k) for t0, pi, k, pa, n in pieces if t0 < b and a < t0 + n})
             out.append({"kind": "paragraph", "text": text[a:b], "start": start + p0, "end": start + p1, "para": k0,
                         "paras": len(layout[p0]), "char_start": c0, "char_end": c1,
-                        "meta": {"para_group": gid, "pdf_paras": [list(r) for r in refs]}})
+                        "meta": {"para_group": gid, "pdf_paras": [list(r) for r in refs], **caption}})
         group = []
 
     for pi, kinds in enumerate(layout):
         for k, (a, b, kind) in enumerate(kinds, 1):
+            if kind == "footnote":
+                notes.append((pi, k, a, b))
+                if not group:
+                    flush()
+                continue
             if kind == "table":   # one block per run of table lines on a page, one line per cell
                 flush()
                 cell = units[pi][a:b].replace("\n", " ")
@@ -417,7 +462,7 @@ def _page_blocks(units: list[str], start: int) -> list[dict]:
             if kind in ("item", "label"):
                 flush()
             group.append((pi, k, a, b))
-            if kind != "label" and units[pi][a:b].rstrip().rstrip(CLOSERS)[-1:] in PARA_END:
+            if kind != "label" and without_eq_number(units[pi][a:b]).rstrip().rstrip(CLOSERS)[-1:] in PARA_END:
                 flush()
     flush()
     # locator para / paras count rebuilt paragraphs (and headings / formulas) starting on a page, not layout lines;

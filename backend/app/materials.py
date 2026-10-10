@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS materials (
   created_at TEXT NOT NULL,
   text_version INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'ready',
-  status_detail TEXT
+  status_detail TEXT,
+  translate_zh INTEGER NOT NULL DEFAULT 0,  -- 1: guides of a non-Chinese material are written in 繁體中文
+  language TEXT                             -- what the material is written in (tutor.reading.source_language); NULL = not told
 );
 """
 
@@ -59,6 +61,13 @@ CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
 PUA_BULLET_RE = re.compile(r"^[\ue000-\uf8ff]+\s+")
 MARGIN_EDGE = 0.09          # top / bottom share of the page where running headers and footers sit
 MARGIN_REPEAT_PAGES = 3     # an edge text (digits ignored) repeated on this many pages is a running header / footer
+FOOTNOTE_SIZE = 0.88        # footnotes are set at most this share of the page's body font size …
+FOOTNOTE_ZONE = 0.5         # … in the lower part of the page
+FOOTNOTE_MARK_RE = re.compile(r"^([0-9]{1,3}|[*†‡§¶]{1,3})\s*(?=\S)")
+FIGURE_CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.|圖)\s*[\dA-Z一二三四五六七八九十]", re.I)
+NOTE_END_RE = re.compile(r"[.?!。？！)）]\s*$")
+FIGURE_CAPTION_GAP = 36     # points between a figure's drawing and its caption
+FIGURE_MAX_HEIGHT = 0.8     # a drawing region taller than this share of the page is a page frame, not a figure
 
 
 def _margin_key(text: str) -> str:
@@ -81,33 +90,101 @@ def _join_lines(lines: list[str]) -> str:
     return re.sub(r"[ \t]+", " ", out).strip()
 
 
-def _page_text_blocks(page, math=None) -> list[tuple[str, tuple[float, float, float, float], bool, str]]:
-    """(joined text, bbox, at the top / bottom edge, the plain text) of the page's text blocks, in PyMuPDF's reading
-    order. With `math` (app.pdfdoc.math.PageMath of the page, same flags) the text has glyphs read through their names
-    and formulas as $…$ / $$…$$; a block whose glyphs all went into a formula of another block is left out. The plain
-    text is PyMuPDF's own, for the margin decisions (the same with or without formulas)."""
+def _page_text_blocks(page, math=None) -> list[tuple[str, tuple[float, float, float, float], bool, float, list[str], list[str]]]:
+    """(joined text, bbox, at the top / bottom edge, dominant font size, its lines, the plain lines) of the page's text
+    blocks, in PyMuPDF's reading order. With `math` (app.pdfdoc.math.PageMath of the page, same flags) the text has
+    glyphs read through their names and formulas as $…$ / $$…$$; a block whose glyphs all went into a formula of
+    another block is left out. The plain lines are PyMuPDF's own characters, for the decisions on the layout (margins,
+    footnote marks, captions), the same with or without formulas."""
     import pymupdf
 
     height = page.rect.height or 1
     out = []
     if math is None:
-        for x0, y0, x1, y1, text, *_rest in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE):
-            if _rest[1] != 0:   # block type: 0 text, 1 image
+        sizes: dict[int, float] = {}
+        for b in page.get_text("dict", flags=pymupdf.TEXT_DEHYPHENATE)["blocks"]:
+            counts: dict[float, int] = {}
+            for ln in b.get("lines", []):
+                for sp in ln["spans"]:
+                    counts[round(sp["size"], 1)] = counts.get(round(sp["size"], 1), 0) + len(sp["text"].strip())
+            if counts:
+                sizes[b["number"]] = max(counts, key=counts.get)
+        for x0, y0, x1, y1, text, number, kind in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE):
+            if kind != 0:   # block type: 0 text, 1 image
                 continue
             lines = [PUA_BULLET_RE.sub("• ", ln.strip()) for ln in text.split("\n") if ln.strip()]
             if lines:
-                joined = _join_lines(lines)
-                out.append((joined, (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE), joined))
+                out.append((_join_lines(lines), (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE),
+                            sizes.get(number, 0.0), lines, lines))
         return out
     for bi, b in enumerate(math.blocks):
         plain = [PUA_BULLET_RE.sub("• ", "".join(g.c for g in ln["glyphs"]).strip()) for ln in b["lines"]]
         plain = [ln for ln in plain if ln]
         lines = [PUA_BULLET_RE.sub("• ", ln.strip()) for ln in math.block_text(bi) if ln.strip()]
         if lines:
+            counts = {}
+            for ln in b["lines"]:
+                for g in ln["glyphs"]:
+                    if g.c.strip():
+                        counts[round(g.size, 1)] = counts.get(round(g.size, 1), 0) + 1
             x0, y0, x1, y1 = b["bbox"]
             out.append((_join_lines(lines), (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE),
-                        _join_lines(plain)))
+                        max(counts, key=counts.get) if counts else 0.0, lines, plain))
     return out
+
+
+def _plain(block) -> str:
+    return _join_lines(block[5])
+
+
+def _figure_regions(page, blocks) -> list[tuple[float, float, float, float]]:
+    """Drawings and images that a figure caption ("Figure 3.1", "圖 2") sits right below or above: the figure's body,
+    whose labels are part of the picture, not of the text. A table's lines are content and never count."""
+    rects = [tuple(r) for r in page.cluster_drawings()] + [tuple(im["bbox"]) for im in page.get_image_info()]
+    captions = [b[1] for b in blocks if FIGURE_CAPTION_RE.match(_plain(b))]
+    out = []
+    for r in rects:
+        if r[3] - r[1] > FIGURE_MAX_HEIGHT * page.rect.height:
+            continue
+        for c in captions:
+            side = (r[1] - FIGURE_CAPTION_GAP <= c[1] and c[1] - r[3] <= FIGURE_CAPTION_GAP and c[1] >= r[3] - 2) or \
+                   (c[3] <= r[1] + 2 and r[1] - c[3] <= FIGURE_CAPTION_GAP)
+            if side and min(r[2], c[2]) > max(r[0], c[0]):
+                out.append(r)
+                break
+    return out
+
+
+def _inside(b: tuple, r: tuple, pad: float = 3.0) -> bool:
+    return b[0] >= r[0] - pad and b[1] >= r[1] - pad and b[2] <= r[2] + pad and b[3] <= r[3] + pad
+
+
+def _is_note(block, body: float) -> bool:
+    """A short footnote at the page's bottom edge looks like a footer ("6 Section 17.4 …"): small type, a note mark
+    and a closing sentence tell it apart (a footer carries no sentence end)."""
+    text = _plain(block)
+    return bool(block[2] and body and block[3] <= FOOTNOTE_SIZE * body and FOOTNOTE_MARK_RE.match(text)
+                and NOTE_END_RE.search(text))
+
+
+def _body_size(blocks) -> float:
+    counts: dict[float, int] = {}
+    for text, _, edge, size, *_ in blocks:
+        if not edge and size:
+            counts[size] = counts.get(size, 0) + len(text)
+    return max(counts, key=counts.get) if counts else 0.0
+
+
+def _note_text(text: str, mark: str) -> str:
+    """The note's text without its mark, which the formula reader may have written as a superscript ($^{1}$)."""
+    sup = r"(?:\{\})?\^\{?" + re.escape(mark) + r"\}?"
+    m = re.match(r"^\s*\$" + sup + r"\s*(.*?)\$\s*", text)   # "${}^{1}\mathrm{We}$ use …": the mark and a word set with it
+    if m:
+        word = re.fullmatch(r"\\mathrm\{([^}]*)\}", m.group(1).strip())
+        rest = word.group(1) if word else (f"${m.group(1).strip()}$" if m.group(1).strip() else "")
+        return (rest + " " + text[m.end():]).strip()
+    m = re.match(r"^\s*" + re.escape(mark) + r"\s*", text)
+    return text[m.end():].strip() if m else text.strip()
 
 
 def pdf_page_math(doc, page, fonts=None):
@@ -128,7 +205,7 @@ def pdf_running_margins(doc) -> frozenset[str]:
         return frozenset()
     seen: dict[str, int] = {}
     for page in doc:
-        for key in {_margin_key(t) for t, _, edge, _plain in _page_text_blocks(page) if edge and len(t) <= 80}:
+        for key in {_margin_key(t) for t, _, edge, *_ in _page_text_blocks(page) if edge and len(t) <= 80}:
             seen[key] = seen.get(key, 0) + 1
     return frozenset(k for k, n in seen.items() if n >= MARGIN_REPEAT_PAGES)
 
@@ -140,12 +217,42 @@ def pdf_page_paragraphs(page, margins: frozenset[str] = frozenset(), math=None) 
     joined, Office bullet glyphs become "• ", and edge blocks are dropped when they carry a page number or are one of
     the document's running `margins` (pdf_running_margins). The importer and the evidence extractor both use this, so
     a block's (page, paragraph index) locator points at the same region in both. `math` (pdf_page_math, text version 2)
-    gives the text with formulas as LaTeX; whether an edge block is dropped is decided on the plain text either way."""
-    out: list[tuple[str, tuple[float, float, float, float]]] = []
-    for text, bbox, edge, plain in _page_text_blocks(page, math):
-        if edge and len(plain) <= 80 and (PAGE_MARGIN_RE.search(plain) or _margin_key(plain) in margins):
-            continue
-        out.append((text, bbox))
+    gives the text with formulas as LaTeX; the layout decisions (margins, footnotes, figures) are made on the plain
+    text either way.
+
+    Footnotes (the run of small-type blocks closing the page, opened by a note mark) are written as Markdown
+    footnotes "[^1]: …" after the text and kept out of its sentence flow (reading/source.py); text inside a figure
+    (labels of a drawing next to its caption) is dropped, the caption kept."""
+    blocks = _page_text_blocks(page, math)
+    body = _body_size(blocks)
+    blocks = [b for b in blocks if _is_note(b, body) or not (b[2] and len(_plain(b)) <= 80 and (
+        PAGE_MARGIN_RE.search(_plain(b)) or _margin_key(_plain(b)) in margins))]
+    figures = _figure_regions(page, blocks)
+    blocks = [b for b in blocks if FIGURE_CAPTION_RE.match(_plain(b)) or not any(_inside(b[1], r) for r in figures)]
+    height = page.rect.height or 1
+    n = len(blocks)
+    while n and body and blocks[n - 1][3] <= FOOTNOTE_SIZE * body and blocks[n - 1][1][1] > FOOTNOTE_ZONE * height:
+        n -= 1
+    while n < len(blocks) and not FOOTNOTE_MARK_RE.match(_plain(blocks[n])):
+        n += 1   # small type that no mark opens is not a footnote area (a caption, a small final line)
+    out: list[tuple[str, tuple[float, float, float, float]]] = [(b[0], b[1]) for b in blocks[:n]]
+    notes: list[list[tuple[str, str]]] = []   # per note: (plain line, text line)
+    boxes: list[tuple[float, float, float, float]] = []
+    for _, bbox, _, _, lines, plain in blocks[n:]:
+        pairs = list(zip(plain, lines)) if len(plain) == len(lines) else [(_join_lines(plain), _join_lines(lines))]
+        for k, (pl, line) in enumerate(pairs):
+            # a mark opens a note at a block's start, or on a line after a closed sentence (two notes set in one block)
+            opens = FOOTNOTE_MARK_RE.match(pl) and (k == 0 or NOTE_END_RE.search(pairs[k - 1][0]))
+            if opens or not notes:
+                notes.append([(pl, line)])
+                boxes.append(bbox)
+            else:   # the note before it goes on
+                notes[-1].append((pl, line))
+                b = boxes[-1]
+                boxes[-1] = (min(b[0], bbox[0]), min(b[1], bbox[1]), max(b[2], bbox[2]), max(b[3], bbox[3]))
+    for note, bbox in zip(notes, boxes):
+        mark = FOOTNOTE_MARK_RE.match(note[0][0]).group(1)
+        out.append((f"[^{mark}]: {_note_text(_join_lines([t for _, t in note]), mark)}", bbox))
     return out
 
 
@@ -236,6 +343,14 @@ class MaterialStore:
             if "status" not in cols:         # materials before the background text reading: all read
                 c.execute("ALTER TABLE materials ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'")
                 c.execute("ALTER TABLE materials ADD COLUMN status_detail TEXT")
+            if "translate_zh" not in cols:
+                c.execute("ALTER TABLE materials ADD COLUMN translate_zh INTEGER NOT NULL DEFAULT 0")
+            if "language" not in cols:   # materials imported before: their language is read from their text once
+                from .tutor.reading import source_language
+                c.execute("ALTER TABLE materials ADD COLUMN language TEXT")
+                for mid, units in c.execute("SELECT id, units FROM materials").fetchall():
+                    c.execute("UPDATE materials SET language=? WHERE id=?",
+                              (source_language("\n".join(json.loads(units))), mid))
 
     @property
     def library_dir(self) -> Path:
@@ -276,12 +391,19 @@ class MaterialStore:
     # -- materials ----------------------------------------------------------
     # status: "ready" (its text is read), "extracting" (a PDF whose text is being read in the background, see
     # app.material_extract) or "failed" (status_detail says why); the file itself is in place in every case
-    META = "id, category_id, title, filename, kind, unit, unit_count, created_at, text_version, status, status_detail"
+    META = ("id, category_id, title, filename, kind, unit, unit_count, created_at, text_version, status, status_detail, "
+            "translate_zh, language")
+
+    @staticmethod
+    def _row(row) -> dict:
+        d = dict(row)
+        d["translate_zh"] = bool(d["translate_zh"])
+        return d
 
     def list(self) -> list[dict]:
         lib = self.library.all()
         with self.db.conn() as c:
-            rows = [dict(r) for r in c.execute(f"SELECT {self.META} FROM materials ORDER BY created_at")]
+            rows = [self._row(r) for r in c.execute(f"SELECT {self.META} FROM materials ORDER BY created_at")]
         for r in rows:
             r["alias"] = (lib.get(r["id"]) or {}).get("alias")
         return rows
@@ -313,15 +435,17 @@ class MaterialStore:
                                     {"material": existing})
         deferred = defer and kind == "pdf"
         units = [""] * pdf_page_count(data) if deferred else extract_units(kind, data)
+        from .tutor.reading import source_language
         mid = new_id()
         self.files_dir.mkdir(parents=True, exist_ok=True)
         (self.files_dir / f"{mid}.{kind}").write_bytes(data)
         with self.db.conn() as c:
             c.execute("INSERT INTO materials (id, category_id, title, filename, kind, unit, unit_count, units, created_at, "
-                      "text_version, status) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      "text_version, status, language) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                       (mid, category_id or None, Path(filename).stem, filename, kind,
                        "page" if kind == "pdf" else "line", len(units), json.dumps(units, ensure_ascii=False), now_iso(),
-                       TEXT_VERSION if kind == "pdf" else 1, "extracting" if deferred else "ready"))
+                       TEXT_VERSION if kind == "pdf" else 1, "extracting" if deferred else "ready",
+                       None if deferred else source_language("\n".join(units))))
         self.library.keep(mid, filename, data, digest, original_path)
         return self.get(mid, with_units=False)
 
@@ -333,8 +457,9 @@ class MaterialStore:
 
     def set_units(self, mid: str, units: list[str]) -> None:
         with self.db.conn() as c:
-            c.execute("UPDATE materials SET units=?, unit_count=?, status='ready', status_detail=NULL WHERE id=?",
-                      (json.dumps(units, ensure_ascii=False), len(units), mid))
+            from .tutor.reading import source_language
+            c.execute("UPDATE materials SET units=?, unit_count=?, status='ready', status_detail=NULL, language=? WHERE id=?",
+                      (json.dumps(units, ensure_ascii=False), len(units), source_language("\n".join(units)), mid))
 
     def set_failed(self, mid: str, detail: str) -> None:
         with self.db.conn() as c:
@@ -363,7 +488,7 @@ class MaterialStore:
             row = c.execute(f"SELECT {self.META}{', units' if with_units else ''} FROM materials WHERE id=?", (mid,)).fetchone()
         if not row:
             raise MaterialError("not_found", "找不到這份教材")
-        d = dict(row)
+        d = self._row(row)
         if with_units:
             d["units"] = json.loads(d["units"])
         lib = self.library.get(mid)
@@ -371,9 +496,12 @@ class MaterialStore:
         d["library"] = lib    # the copy in the book folder and what it stands for (app.library)
         return d
 
-    def update(self, mid: str, *, title: str | None, category_id: str | None, set_category: bool) -> dict:
+    def update(self, mid: str, *, title: str | None, category_id: str | None, set_category: bool,
+               translate_zh: bool | None = None) -> dict:
         self.get(mid, with_units=False)
         with self.db.conn() as c:
+            if translate_zh is not None:
+                c.execute("UPDATE materials SET translate_zh=? WHERE id=?", (int(translate_zh), mid))
             if title is not None and title.strip():
                 c.execute("UPDATE materials SET title=? WHERE id=?", (title.strip(), mid))
             if set_category:

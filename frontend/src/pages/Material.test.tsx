@@ -5,7 +5,7 @@ import { MaterialPage } from "./Material";
 import { mockFetch, session } from "../test/fixtures";
 import { I18nContext, translate } from "../i18n";
 
-const material = { id: "m1", category_id: null, title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 4, created_at: "", units: ["# 光合作用", "", "植物利用陽光製造葡萄糖。", "葉綠體是進行光合作用的地方。"] };
+const material = { id: "m1", category_id: null, title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 4, created_at: "", translate_zh: false, units: ["# 光合作用", "", "植物利用陽光製造葡萄糖。", "葉綠體是進行光合作用的地方。"] };
 const study = { status: "ready", session_id: "study1", planner: "model", progress: 1, error: null, parts: [{ index: 0, from: 1, to: 4, heading: "光合作用" }] };
 
 beforeEach(() => localStorage.clear());

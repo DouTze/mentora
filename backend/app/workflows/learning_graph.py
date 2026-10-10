@@ -47,7 +47,7 @@ from langgraph.types import interrupt
 
 from .. import config
 from ..db import Database
-from ..llm.context import ContextItem, ContextOverflow, Packet
+from ..llm.context import ContextItem, ContextOverflow, Packet, chars_per_token
 from ..llm.runtime import BackendPool, CallBudget, ModelRuntime, ModelSnapshot, stable_hash
 from ..llm.tasks import TaskContext, TaskError, ToolDispatcher, run_structured, select_context
 from ..models import ModelJudgement
@@ -125,8 +125,13 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
     def runtime(sid: str) -> ModelRuntime:
         return ModelRuntime(ModelSnapshot.from_config(meta(row(sid))["model_snapshot"]), deps.pool)
 
+    def output(r: dict) -> dict:
+        """What the session writes in (and so which version of each prompt it uses)."""
+        return reading.session_output(meta(r), (r["content_snapshot"].get("source") or {}).get("text") or "")
+
     def prompts(sid: str) -> dict[str, str]:
-        return meta(row(sid))["prompt_bundle"]["prompts"]
+        r = row(sid)
+        return reading.with_language(meta(r)["prompt_bundle"]["prompts"], output(r))
 
     def ctx(state: WorkflowState, task: str, op: str) -> TaskContext:
         b = CallBudget.for_task(task)
@@ -148,7 +153,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                             guides={k: v for k, v in rd["guides"].items() if int(k) < index},
                             compacts=rd["compacts"], qa=rd["qa"])
 
-    reading_deps = ReadingDeps(runtime_for=runtime, prompts_for=prompts, scope_for=scope, sink=sink, repo=repo,
+    reading_deps = ReadingDeps(runtime_for=runtime, prompts_for=prompts, sink=sink, repo=repo,
                                on_stage=lambda sid, cid, st: repo.set_command_stage(sid, cid, st),
                                evidence_dir=Path(deps.svc.reading_dir).parent / "evidence")
     def symbol_evidence(r: dict, q: dict) -> dict | None:
@@ -219,14 +224,14 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         return {"error": None, "failed_node": None}
 
     def learning_snapshot(r: dict, idx: int, assume_read: set[int] | None = None) -> LearningSnapshot:
-        """What unit `idx`'s guide may assume about the reader: claims of units the reader moved past (read, not
-        proven understood), the questions asked there, understanding evidence from answers, and the task
+        """What unit `idx`'s guide may assume about the reader: the key points of units the reader moved past
+        (read, not proven understood), the questions asked there, understanding evidence from answers, and the task
         contract. A guide that was generated or prefetched but not read never counts."""
         content, rd = r["content_snapshot"], r["state"]["reading"]
         tc = meta(r).get("task_contract") or {}
         read = sorted(i for i in set(rd.get("read") or []) | (assume_read or set()) if i < idx)
-        claims = [{"unit_id": content["quotes"][i]["unit_id"], "claim_id": c["id"], "statement": c["statement"]}
-                  for i in read[-3:] for c in (rd["guides"].get(str(i)) or {}).get("source_claims") or []][-12:]
+        claims = [{"unit_id": content["quotes"][i]["unit_id"], "claim_id": f"K{k}", "statement": p}
+                  for i in read[-3:] for k, p in enumerate((rd["guides"].get(str(i)) or {}).get("key_points") or [], 1)][-12:]
         questions = [{"unit_id": content["quotes"][i]["unit_id"], "question": x["question"]}
                      for i in read for x in rd["qa"].get(str(i), [])][-6:]
         return LearningSnapshot(depth=tc.get("depth", "close"), goal=tc.get("goal", ""),
@@ -252,12 +257,15 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                                    attempt=attempt, learning=learning_snapshot(r, idx, assume_read),
                                    source_kind="pdf" if content["source"]["unit"] == "page" else "md",
                                    depends_on_prev=bool(q.get("depends_on_prev")),
-                                   symbol_evidence=symbol_evidence(r, q))
+                                   symbol_evidence=symbol_evidence(r, q), language=output(r)["code"])
 
     def contract_of(r: dict | None) -> tuple:
-        """What a guide is written for besides its source: the reading depth, goal and the reader's background."""
-        tc = (meta(r) if r else {}).get("task_contract") or {}
-        return tc.get("depth", "close"), tc.get("goal", ""), tc.get("reader_background", "")
+        """What a guide is written for besides its source: the reading depth, goal, the reader's background and the
+        language it is written in."""
+        m = meta(r) if r else {}
+        tc = m.get("task_contract") or {}
+        return (tc.get("depth", "close"), tc.get("goal", ""), tc.get("reader_background", ""),
+                (m.get("output_language") or {}).get("code", "zh"))
 
     def reusable_guide(sid: str, q: dict) -> dict | None:
         """An accepted guide of the same unit written by another reading of this material (its study, or an earlier
@@ -314,9 +322,11 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         b.calls = repo.count_calls(key)
         c = TaskContext(runtime(sid), b, sink, session_id=sid, command_id=command_id, operation_key=key)
         schema = TopicOverview.model_json_schema()
-        schema["properties"]["summary"] = {**schema["properties"]["summary"], "maxLength": 200}
-        schema["properties"]["check"] = {**schema["properties"]["check"], "maxLength": 100}
-        schema["properties"]["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 3}
+        scale = chars_per_token(q["text"])   # bounds in CJK characters; a Latin text needs about three times as many
+        schema["properties"]["summary"] = {**schema["properties"]["summary"], "maxLength": int(200 * scale)}
+        schema["properties"]["check"] = {**schema["properties"]["check"], "maxLength": int(100 * scale)}
+        schema["properties"]["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": int(80 * scale)},
+                                              "maxItems": 3}
         try:
             ov, _ = await run_structured(c, [HumanMessage(content=msg)], TopicOverview, task="topic", node="topic",
                                          prompt_version=task.prompt_bundle_hash, meta={"step": "reading_topic"},
@@ -330,6 +340,11 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         repo.put_artifact(key, kind="topic_overview", status="cached", payload=payload, session_id=sid, unit_id=task.unit_id)
         return payload
 
+    def rejected_payload(out: dict) -> dict:
+        """What a handout that was not published keeps for review: the draft, the handout after its corrections,
+        what was left open and the corrections tried."""
+        return {k: out.get(k) for k in ("draft", "guide", "findings", "fix_log", "error", "symbol_evidence", "budget")}
+
     def block_key(t: ra.ReadingTaskInput) -> str:
         """An accepted 區塊 guide, reused by a retry of the 主題 and by the guide after a prefetch."""
         return f"{t.session_id}:block:{t.unit_id}:" + stable_hash([t.source_hash, t.context_hash, t.prompt_bundle_hash,
@@ -337,19 +352,19 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                                                                     gates.GATE_RULES_VERSION])
 
     async def run_blocks(sid: str, task: ra.ReadingTaskInput, q: dict, tag: str, command_id: str | None, *,
-                         attempts: dict[int, int] | None = None, keep: dict[int, dict] | None = None,
-                         source_only: bool = False) -> tuple[dict, list]:
+                         attempts: dict[int, int] | None = None, keep: dict[int, dict] | None = None) -> tuple[dict, list]:
         """(overview, one entry per 區塊). Each 區塊 runs the guided-reading subgraph on its own text, budget and
         operation key, concurrently (the backend pool limits real parallelism). A model that cannot be reached
         stops the whole 主題 after the others finished (their results are kept)."""
         r = row(sid)
         chunks = tg.chunks_of(q)
         keep, attempts = keep or {}, attempts or {}
-        overview = tg.fallback_overview(chunks) if source_only else await topic_overview(sid, task, q, command_id)
+        overview = await topic_overview(sid, task, q, command_id)
 
         async def one(k: int):
-            """A 區塊 that fails is run again on its own (a new attempt: new operation key, new budget) while the
-            failure is one a new run can fix, up to READING_BLOCK_ATTEMPTS attempts in all."""
+            """A 區塊 whose run broke down (an output that could not be read) is run again on its own, up to
+            READING_BLOCK_ATTEMPTS attempts in all. A handout that did not pass its review is never redrafted: the
+            subgraph has already corrected it in place."""
             if k in keep:
                 return keep[k]
             first = attempts.get(k, task.attempt)
@@ -357,16 +372,15 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             earlier: list[dict] = []   # the attempts that failed before the last one (kept in the record)
             for i, att in enumerate(range(first, first + n)):
                 entry = await run_once(k, att)
-                if (source_only or entry.get("status") == "accepted" or i == n - 1
-                        or not tg.worth_retrying(entry.get("error"))):
+                if entry.get("status") == "accepted" or i == n - 1 or not tg.worth_retrying(entry.get("error")):
                     break
                 earlier.append({"attempt": att, **(entry.get("error") or {})})
-            return {**entry, "failed_attempts": earlier} if earlier and not source_only else entry
+            return {**entry, "failed_attempts": earlier} if earlier else entry
 
         async def run_once(k: int, att: int):
             ev = symbol_evidence(r, {**q, "block_ids": chunks[k]["block_ids"], "text": chunks[k]["text"]})
             bt = tg.block_task(task.model_copy(update={"attempt": att}), q, k, overview, ev)
-            hit = None if source_only else repo.get_artifact(block_key(bt))
+            hit = repo.get_artifact(block_key(bt))
             if hit:
                 return {**hit["payload"], "attempt": att}
             # the reader's context is in the key: a prefetch redone after a question must not reuse the cached steps
@@ -375,20 +389,15 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             # a 區塊 run redone under other gate rules keeps what the earlier run spent: the budget is never refilled
             spent = repo.count_calls(bop.rsplit(":", 1)[0] + ":") - repo.count_calls(bop + ":")
             budget = {**CallBudget.for_task("guide").to_dict(), "calls": spent} if spent > 0 else None
-            out = await invoke(reading_graph, guide_initial(bt, bop, command_id, budget, source_only=source_only),
+            out = await invoke(reading_graph, guide_initial(bt, bop, command_id, budget),
                                {"configurable": {"thread_id": bop}})
-            if source_only:
-                return out
             entry = {**tg.block_entry(k, chunks[k], out, att), "by": tag}
             if entry["status"] == "accepted":
                 repo.put_artifact(block_key(bt), kind="guide_block", status="accepted", payload=entry, session_id=sid,
                                   unit_id=bt.unit_id)
             else:
                 repo.put_artifact(f"{bop}:rejected", kind="guide", status="rejected", unit_id=bt.unit_id, session_id=sid,
-                                  payload={"draft": out.get("draft"), "findings": out.get("findings"), "error": out.get("error"),
-                                           "understanding": out.get("understanding"), "gate1": out.get("gate1"),
-                                           "bridges": out.get("bridges"), "symbol_evidence": out.get("symbol_evidence"),
-                                           "budget": out.get("budget")},
+                                  payload=rejected_payload(out),
                                   source_hash=bt.source_hash, context_hash=bt.context_hash,
                                   prompt_version=bt.prompt_bundle_hash, model_config_hash=bt.model_config_hash,
                                   workflow_version=ra.READING_WORKFLOW_VERSION)
@@ -474,10 +483,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
             return {"error": model_error(e), "failed_node": "guide"}
         if out["status"] != "accepted":
             repo.put_artifact(f"{op}:rejected", kind="guide", status="rejected", unit_id=q["unit_id"], session_id=sid,
-                              payload={"draft": out.get("draft"), "findings": out.get("findings"), "error": out.get("error"),
-                                       "understanding": out.get("understanding"), "gate1": out.get("gate1"),
-                                       "bridges": out.get("bridges"), "symbol_evidence": out.get("symbol_evidence"),
-                                       "budget": out.get("budget")},
+                              payload=rejected_payload(out),
                               source_hash=task.source_hash, context_hash=task.context_hash,
                               prompt_version=task.prompt_bundle_hash, model_config_hash=task.model_config_hash,
                               workflow_version=ra.READING_WORKFLOW_VERSION)
@@ -941,32 +947,9 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         return "failed"
 
     async def warm_sources(sid: str, slots: int) -> list[str]:
-        """Verify the sources of the units after the next one, concurrently (up to `slots` at a time): Gate 1 does not
-        depend on the reader, and its VerifiedSource is cached, so when the reader gets there only the reader-
-        dependent part of the guide (bridges, body, Gate 2) is left. Read-only for the session; the unit right after
-        the current one is the prefetch's. Returns what happened per unit."""
-        r = row(sid)
-        content, st = r["content_snapshot"], r["state"]
-        rd = st.get("reading") or {}
-        if st.get("phase") != "reading" or rd.get("done") or slots < 1 or (content.get("segmentation") or {}).get("status") != "done":
-            return []
-        first = rd["index"] + 2
-        todo = [i for i in range(first, min(len(content["quotes"]), first + slots))
-                if str(i) not in rd["guides"] and not reusable_guide(sid, content["quotes"][i])]
-
-        async def one(i: int) -> str:
-            task = guide_task(sid, i, 1, guides=rd["guides"])
-            q = content["quotes"][i]
-            if tg.chunks_of(q):   # the verified source is per 區塊
-                _, outs = await run_blocks(sid, task, q, "warm", "warm", source_only=True)
-                codes = {{"source_verified": "verified"}.get(o["status"], (o.get("error") or {}).get("code") or o["status"])
-                         for o in outs}
-                return codes.pop() if len(codes) == 1 else "mixed:" + ",".join(sorted(codes))
-            key = f"{sid}:warm:{task.unit_id}:" + stable_hash([task.source_hash, task.prompt_bundle_hash,
-                                                              task.model_config_hash, gates.GATE_RULES_VERSION])
-            out = await invoke(reading_graph, guide_initial(task, key, "warm", source_only=True), {"configurable": {"thread_id": key}})
-            return {"source_verified": "verified"}.get(out["status"], (out.get("error") or {}).get("code") or out["status"])
-        return list(await asyncio.gather(*(one(i) for i in todo), return_exceptions=False))
+        """Nothing to warm under reading-graph-v3: every step of a handout depends on the reader (the source stage
+        that used to be verified ahead of the reader is gone); the next unit is the prefetch's."""
+        return []
 
     compiled.prefetch_next = prefetch_next   # used by the runner between commands
     compiled.warm_sources = warm_sources

@@ -28,7 +28,7 @@
   - unclear：回答太短或離題，無法判斷
 - "reasoning_ok": true | false（理由是否合理；結論錯誤時填 false）
 - "evidence": 一句話，引用學生回答中的具體內容說明你的判斷
-- "feedback": 給學生的回饋，1–2 句，繁體中文，不直接給出完整答案；數學用 KaTeX（行內 `$…$`）
+- "feedback": 給學生的回饋，1–2 句，用{{language}}，不直接給出完整答案；數學用 KaTeX（行內 `$…$`）
 - "hint": 若學生尚未答對，給一個引導性的提示（一句話）；否則填 null
 - "probe": 若需要追問理由，寫一個追問句；否則填 null
 - "source_ids": 你引用的概念 id 陣列，可用的有：{{concept_ids}}

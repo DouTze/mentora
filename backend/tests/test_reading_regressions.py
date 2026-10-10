@@ -1,118 +1,87 @@
-"""Release-gate regressions (R0): the cases reproduced in the 2026-10-04 review, kept as data in
-evals/reading/regressions/cases.json. Model outputs are scripted by role; the re-check is adversarial (it always
-claims the draft is fine, quoting the guide), so a case passes only if the program's own evidence rules block it.
-Every case also states the expected outcome for a correct draft, so the gate cannot pass by refusing everything."""
-import json
-import re
-from pathlib import Path
-
-import pytest
-
-from app.llm.base import LLMBackend, LLMResult
-from app.llm.runtime import BackendPool, ListSink, ModelRuntime, ModelSnapshot
+"""Program rules of the handout review (reading-graph-v3), each from a case seen with qwen3-vl:4b: what the program
+treats as a fact (a reprint of the textbook, a missing equation, a reviewer's quotation that is not there) and what
+it leaves to the reviewers."""
 from app.reading import agent as ra
-from app.reading.prompts import load_bundle
-from app.reading.tools import ReadingScope
-from app.workflows import invoke
-from app.workflows.reading_graph import ReadingDeps, build_reading_graph, initial_state
+from app.reading import gates
+from app.reading.contracts import Conflict, ConflictsReview, Edit, PointsReview, PointVerdict
 
-FIXTURES = json.loads((Path(__file__).resolve().parent.parent / "evals/reading/regressions/cases.json").read_text(encoding="utf-8"))
-BUNDLE = load_bundle()
-SNAP = ModelSnapshot("mock", "", "", "", "", 0.2, 512, 8192)
-
-
-def first_sentence(text: str) -> str:
-    return re.split(r"(?<=[。！？])", text, maxsplit=1)[0]
+ZH = ("自然語言處理是AI 領域中最具挑戰性之一，旨在使機器能夠理解、解釋並生成人類語言。隨著語音助理、聊天機器人及智慧客服等應用的"
+      "普及，NLP 技術的發展已經從簡單的語言分析進階到複雜的語意理解。")
+EN = ("We introduce key elements of the problem's mathematical structure, such as returns, value functions, and Bellman "
+      "equations. Whereas in bandit problems we estimated the value $q_*(a)$ of each action $a$, in MDPs we estimate the "
+      "value of each action in each state.")
 
 
-class RoleScripted(LLMBackend):
-    """Plays every role from one case. The source stage is correct (one claim per sentence, the case's 中文課文);
-    the drafter always writes the case's draft (revisions included); the auditor uses the case's audit if it has
-    one, otherwise it is adversarial — it calls every claim covered, quoting the guide's first sentence; the
-    re-check always says "no problem" with that quote. A bad draft must be stopped by the program's evidence rules."""
-    name = model = "scripted"
-
-    def __init__(self, case: dict):
-        self.case, self.steps = case, []
-
-    async def generate(self, messages, *, temperature, max_tokens, context_tokens, meta=None):
-        step = (meta or {}).get("step")
-        self.steps.append(step)
-        c = self.case
-        quote = first_sentence(c["guide"])
-        cn = c["chinese_text"]
-        if step in ("understand", "revise_source"):
-            out = {"translations": [] if cn is None else [{"id": sid, "zh": cn} for sid, _ in meta["segments"]],
-                   "claims": [{"id": f"C{i}", "sentences": [sid], "statement": "", "function": "claim"}
-                              for i, (sid, _) in enumerate(meta["segments"], 1)]}
-        elif step == "source_audit":
-            out = {"sentences": [{"id": sid, "verdict": "faithful"} for sid, _ in meta["sentences"]],
-                   "claims": [{"id": x, "verdict": "faithful"} for x in meta["claim_ids"]]}
-        elif step == "plan_bridges":
-            out = {"learning_goal": "讀懂", "bridges": []}
-        elif step in ("draft", "revise_body"):
-            out = {"guide": c["guide"], "key_points": [], "check": "", "bridges_used": []}
-        elif step == "body_audit":
-            out = c["body_audit"] if "body_audit" in c else {
-                "claims": [{"id": x["id"], "verdict": "covered", "guide_quote": quote} for x in meta["claims"]],
-                "bridges": [], "additions": [], "uncovered_source": [], "coherence": "pass"}
-        elif step == "verify":
-            out = {"checks": [{"item": k, "verdict": "no_problem", "guide_quote": quote, "reason": "正文已經寫到"}
-                              for k in range(1, 6)]}
-        else:
-            raise AssertionError(step)
-        return LLMResult(text=json.dumps(out, ensure_ascii=False), latency_ms=1)
+def task(text: str, **kw) -> ra.ReadingTaskInput:
+    return ra.ReadingTaskInput(session_id="s", unit_id="u", index=0, total=1, label="l", text=text, material_title="m",
+                               range_label="r", model_config_hash="h", prompt_bundle_hash="p", **kw)
 
 
-async def run_case(c: dict) -> tuple[dict, RoleScripted]:
-    b = RoleScripted(c)
-    pool = BackendPool(build=lambda _: b)
-    q = {"id": "q", "index": 0, "unit_id": "u", "label": "第 1 行", "heading": None, "text": c["source"]}
-    deps = ReadingDeps(runtime_for=lambda s: ModelRuntime(SNAP, pool), prompts_for=lambda s: BUNDLE["prompts"],
-                       scope_for=lambda s, i: ReadingScope(quotes=[q], current_index=i), sink=ListSink())
-    t = ra.ReadingTaskInput(session_id="s", unit_id="u", index=0, total=1, label="第 1 行", text=c["source"],
-                            material_title="m", range_label="r", model_config_hash="h", prompt_bundle_hash="p")
-    out = await invoke(build_reading_graph(deps), initial_state(t, op=f"op:{c['id']}"), {"configurable": {"thread_id": c["id"]}})
-    return out, b
+def test_reusing_the_textbook_where_it_is_clear_is_not_a_problem():
+    """Whether a passage needed explaining is a judgement about meaning: the program never counts copied text. (A
+    copy check once forced rewording, review B called the rewording a contradiction, and the handout swung back and
+    forth between the two until it ended as the textbook again.)"""
+    assert gates.handout_program(task(ZH), ZH + "\n\n換句話說，NLP 要掌握的是意思，不只是字面。") == []
+    assert gates.handout_program(task(EN), EN) == []
 
 
-@pytest.mark.parametrize("case", FIXTURES["cases"], ids=[c["id"] for c in FIXTURES["cases"]])
-async def test_release_gate(case):
-    out, b = await run_case(case)
-    assert (out["status"] == "accepted") is case["expect"]["published"], (b.steps, out.get("findings"), out.get("error"))
-    if not case["expect"]["published"]:
-        assert out["artifact"] is None and out["error"]["detail"]
-        if out["error"]["code"] != "review_invalid":
-            assert out["draft"]["guide"] == case["guide"]   # the draft is kept, not shown
-    assert out["budget"]["calls"] <= out["budget"]["max_calls"]
+def test_the_textbooks_equations_must_be_written_but_a_lone_symbol_need_not():
+    t = task("價值函數定義為 $$v_\\pi(s) \\doteq \\mathbb{E}_\\pi[G_t \\mid S_t = s]$$ 其中 $G_t$ 是回報。")
+    fs = gates.handout_program(t, "（講義）價值函數衡量從狀態出發的期望回報。")
+    assert [f.code for f in fs] == ["formula_missing"] and fs[0].suggested_fix.startswith("$$")
+    ok = "（講義）價值函數是 $$v_\\pi(s) \\doteq \\mathbb{E}_\\pi[G_t \\mid S_t = s]$$ 也就是期望回報。"
+    assert gates.handout_program(t, ok) == []
+    ev = {"status": "confirmed", "transcription": {"formulas": ["S_t", "p(s', r \\mid s, a) = \\Pr\\{S_t = s'\\}"], "symbols": []}}
+    assert gates.required_formulas(task("文字層"), ev) == ["p(s',r\\mids,a)=\\Pr\\{S_t=s'\\}"]
 
 
-def test_empty_review_is_not_a_review():
-    with pytest.raises(Exception):
-        ra.ReviewResult.model_validate({})
-    with pytest.raises(Exception):
-        ra.ReviewResult.model_validate({"issues": []})
+def test_a_reviewers_claim_counts_only_with_quotations_that_are_really_there():
+    """Review B must quote both the handout and the textbook; review A's "yes" must quote the handout. What does
+    not check out is a note, never a reason to correct or hold."""
+    guide = "NLP 的目標是讓機器理解、解釋並生成人類語言。它已經從語言分析走到語意理解。"
+    real = ConflictsReview(conflicts=[Conflict(guide_quote="它已經從語言分析走到語意理解",
+                                               source_quote="從簡單的語言分析進階到複雜的語意理解", why="（測試）",
+                                               both_true="no")])
+    fs = gates.conflict_findings(real, guide, ZH)
+    assert [(f.code, f.severity, f.status) for f in fs] == [("conflict", "major", "confirmed")]
+    invented = ConflictsReview(conflicts=[Conflict(guide_quote="NLP 只能找關鍵字", source_quote="課本沒有這句", why="",
+                                                   both_true="no")])
+    fs = gates.conflict_findings(invented, guide, ZH)
+    assert [(f.code, f.severity) for f in fs] == [("conflict_unconfirmed", "minor")]
+    assert gates.reader_notes(fs)[0]["code"] == "conflict_unconfirmed"
+    reworded = ConflictsReview(conflicts=[Conflict(guide_quote="它已經從語言分析走到語意理解",
+                                                   source_quote="從簡單的語言分析進階到複雜的語意理解",
+                                                   why="用字不同", both_true="yes")])
+    assert gates.conflict_findings(reworded, guide, ZH) == []          # both can be true: not a contradiction
+    pts = [("P1", "NLP 的目標"), ("P2", "從分析到理解")]
+    a = PointsReview(points=[PointVerdict(id="P1", taught="yes", guide_quote="讓機器理解、解釋並生成人類語言"),
+                             PointVerdict(id="P2", taught="no")])
+    fs = gates.points_findings(pts, a, guide)
+    assert [(f.code, f.item, f.severity) for f in fs] == [("point_missing", "P2", "major")]
+    a = PointsReview(points=[PointVerdict(id="P1", taught="yes", guide_quote="講義裡沒有的句子"), PointVerdict(id="P2", taught="yes",
+                                                                                               guide_quote="從語言分析走到語意理解")])
+    assert [(f.code, f.status) for f in gates.points_findings(pts, a, guide)] == [("point_unconfirmed", "unconfirmed")]
 
 
-def test_chinese_text_never_answers_for_the_guide():
-    c = next(x for x in FIXTURES["cases"] if x["id"] == "cross-field-condition")
-    t = ra.ReadingTaskInput(session_id="s", unit_id="u", index=0, total=1, label="l", text=c["source"], material_title="m",
-                            range_label="r", model_config_hash="h", prompt_bundle_hash="p")
-    fs = ra.validate_draft(t, ra.GuideDraft(chinese_text=c["chinese_text"], guide=c["guide"]))
-    guide_formula = [f for f in fs if f.target == "guide" and f.code == "wrong_formula"]
-    assert len(guide_formula) == 2 and all(f.status == "confirmed" for f in guide_formula)
-    assert not [f for f in fs if f.target == "chinese_text"]   # the 中文課文 itself is fine
+def test_a_correction_changes_only_the_passages_it_names():
+    guide = "第一段講定義。\n\n第二段說它從語言分析走到語意理解，這是錯的說法。\n\n第三段舉例。"
+    new, applied, skipped = gates.apply_edits(guide, [
+        Edit(problem="F1", action="replace", old="這是錯 的說法", new="這正是 NLP 的發展方向"),     # spacing ignored
+        Edit(problem="F2", action="insert_after", old="第一段講定義。", new="補上：NLP 的三個目標。"),
+        Edit(problem="F3", action="replace", old="講義裡沒有的句子", new="不會套用"),
+    ])
+    assert new == "第一段講定義。\n\n補上：NLP 的三個目標。\n\n第二段說它從語言分析走到語意理解，這正是 NLP 的發展方向。\n\n第三段舉例。"
+    assert [a["problem"] for a in applied] == ["F1", "F2"] and skipped == ["F3：要換掉的句子不在講義中"]
+    end, _, _ = gates.apply_edits("只有一段。", [Edit(action="insert_after", old="", new="補在最後。")])
+    assert end == "只有一段。\n\n補在最後。"
 
 
-def test_text_overlap_does_not_withdraw_a_reversal():
-    c = next(x for x in FIXTURES["cases"] if x["id"] == "negation-reversal")
-    review = ra.ReviewResult.model_validate({"checks": [{"check": k, "result": "pass"} for k in ra.expected_checks(False)],
-                                             "issues": [{"target": "guide", **c["review"]["issues"][0]}]})
-    fs = ra.review_findings(review, {"guide": c["guide"]}, c["source"])
-    assert fs[0].severity == "major" and fs[0].status == "confirmed"
-    v = ra.VerifyResult(checks=[ra.VerifyCheck(item=1, verdict="no_problem", guide_quote=first_sentence(c["guide"]))])
-    after = ra.apply_verify(fs, ra.to_verify(fs), v, {"guide": c["guide"]}, c["source"])
-    assert after[0].severity == "major" and "否定" in after[0].detail
+def test_the_points_are_the_blocks_summary():
+    t = task("x", topic={"index": 1, "summary": "主題總覽", "chunks": [
+        {"topic": "NLP", "aspect": "定義", "summary": "第一塊"}, {"topic": "NLP", "aspect": "發展", "summary": "從分析到理解"}]})
+    assert gates.handout_points(t) == [("P1", "（NLP｜發展）從分析到理解")]
+    assert gates.handout_points(task("x", topic={"summary": "只有總覽"})) == [("P1", "只有總覽")]
+    assert gates.handout_points(task("x")) == []
 
 
 def test_markers_ignore_code_and_treat_only_if_not_only_as_a_condition():
@@ -121,44 +90,6 @@ def test_markers_ignore_code_and_treat_only_if_not_only_as_a_condition():
     assert "condition" not in profile(code)                          # `if` inside code is not a condition
     assert parity("This paragraph explains the idea in words only.", "這段只用文字說明。") == []
     assert parity("Only if x > 0 is the formula valid.", "這個公式有效。")    # "only if" still is a condition
-
-
-def test_a_negation_of_the_next_claim_in_the_same_guide_sentence_is_not_this_claims():
-    """A guide sentence that carries two source sentences: the 並不 / 無法 of the second one are not added to the first."""
-    from app.reading.gates import coverage_parity
-    source = ("• ELIZA：早期的對話式AI 系統，通過關鍵詞比對進行簡單的對話模擬。"
-              "ELIZA能夠進行特定情境下的對話，但並不具備語意理解，無法處理複雜的語境。")
-    claim = "• ELIZA：早期的對話式AI 系統，通過關鍵詞比對進行簡單的對話模擬。"
-    guide = ("代表技術包括ELIZA：早期的對話式AI系統，通過關鍵詞比對進行簡單的對話模擬，"
-             "ELIZA能夠進行特定情境下的對話，但並不具備語意理解，無法處理複雜的語境。")
-    assert coverage_parity(claim, guide, source) == []
-    reversed_ = "ELIZA並不是早期的對話式AI系統，通過關鍵詞比對進行簡單的對話模擬。"
-    assert any("多了否定" in m for m in coverage_parity(claim, reversed_, source))
-    denied = "ELIZA是早期的對話式AI系統，通過關鍵詞比對進行簡單的對話模擬，這並不正確。"
-    assert any("多了否定" in m for m in coverage_parity(claim, denied, source))
-
-
-def test_a_guide_of_an_english_source_is_compared_with_the_chinese_claims():
-    """A Chinese guide shares no wording with English sentences, and "not just … but also" / "can be taken beyond"
-    have no word-for-word counterpart: the guide is compared with each claim's audited Chinese statement."""
-    from app.reading.contracts import BodyAudit, BridgePlan, SourceClaim
-    from app.reading.gates import coverage_findings
-    source = ("MDPs are a classical formalization of sequential decision making, where actions influence not just "
-              "immediate rewards, but also subsequent situations. Some ways in which reinforcement learning can be "
-              "taken beyond MDPs are treated in Chapter 17.")
-    zh = ["MDPs 是序列決策的經典形式化，其中動作不僅影響即時獎勵，還影響後續情境。", "一些將強化學習延伸至 MDPs 之外的方法在第 17 章中討論。"]
-    claims = [SourceClaim(id=f"C{i}", sentences=[f"S{i}"], statement=s, source_text=t) for i, (s, t) in
-              enumerate(zip(zh, ["MDPs are a classical formalization of sequential decision making, where actions "
-                                 "influence not just immediate rewards, but also subsequent situations.",
-                                 "Some ways in which reinforcement learning can be taken beyond MDPs are treated in "
-                                 "Chapter 17."]), 1)]
-    audit = BodyAudit.model_validate({"claims": [{"id": c.id, "verdict": "covered", "guide_quote": "不在正文裡的句子"}
-                                                 for c in claims], "bridges": [], "additions": [],
-                                      "uncovered_source": [], "coherence": "pass"})
-    fs = coverage_findings(source, "".join(zh), claims, BridgePlan(learning_goal="x", bridges=[]), audit)
-    assert not [f for f in fs if f.severity == "major"], [f.detail for f in fs]
-    fs = coverage_findings(source, zh[0], claims, BridgePlan(learning_goal="x", bridges=[]), audit)
-    assert [(f.code, f.item) for f in fs if f.severity == "major"] == [("missing_key_claim", "C2")]
 
 
 def test_a_merged_quotation_counts_only_when_every_piece_is_in_the_guide():
@@ -173,16 +104,35 @@ def test_a_merged_quotation_counts_only_when_every_piece_is_in_the_guide():
     assert ra.expand_quote(guide, hidden) == ""                        # a short inserted piece is checked too
 
 
-def test_an_english_source_pasted_into_the_guide_is_a_program_fact():
-    """qwen3-vl:4b pasted a whole English 區塊 as its guide (and another time pasted it before its own Chinese
-    explanation); the audit found every claim covered by the quoted English. A source sentence in the guide as is
-    is a fact, whatever the audit says; English terms and formulas inside Chinese prose are not."""
-    from app.reading.gates import copied_source
-    src = ("We introduce key elements of the problem's mathematical structure, such as returns, value functions, and "
-           "Bellman equations. Whereas in bandit problems we estimated the value $q_*(a)$ of each action $a$, in MDPs we "
-           "estimate the value of each action in each state.")
-    pasted = copied_source(src, src + "\n\n我們介紹此問題的數學結構。")
-    assert [f.code for f in pasted] == ["source_copied"] and pasted[0].severity == "major" and "2 句" in pasted[0].detail
-    zh = "我們介紹此問題數學結構的關鍵元素，例如回報、價值函數與貝爾曼方程（Bellman equations），以及 $q_*(a)$。"
-    assert copied_source(src, zh) == []
-    assert copied_source("這是中文原文，照抄也不是這項檢查的範圍。", "這是中文原文，照抄也不是這項檢查的範圍。") == []
+def test_a_handout_slipping_into_another_script_is_a_program_fact():
+    """qwen3-vl:4b wrote "a mapping from state-action pairs to next状态" in an English handout. Characters of a script
+    the source does not use are a slip in source mode; in a 繁體中文 handout English terms are normal."""
+    slipped = "The transition function is a mapping from state-action pairs to next状态. It is a probability."
+    fs = gates.handout_program(task(EN, language="src"), slipped)
+    assert [(f.code, f.draft_excerpt) for f in fs] == [("language_mixed", "The transition function is a mapping from "
+                                                                          "state-action pairs to next状态.")]
+    assert gates.handout_program(task(EN, language="zh"), "轉移函數 (transition function) 把狀態對應到下一個狀態。") == []
+    assert gates.handout_program(task(ZH, language="src"), "NLP（自然語言處理）讓機器理解語言。") == []
+
+
+def test_the_handout_bound_is_converted_to_characters_by_the_sources_language():
+    """A bound of 80 % of the token budget counted in characters cut English handouts at 1638 characters (about 400
+    tokens): an English character is a third of a token or less."""
+    en, zh = EN * 3, ZH * 3
+    assert gates.handout_chars(en) > 2.5 * gates.handout_chars(zh)
+    assert gates.handout_schema(en)["properties"]["guide"]["maxLength"] == gates.handout_chars(en)
+
+
+def test_another_answer_field_written_into_the_handout_is_a_program_fact():
+    """qwen3-vl:4b once wrote `key_points: ["…"]` at the end of the handout text and left key_points empty."""
+    g = "MDPs combine evaluative feedback with an associative aspect.\n\nkey_points: [\"MDPs formalize decisions.\"]"
+    fs = gates.handout_program(task(EN, language="src"), g)
+    assert [(f.code, f.draft_excerpt) for f in fs] == [("field_leak", 'key_points: ["MDPs formalize decisions."]')]
+    assert gates.handout_program(task(EN, language="src"), "Quick check: can you name the two parts of an MDP?") == []
+
+
+def test_every_bound_of_a_handout_answer_follows_the_sources_language():
+    """key_points and check were still bounded in CJK characters: an English key point stopped at "…and optimal"."""
+    en, zh = gates.handout_schema(EN * 3)["properties"], gates.handout_schema(ZH * 3)["properties"]
+    assert en["key_points"]["items"]["maxLength"] > 2 * zh["key_points"]["items"]["maxLength"]
+    assert en["check"]["maxLength"] > 2 * zh["check"]["maxLength"]

@@ -44,6 +44,13 @@ def estimate_tokens(text: str) -> int:
     return cjk + math.ceil((len(t) - cjk) * 0.35)
 
 
+def chars_per_token(text: str) -> float:
+    """Characters per estimated token of a text (about 1 for CJK, about 3 for Latin): converts a length bound set in
+    CJK characters into the same length in the text's own language."""
+    t = text or ""
+    return max(1.0, len(t) / max(1, estimate_tokens(t)))
+
+
 def estimate_messages(messages: list[dict]) -> int:
     return BASE_OVERHEAD + sum(MESSAGE_OVERHEAD + estimate_tokens(m.get("content") or "")
                                + IMAGE_TOKENS * len(m.get("images") or []) for m in messages)

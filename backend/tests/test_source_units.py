@@ -43,13 +43,13 @@ class Scripted(LLMBackend):
         return LLMResult(text=out if isinstance(out, str) else json.dumps(out), latency_ms=1)
 
 
-def deps_for(backend, outline: bool = False, matter: bool = False, boundaries: bool = False):
+def deps_for(backend, outline: bool = False, matter: bool = False, boundaries: bool = False, passages: bool = False):
     """Planner deps over the current prompt bundle. Without `outline` the bundle lacks segment_outline, like a
     session pinned to a snapshot from before units-v9: the buffer planner (segment_blocks …) is what is tested."""
     rt = ModelRuntime(ModelSnapshot("mock", "", "", "", "", 0.2, 512, 8192), BackendPool(build=lambda c: backend))
     sink = ListSink()
     b = load_bundle()
-    drop = ({"segment_outline"} if not outline else set()) | ({"segment_matter"} if not matter else set())         | ({"segment_boundaries"} if not boundaries else set())
+    drop = ({"segment_outline"} if not outline else set()) | ({"segment_matter"} if not matter else set())         | ({"segment_boundaries"} if not boundaries else set()) | ({"segment_passages"} if not passages else set())
     prompts = {k: v for k, v in b["prompts"].items() if k not in drop}
     return seg.PlannerDeps(make_ctx=lambda task, key: TaskContext(rt, CallBudget.for_task(task), sink),
                            prompts=prompts, prompt_version=b["hash"], material_title="t"), sink
@@ -632,6 +632,14 @@ def test_chunks_are_paragraphs_a_heading_stays_with_its_first_paragraph():
     assert seg.make_chunks(lead) == [[0, 1]]                       # a one-line lead-in joins the paragraph after it
 
 
+
+
+def test_a_footnote_stays_with_the_chunk_it_annotates():
+    blocks = paragraphs(3)
+    blocks[1] = blocks[1].model_copy(update={"meta": {**blocks[1].meta, "footnote": True}})
+    assert seg.make_chunks(blocks) == [[0, 1], [2]]
+
+
 async def test_units_are_decided_from_chunk_outlines_and_carry_their_chunks():
     blocks = overview_then_item()
     b = Scripted([outline("技術演進總覽", "規則式方法", "下一節"), {"new_topic_at": [2, 3]}])
@@ -726,7 +734,6 @@ GUIDE = ["序 為提供授課教師及考生掌握評鑑方向，本計畫委託
 
 
 async def test_what_needs_no_guide_is_judged_on_the_whole_range_and_checked_by_the_program(monkeypatch):
-    monkeypatch.setattr(seg, "CHUNK_MIN_CHARS", 10)   # one 區塊 per line here
     blocks = pdf_like(GUIDE)
     kinds = ("meta", "meta", "meta", "toc", "lesson", "summary", "summary")
     b = Scripted([outline("教材說明", "教材說明", "考試規定", "自然語言處理", "電腦視覺", "生成式AI", "總整理"),
@@ -750,7 +757,6 @@ async def test_what_needs_no_guide_is_judged_on_the_whole_range_and_checked_by_t
 async def test_a_paragraph_is_left_out_only_when_both_passes_say_so(monkeypatch):
     """A chapter's opening paragraph was called meta in one batch and lesson in another: dropped, the reader lost a
     lesson. Two passes over differently cut batches must agree."""
-    monkeypatch.setattr(seg, "CHUNK_MIN_CHARS", 10)
     blocks = pdf_like(GUIDE[2:5])
     b = Scripted([outline("考試規定", "自然語言處理", "電腦視覺"), labels("meta", "meta", "lesson"),
                   labels("meta"), labels("lesson", "lesson"), {"boundaries": ["same"]}])
@@ -760,7 +766,6 @@ async def test_a_paragraph_is_left_out_only_when_both_passes_say_so(monkeypatch)
 
 
 async def test_nothing_is_left_out_when_everything_would_be(monkeypatch):
-    monkeypatch.setattr(seg, "CHUNK_MIN_CHARS", 10)   # one 區塊 per line here
     blocks = pdf_like(GUIDE[:2])
     b = Scripted([outline("教材說明", "教材說明"), labels("meta", "meta"), labels("meta"), labels("meta"), {"new_topic_at": []}])
     deps, _ = deps_for(b, outline=True, matter=True)
@@ -781,3 +786,50 @@ async def test_units_are_decided_pair_by_pair_from_the_content_summaries():
     ask = b.requests[1]["messages"][0]["content"]
     assert "B2：P2「第2段說的內容」 → P3「第3段說的內容」" in ask and "細標籤" not in ask
     assert [len(u.chunks) for u in plan.units] == [2, 2]
+
+
+async def test_the_model_groups_a_units_paragraphs_into_passages_by_content():
+    """Which paragraphs form one 導讀段 is the model's call from their text, pair by pair; no size rule merges them."""
+    blocks = paragraphs(4)
+    b = Scripted([{"paragraphs": [{"topic": "同一主題", "aspect": f"面向{k}", "summary": f"第{k}段說的內容"} for k in range(1, 5)]},
+                  {"boundaries": ["same", "same", "same"]}, {"joins": ["join", "split", "split"]}])
+    deps, _ = deps_for(b, outline=True, boundaries=True, passages=True)
+    plan = await seg.plan_units(blocks, deps)
+    ask = b.requests[2]["messages"][0]["content"]
+    assert "【P2】\n第2段" in ask and "B3：P3 → P4" in ask
+    (unit,) = plan.units
+    assert [len(c.block_ids) for c in unit.chunks] == [2, 1, 1]
+    assert unit.chunks[0].summary == "第1段說的內容 第2段說的內容" and unit.chunks[0].aspect == "面向1；面向2"
+
+
+def test_pdf_paragraphs_close_on_a_latin_period_and_captions_stay_with_the_text():
+    """English PDF paragraphs end with "." (only CJK sentence ends closed them, so a whole section became one
+    paragraph); a paragraph is never cut by size; a figure caption joins the 區塊 before it."""
+    long = "The agent acts and the environment responds with a new state and a reward. " * 12
+    pages = [long.strip() + "\n\nFigure 3.1: The agent and its environment.\n\nA second paragraph starts here and ends here."]
+    _, blocks = extract_blocks("m", "page", 1, 1, pages)
+    chunks = seg.make_chunks(blocks)
+    texts = [" ".join(blocks[i].text for i in c) for c in chunks]
+    assert len(chunks) == 2 and texts[0].endswith("The agent and its environment.")
+    assert texts[1] == "A second paragraph starts here and ends here."
+
+
+def test_a_numbered_section_heading_needs_no_finished_line_before_it_and_a_formula_line_is_never_one():
+    body = "The agent observes the state and picks an action, and the environment answers with a reward signal. " * 3
+    pages = [body + "Exercise 3.3 Is there any fundamental reason for one choice ⇤"
+             + "\n\n3.4 Unified Notation for Episodic and Continuing Tasks\n\n" + body.strip()
+             + "\n\nThe expected reward is defined as follows.\n\nr(s, a) .= E[Rt | St−1 =s] =\n\n" + body.strip()]
+    _, blocks = extract_blocks("m", "page", 1, 1, pages)
+    heads = [b.text for b in blocks if b.kind == "heading"]
+    assert heads == ["3.4 Unified Notation for Episodic and Continuing Tasks"]
+
+
+def test_an_equation_number_does_not_hide_the_sentence_end_before_it():
+    body = "The dynamics function gives the probability of each next state and reward for every state and action. " * 3
+    pages = [body + "It satisfies\n\nΣ p(s′, r | s, a) = 1, for all s ∈ S, a ∈ A(s). (3.3)\n\n" + body.strip()
+             + " The same holds as in Eq. (3.3)\n\nfor every state the agent can visit."]
+    _, blocks = extract_blocks("m", "page", 1, 1, pages)
+    chunks = seg.make_chunks(blocks)
+    texts = [" ".join(blocks[i].text for i in c) for c in chunks]
+    assert len(texts) == 2 and texts[0].endswith("(3.3)")              # the paragraph ends after the formula
+    assert texts[1].endswith("for every state the agent can visit.")   # a reference "Eq. (3.3)" keeps it open

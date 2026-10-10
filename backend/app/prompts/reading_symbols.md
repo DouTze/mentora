@@ -4,12 +4,16 @@
 ## 文字層抽出的內容（可能缺字、缺符號，只供定位）
 {{quote_text}}
 
-## 字型線索（只是線索，不能代替你看圖）
+## 依 PDF 字型確定的字母寫法（程式從原書字型讀出，必須照用）
+下列字母在這個區域只以列出的寫法出現；同一個字母有兩種以上寫法時，看圖判斷每一處是哪一種，不可寫成清單以外的寫法。
+{{letter_fonts}}
+
+## 其他字型線索（只是線索，不能代替你看圖）
 {{clues}}
 
 ## 要求
-- formulas：依閱讀順序列出圖中每個公式或含符號的式子，寫成 KaTeX：粗體字母用 `\mathbf{…}`，斜體字母直接寫，上標用 `^{…}`，下標用 `_{…}`，希臘字母與運算符號照實寫（例如 `\eta`、`\nabla`、`\leftarrow`）。
-- symbols：每個單一符號一項：symbol（它是哪個字母或符號）、latex、style（bold、italic、upright、blackboard、calligraphic、script、fraktur、sans、other）、script（none、superscript、subscript）。
+- formulas：依閱讀順序列出圖中每個公式或含符號的式子（相同的式子只列一次），寫成 KaTeX：粗體字母用 `\mathbf{…}`，斜體字母直接寫，上標用 `^{…}`，下標用 `_{…}`，希臘字母與運算符號照實寫（例如 `\eta`、`\nabla`、`\leftarrow`）。
+- symbols：每個**不同的**符號只列一項（同一個符號出現很多次也只列一次，最多 30 項）：symbol（它是哪個字母或符號）、latex、style（bold、italic、upright、blackboard、calligraphic、script、fraktur、sans、other）、script（none、superscript、subscript）。
 - unreadable：看不清楚、無法確定外觀的符號或式子；全部都能確定就給空陣列。不要猜。
 
 ## 輸出

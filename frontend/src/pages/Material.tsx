@@ -906,13 +906,15 @@ function PartNameInput({ num, initial, placeholder, label, onDone }: { num: numb
 
 /** The material's colophon, opened from the reader's ⋯: its cover and title, the category it is filed under, what
  * the file is and holds (only what it has), its attachments, and deleting it. */
-function MaterialCard({ material, info, library, zoom, onCategory, onDelete }: {
+function MaterialCard({ material, info, library, zoom, onCategory, onTranslate, onDelete }: {
   material: MaterialDetail;
   info: PdfInfo | null;
   library: Library;
   /** the page size controls, kept here rather than on the toolbar */
   zoom: ReactNode;
   onCategory: (id: string | null) => void;
+  /** 導讀翻譯成中文: guides, questions and quizzes of readings started afterwards */
+  onTranslate: (on: boolean) => void;
   onDelete: () => void;
 }) {
   const t = useT();
@@ -969,6 +971,10 @@ function MaterialCard({ material, info, library, zoom, onCategory, onDelete }: {
           options={[{ value: "", label: t("common.uncategorized") }, ...library.categories.map((c) => ({ value: c.id, label: c.name }))]}
         />
       </div>
+      <label className="rc-row" title={t("material.translateZh.note")}>
+        <input type="checkbox" checked={material.translate_zh} onChange={(e) => onTranslate(e.target.checked)} />
+        <span>{t("material.translateZh")}</span>
+      </label>
       <dl className="rc-facts">
         {facts.map(([k, v, title]) => (
           <div key={k}>
@@ -1332,7 +1338,7 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
   const category = library.categories.find((c) => c.id === material.category_id);
   const unitWord = t(material.unit === "page" ? "material.unit.page" : "material.unit.line");
 
-  const patch = async (p: { title?: string; category_id?: string | null }) => {
+  const patch = async (p: { title?: string; category_id?: string | null; translate_zh?: boolean }) => {
     setError(null);
     try {
       const m = await api.updateMaterial(material.id, p);
@@ -1392,6 +1398,7 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
               library={library}
               zoom={<ZoomBar zoom={zoom} shown={shown} pdf={material.kind === "pdf"} onZoom={zoomFrom} />}
               onCategory={(id) => patch({ category_id: id })}
+              onTranslate={(on) => patch({ translate_zh: on })}
               onDelete={remove}
             />
           )}

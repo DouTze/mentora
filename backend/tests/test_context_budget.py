@@ -174,14 +174,14 @@ def test_valid_json_keeps_code_regex_and_quotes_exactly():
 
 
 def test_the_guide_schema_bounds_its_strings_by_the_output_budget():
-    """A degenerate repetition cannot run to the token limit and leave unparsable JSON: the guide string is bounded."""
-    from app.reading.gates import body_schema, body_tokens
+    """A degenerate repetition cannot run to the token limit and leave unparsable JSON: the handout string is bounded."""
+    from app.reading.gates import handout_schema, handout_tokens
     short, long_ = "短句。" * 10, "這是一個很長的段落。" * 200
-    assert body_tokens(short) == 2048 and body_tokens(long_) == 4096
-    sch = body_schema(short)
+    assert handout_tokens(short) == 2048 and handout_tokens(long_) == 4096
+    sch = handout_schema(short)
     assert sch["properties"]["guide"]["maxLength"] == int(2048 * 0.8)
-    assert sch["properties"]["key_points"]["maxItems"] == 3 and sch["properties"]["limits"]["maxItems"] == 4
-    assert body_schema(long_)["properties"]["guide"]["maxLength"] > sch["properties"]["guide"]["maxLength"]
+    assert sch["properties"]["key_points"]["maxItems"] == 3 and sch["properties"]["check"]["maxLength"] == 240
+    assert handout_schema(long_)["properties"]["guide"]["maxLength"] > sch["properties"]["guide"]["maxLength"]
 
 
 class Looping(Limited):

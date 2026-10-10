@@ -40,10 +40,14 @@ class Scripted(LLMBackend):
         return LLMResult(text=out, latency_ms=5, usage={"prompt_tokens": 10, "completion_tokens": 3})
 
 
-def ctx_for(backend, task="guide", **budget):
+def ctx_for(backend, task="guide", budget: CallBudget | None = None, **used):
     snap = ModelSnapshot("mock", "", "", "", "", 0.2, 512, 8192)
     pool = BackendPool(build=lambda cfg: backend)
-    return TaskContext(runtime=ModelRuntime(snap, pool), budget=CallBudget.for_task(task, **budget), sink=ListSink())
+    return TaskContext(runtime=ModelRuntime(snap, pool), budget=budget or CallBudget.for_task(task, **used), sink=ListSink())
+
+
+# context selection with two tool rounds of two calls each (a reading that may look things up)
+TOOL_BUDGET = dict(task="context", max_calls=4, max_format_fixes=1, max_tool_rounds=2, max_tools_per_round=2)
 
 
 MSGS = [SystemMessage(content="sys"), HumanMessage(content="問題")]
@@ -220,8 +224,8 @@ async def test_call_budget_is_a_hard_cap():
 def test_budget_round_trips_as_plain_data():
     b = CallBudget.for_task("guide")
     b.charge_call()
-    b.charge("revision")
-    b.charge("revision")
+    for _ in range(b.max_revisions):
+        b.charge("revision")
     assert CallBudget.from_dict(json.loads(json.dumps(b.to_dict()))) == b
     assert not b.can("revision")
 
@@ -276,14 +280,14 @@ async def test_context_selection_validates_dedupes_and_respects_rounds():
         {"tool": "read_source_units", "args": {"unit_ids": ["u9"]}},      # tool refuses: out of scope
     ]}
     b = Scripted([json.dumps(req1), json.dumps(req2)])
-    ctx = ctx_for(b)
+    ctx = ctx_for(b, budget=CallBudget(**TOOL_BUDGET))
     results, recs = await select_context(ctx, MSGS, ToolDispatcher(_tools(log)), task="guide", node="context",
                                          prompt_version="v1")
     assert log == [["u1"], ["u9"]]
     assert [(r.tool, r.ok, r.note) for r in results] == [
         ("read_source_units", True, ""), ("drop_table", False, "未知的工具"),
         ("read_source_units", False, "重複的讀取，已略過"), ("read_source_units", False, "工具拒絕：超出本次學習範圍")]
-    assert ctx.budget.tool_rounds == 2 and len(b.requests) == 2      # guide allows 2 rounds, no third call
+    assert ctx.budget.tool_rounds == 2 and len(b.requests) == 2      # 2 rounds allowed, no third call
     schema = b.requests[0]["meta"]["json_schema"]
     assert schema["properties"]["calls"]["items"]["properties"]["tool"]["enum"] == ["read_source_units"]
     assert schema["properties"]["calls"]["maxItems"] == 2
@@ -292,6 +296,6 @@ async def test_context_selection_validates_dedupes_and_respects_rounds():
 
 async def test_invalid_context_request_ends_selection_without_spending_the_format_fix():
     b = Scripted(["not json"])
-    ctx = ctx_for(b)
+    ctx = ctx_for(b, budget=CallBudget(**TOOL_BUDGET))
     results, _ = await select_context(ctx, MSGS, ToolDispatcher(_tools([])), task="guide", node="context", prompt_version="v1")
     assert results == [] and ctx.budget.format_fixes == 0 and ctx.budget.calls == 1

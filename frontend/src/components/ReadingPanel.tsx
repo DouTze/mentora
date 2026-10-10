@@ -31,6 +31,7 @@ const ERROR_HEADLINE: Record<string, Key> = {
   notation_unverified: "reading.error.notation_unverified",
   source_unverified: "reading.error.source_unverified",
   quality_check_failed: "reading.error.quality_check_failed",
+  conflict_with_textbook: "reading.error.conflict_with_textbook",
   context_overflow: "reading.error.context_overflow",
   context_missing: "reading.error.context_missing",
   review_invalid: "reading.error.review_invalid",
@@ -346,7 +347,7 @@ function QuoteView({ quote, guide, retrying = false, onRetryBlocks, pending }: {
                   <summary>{t("reading.unverified.summary", { n: guide.unverified.length })}</summary>
                   <ul>
                     {guide.unverified.map((u, i) => (
-                      <li key={i}>{t("reading.unverified.coverage", { source: u.source })}</li>
+                      <li key={i}>{u.kind === "note" ? u.text : t("reading.unverified.coverage", { source: u.source })}</li>
                     ))}
                   </ul>
                 </details>
@@ -428,7 +429,7 @@ function TopicBlocks({ guide, retrying, onRetry }: { guide: Guide; retrying: boo
                   <summary>{t("reading.unverified.summary", { n: b.unverified.length })}</summary>
                   <ul>
                     {b.unverified.map((u, i) => (
-                      <li key={i}>{t("reading.unverified.coverage", { source: u.source })}</li>
+                      <li key={i}>{u.kind === "note" ? u.text : t("reading.unverified.coverage", { source: u.source })}</li>
                     ))}
                   </ul>
                 </details>

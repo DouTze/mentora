@@ -83,6 +83,7 @@ class CategoryRequest(BaseModel):
 class MaterialUpdate(BaseModel):
     title: str | None = None
     category_id: str | None = None
+    translate_zh: bool | None = None   # guides of a non-Chinese material in 繁體中文 (default: in the source language)
 
 
 class BookmarkRequest(BaseModel):

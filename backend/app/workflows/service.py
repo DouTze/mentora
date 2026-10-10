@@ -182,7 +182,9 @@ class WorkflowService:
                 "reading_workflow_version": READING_WORKFLOW_VERSION, "prompt_bundle": bundle,
                 "model_snapshot": {k: v for k, v in model.items() if k in ModelSnapshot.__dataclass_fields__},
                 "model_config_hash": msnap.config_hash, "snapshot_id": snapshot_id, "planner": planner,
-                "extraction_version": extraction_version, **(extra_meta or {})}
+                "extraction_version": extraction_version, "guide_language": reading.guide_language(material),
+                "output_language": reading.output_language(reading.guide_language(material), material.get("language")),
+                **(extra_meta or {})}
         row = self.db.create_session(content, strategy, model, reading.initial_state(content),
                                      workflow_runner="langgraph", workflow_meta=meta)
         sid = row["id"]

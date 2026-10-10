@@ -50,6 +50,8 @@ class MockBackend(LLMBackend):
         elif step == "segment_boundaries":   # simulated: a new unit where the topic wording changes
             ts = meta.get("topics") or []
             text = json.dumps({"boundaries": ["same" if a == b else "new" for a, b in zip(ts, ts[1:])]}, ensure_ascii=False)
+        elif step == "segment_passages":   # simulated: every paragraph is its own 導讀段
+            text = json.dumps({"joins": ["split"] * (int(meta.get("paragraphs", 1)) - 1)}, ensure_ascii=False)
         elif step == "segment_topic":   # simulated: a new topic where the topic wording changes
             ts = meta.get("topics") or []
             text = json.dumps({"new_topic_at": [k for k in range(2, len(ts) + 1) if ts[k - 1] != ts[k - 2]]},
@@ -59,33 +61,35 @@ class MockBackend(LLMBackend):
                                "check": "你能用自己的話說出這個主題的重點嗎？"}, ensure_ascii=False)
         elif step == "context":
             text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
-        elif step in ("understand", "revise_source"):
-            u = self._understand(meta.get("quote_text", ""), meta.get("segments") or [])
-            if meta.get("evidence_formulas"):   # formulas read from the PDF region go with the first claim
-                u["claims"][0]["formulas"] = list(meta["evidence_formulas"])
-            text = json.dumps(u, ensure_ascii=False)
-        elif step == "source_audit":
-            text = json.dumps({"sentences": [{"id": sid, "verdict": "faithful", "note": "（模擬）"}
-                                             for sid, s in meta.get("sentences") or []],
-                               "claims": [{"id": c, "verdict": "faithful", "note": "（模擬）"} for c in meta.get("claim_ids") or []]},
+        elif step == "intent":   # simulated: this 導讀段 teaches what its summary says
+            pts = [p for _, p in meta.get("points") or []] or [self._first_sentence(meta.get("quote_text", ""))]
+            role = "(Simulated) This passage introduces its topic." if self._writes_source_language(meta) else "（模擬）介紹這一段的主題。"
+            text = json.dumps({"role": role, "teaches": pts[:3]}, ensure_ascii=False)
+        elif step == "draft":   # simulated 講義 in the session's output language: the 區塊's point, its equations
+            pts = [p for _, p in meta.get("points") or []]
+            lead = (pts[0] if pts else self._first_sentence(meta.get("quote_text", "")))[:60]
+            if self._writes_source_language(meta):
+                body = "(Simulated handout) The point of this passage: " + self._first_sentence(meta.get("quote_text", ""))
+                body += "".join(f"\n\n$${f}$$\n\n(Simulated handout) The equation above relates the terms." for f in
+                                meta.get("evidence_formulas") or [])
+                check = "Can you state the point in your own words?"
+            else:
+                body = f"（模擬講義）這一段要學會的是：{lead}。"
+                body += "".join(f"\n\n$${f}$$\n\n（模擬講義）上式說明了這一段的關係。" for f in meta.get("evidence_formulas") or [])
+                body += "\n\n（模擬講義）讀完後，試著用自己的話說一次這個重點。"
+                check = "你能用自己的話說出這一段的重點嗎？"
+            text = json.dumps({"guide": body, "key_points": [lead[:40]], "check": check}, ensure_ascii=False)
+        elif step == "review_points":   # simulated review A: every point taught, quoting the handout's first sentence
+            first = self._first_sentence(meta.get("guide", ""))
+            text = json.dumps({"points": [{"id": i, "taught": "yes", "guide_quote": first} for i, _ in meta.get("points") or []]},
                               ensure_ascii=False)
-        elif step == "plan_bridges":
-            text = json.dumps({"learning_goal": "（模擬）讀懂這一段", "bridges": []}, ensure_ascii=False)
-        elif step in ("draft", "revise_body") and meta.get("claims") is not None:
-            # simulated 主要正文: restates every claim — the source passage verbatim for a Chinese source, the audited
-            # Chinese statement (with the source's formulas) otherwise, as a real guide must; no teaching
-            body = "\n\n".join(self._restated(c) for c in meta["claims"])
-            body += "".join(f"\n\n$${f}$$" for f in meta.get("evidence_formulas") or [])
-            body += "".join(f"\n\n{b['content']}" for b in meta.get("bridges") or [])
-            text = json.dumps({"guide": "（模擬導讀）以下逐句重述原文。\n\n" + body, "key_points": [self._first_sentence(body)[:40]],
-                               "check": "你能用自己的話說出這一段的重點嗎？", "bridges_used": [], "limits": []}, ensure_ascii=False)
-        elif step == "body_audit":
-            text = json.dumps({"claims": [{"id": c["id"], "verdict": "covered", "guide_quote": self._restated(c), "note": ""}
-                                          for c in meta.get("claims") or []],
-                               "bridges": [{"id": b["id"], "verdict": "ok", "correct": "yes", "support": "S1",
-                                            "guide_quote": b["content"], "note": ""} for b in meta.get("bridges") or []],
-                               "additions": [], "uncovered_source": [], "coherence": "pass", "coherence_note": "（模擬）"},
-                              ensure_ascii=False)
+        elif step == "review_conflicts":   # simulated review B: finds nothing
+            text = json.dumps({"conflicts": []}, ensure_ascii=False)
+        elif step == "fix":   # simulated correction: each problem's suggested text added at the end
+            mark = "(Simulated fix) " if self._writes_source_language(meta) else "（模擬修正）"
+            text = json.dumps({"edits": [{"problem": f"F{k}", "action": "insert_after", "old": "",
+                                          "new": f"{mark}{p.get('suggested_fix') or p.get('detail', '')}"[:200]}
+                                         for k, p in enumerate(meta.get("problems") or [], 1)]}, ensure_ascii=False)
         elif step in ("notes", "notes_revise"):   # simulated notes: one per verified claim, its statement as is
             text = json.dumps({"notes": [{"id": f"N{i}", "kind": "point", "text": st, "claim_refs": [k]}
                                          for i, (k, st) in enumerate((meta.get("claims_map") or {}).items(), 1)]},
@@ -107,23 +111,6 @@ class MockBackend(LLMBackend):
         elif step == "quiz_audit":
             text = json.dumps({"questions": [{"id": i, "verdict": "ok", "note": ""} for i in meta.get("question_ids") or []]},
                               ensure_ascii=False)
-        elif step == "analyze":
-            first = self._first_sentence(meta.get("quote_text", ""))
-            text = json.dumps({"definitions": [], "claims": [first], "conditions": [], "formulas": [], "reasoning": [],
-                               "prerequisites": [], "needs_context": [], "limits": []}, ensure_ascii=False)
-        elif step in ("draft", "revise"):
-            g = self._guide(meta.get("quote_text", ""))
-            g["guide"] = g["guide"].replace("$", "")   # the restated sentence may be cut inside a formula
-            maths = re.findall(r"\$\$.+?\$\$|\$[^$\n]+\$", meta.get("quote_text", ""), re.S)
-            if maths:   # the simulated text keeps the formulas verbatim, as a real guide must
-                g["guide"] += "\n\n" + "\n\n".join(maths)
-            text = json.dumps({**g, "supplement_notes": [], "limits": []}, ensure_ascii=False)
-        elif step == "verify":   # simulated re-check cannot read; it keeps every flagged problem
-            text = json.dumps({"checks": [{"item": 1, "verdict": "problem", "guide_quote": "", "reason": "（模擬）無法核對"}]},
-                              ensure_ascii=False)
-        elif step == "review":   # simulated review reports every expected check, finds nothing
-            text = json.dumps({"checks": [{"check": c, "result": "pass", "evidence": "（模擬）"} for c in meta.get("expected_checks", [])],
-                               "issues": []}, ensure_ascii=False)
         elif meta.get("task") == "generate":
             text = json.dumps(self._generate(meta.get("range_text", ""), meta.get("reading_questions", [])), ensure_ascii=False)
         elif meta.get("task") == "guide":
@@ -169,23 +156,21 @@ class MockBackend(LLMBackend):
                 "feedback": "你已經找到兩者的關聯，還需要想想其他可能原因。", "hint": next_hint}
 
     @staticmethod
+    def _writes_source_language(meta: dict) -> bool:
+        """A session writing the source's own language, for a source with no CJK text: the simulated text is English."""
+        return meta.get("language") == "src" and not re.search(r"[一-鿿]", meta.get("quote_text", ""))
+
+    @staticmethod
     def _first_sentence(text: str) -> str:
         flat = re.sub(r"\s+", " ", text).strip()
-        return (re.split(r"(?<=[。！？.!?])", flat, maxsplit=1)[0] or flat)[:80]
+        first = (re.split(r"(?<=[。！？.!?])", flat, maxsplit=1)[0] or flat)[:80]
+        return first.replace("$", "") if first.count("$") % 2 else first   # never half a $…$ formula
 
     @staticmethod
     def _terms(text: str, n: int = 5) -> list[str]:
         grams = Counter(m for run in re.findall(r"[\u4e00-\u9fff]{2,}", text) for m in (run[i:i + 2] for i in range(len(run) - 1)))
         words = Counter(w.lower() for w in re.findall(r"[A-Za-z]{4,}", text))
         return [t for t, _ in (grams + words).most_common(n)]
-
-    @staticmethod
-    def _restated(c: dict) -> str:
-        src = c.get("source_text") or ""
-        if len(re.findall(r"[一-鿿]", src)) >= len(re.findall(r"[A-Za-z]", src)) or not c.get("statement"):
-            return src
-        maths = [m for m in re.findall(r"\$\$.+?\$\$|\$[^$\n]+\$", src, re.S) if m not in c["statement"]]
-        return c["statement"] + "".join(f" {m}" for m in maths)
 
     @classmethod
     def _guide(cls, text: str) -> dict[str, Any]:
@@ -197,22 +182,6 @@ class MockBackend(LLMBackend):
                 "guide": f"（模擬導讀）{first}\n\n請注意這幾個詞：{'、'.join(terms) or '（無）'}。"
                          f"它們之間的關係，以及成立的條件，是接下來要處理的。",
                 "key_points": [first[:40]] + terms[:2], "check": f"你能用自己的話說出「{first[:20]}」是什麼意思嗎？"}
-
-    @staticmethod
-    def _understand(text: str, segments: list) -> dict[str, Any]:
-        """Simulated source claims: one claim per source sentence, quoting it verbatim (so the program's anchor and
-        coverage checks see a complete list); the 中文課文 of a non-Chinese text is the text itself, marked."""
-        segs = segments or [["S1", text]]
-        latin = len(re.findall(r"[A-Za-z]", text)) > len(re.findall(r"[\u4e00-\u9fff]", text))
-        def zh(s: str) -> str:   # simulated translation: the words joined by ・ (markers and formulas kept, not the source verbatim)
-            parts = re.split(r"(\$\$.+?\$\$|\$[^$\n]+\$)", s, flags=re.S)
-            return "（模擬譯文）" + "".join(p if p.startswith("$") else re.sub(r"\s+", "・", p) for p in parts)
-
-        return {"translations": [{"id": sid, "zh": zh(s)} for sid, s in segs] if latin else [],
-                "claims": [{"id": f"C{i}", "sentences": [sid], "statement": "", "function": "claim", "conditions": [],
-                            "exceptions": [], "strength": "", "formulas": re.findall(r"\$\$.+?\$\$|\$[^$\n]+\$", s, re.S),
-                            "depends_on": []} for i, (sid, s) in enumerate(segs, 1)],
-                "needs_context": [], "limits": []}
 
     @staticmethod
     def _segment(atoms: list[str]) -> dict[str, Any]:
