@@ -59,6 +59,13 @@ class TopicOverview(BaseModel):
 
 # -- reading-graph-v3: a teaching handout for one 區塊, reviewed and corrected in place ---------------------------
 
+class TeachingIntent(BaseModel):
+    """What one 導讀段 itself sets out to teach, read from its own text (the 導讀區塊 overview only places it). The
+    handout is written from this and the text alone, so the overview's later content never reaches it."""
+    role: str = ""                            # what this 導讀段 does within its 導讀區塊
+    teaches: list[str] = Field(min_length=1)  # 1–3 things a reader should understand from this text
+
+
 class HandoutDraft(BaseModel):
     """The 講義 of one 區塊: what a teacher hands out (or a self-learner reads) to learn what the textbook teaches."""
     guide: str = Field(min_length=10)

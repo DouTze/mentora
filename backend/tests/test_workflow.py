@@ -556,7 +556,11 @@ def test_a_topic_is_guided_one_block_at_a_time(graph_app):
     drafts = [x for x in calls if x["node"] == "draft"]
     assert len(drafts) == 3 and len([x for x in calls if x["node"] == "topic"]) == 1
     second = next(x for x in drafts if "-b2:" in x["operation_key"])["request"]["messages"][0]["content"]
-    assert "▶ 第 2 塊" in second and "只講第 2 塊的內容" in second and "暗反應發生在" not in second.split("## 這一段的課本原文")[1].split("##")[0]
+    intent = next(x for x in calls if x["node"] == "intent" and "-b2:" in x["operation_key"])["request"]["messages"][0]["content"]
+    overview = g["topic_summary"]
+    # the overview places the 導讀段 when what it teaches is read; the handout sees its own text and that only
+    assert overview in intent and overview not in second and "這一段課文想教的內容" in second
+    assert "暗反應發生在" not in second                                  # nothing of the next 導讀段
 
 
 def test_a_failed_block_leaves_the_topic_readable_and_only_it_is_retried(graph_app, monkeypatch):

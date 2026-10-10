@@ -33,12 +33,13 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from ..llm.context import chars_per_token
 from ..llm.runtime import CallBudget, stable_hash
 from ..llm.tasks import TaskContext, TaskError, run_structured
-from .schemas import (Boundaries, MatterLabels, Outline, ParagraphTopic, PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
+from .schemas import (Boundaries, MatterLabels, Outline, ParagraphTopic, PlannedUnit, PassageJoins, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
                       TopicSummary, UnitChunk, WindowPlan)
 
-SEGMENTATION_VERSION = "units-v10"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out
+SEGMENTATION_VERSION = "units-v11"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out; v11: the model groups a unit's paragraphs into 導讀段 by content, no size rule merges them
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -615,19 +616,18 @@ async def check_topic(blocks: list[SourceBlock], grp: list[int], reason: str, w:
 # The unit (主題) is decided from short outlines of paragraph-sized 區塊, never from thousands of characters of
 # source at once; each guide is later written one 區塊 at a time (docs/reading-block-guide-plan.md).
 
-CHUNK_MAX_CHARS = 600     # a 區塊 longer than this is cut between sentences (one model call writes one 區塊's guide)
-CHUNK_MIN_CHARS = 60      # a shorter 區塊 (a lead-in line, a one-line paragraph) joins its neighbour
 OUTLINE_BATCH = 12        # 區塊 per segment_outline call
 OUTLINE_PREVIEW = 500     # chars of one 區塊 shown to segment_outline
 TOPIC_BATCH = 30          # outline lines per segment_topic call
 BOUNDARY_BATCH = 8        # paragraphs per segment_boundaries call: with 18, qwen3-vl:4b copied the example for every pair
+PASSAGE_BATCH = 8         # paragraphs per segment_passages call (the same pairwise judgement, inside one unit)
 
 
 def make_chunks(blocks: list[SourceBlock], lo: int = 0, hi: int | None = None) -> list[list[int]]:
     """Group blocks[lo:hi] into 區塊: one paragraph each (the extractor's paragraph marks); a heading opens one and
-    stays with its first paragraph; glued blocks are never separated; a paragraph longer than CHUNK_MAX_CHARS is
-    cut between sentences; a 區塊 shorter than CHUNK_MIN_CHARS joins the next one (the previous one at the end or
-    before a heading)."""
+    stays with its first paragraph; a footnote or a figure caption stays with the 區塊 before it; glued blocks are
+    never separated. Size never cuts or merges paragraphs: which ones form one 導讀段 is the model's call
+    (passage_groups)."""
     hi = len(blocks) if hi is None else hi
     g = glues(blocks)
     raw: list[list[int]] = []
@@ -636,33 +636,18 @@ def make_chunks(blocks: list[SourceBlock], lo: int = 0, hi: int | None = None) -
             raw.append([i])
             continue
         cur = raw[-1]
-        if g[i - 1] or all(blocks[j].kind == "heading" for j in cur):
+        # a footnote belongs to the text it annotates (the extractor places it after the paragraph that was open
+        # where it was set), a caption to its figure in the text it sits in: neither teaches on its own
+        attached = blocks[i].meta.get("footnote") or blocks[i].meta.get("caption")
+        if g[i - 1] or all(blocks[j].kind == "heading" for j in cur) or attached:
             cur.append(i)
             continue
         new_para = blocks[i].kind == "heading" or not same_para(blocks, i)
-        if new_para or body_chars([blocks[j] for j in cur]) + len(blocks[i].text) > CHUNK_MAX_CHARS:
+        if new_para:
             raw.append([i])
         else:
             cur.append(i)
-    out: list[list[int]] = []
-    carry: list[int] = []
-    for k, c in enumerate(raw):
-        c = carry + c
-        carry = []
-        small = body_chars([blocks[i] for i in c]) < CHUNK_MIN_CHARS
-        nxt = raw[k + 1] if k + 1 < len(raw) else None
-        if small and nxt is not None and blocks[nxt[0]].kind != "heading":
-            carry = c
-        elif small and out and (nxt is None or blocks[nxt[0]].kind == "heading") and blocks[c[0]].kind != "heading":
-            out[-1] += c
-        else:
-            out.append(c)
-    if carry:
-        if out:
-            out[-1] += carry
-        else:
-            out.append(carry)
-    return out
+    return raw
 
 
 def chunk_preview(blocks: list[SourceBlock], c: list[int]) -> str:
@@ -694,7 +679,8 @@ async def outline_chunks(blocks: list[SourceBlock], chunks: list[list[int]], dep
         schema = Outline.model_json_schema()
         schema["properties"]["paragraphs"] = {**schema["properties"]["paragraphs"], "minItems": n, "maxItems": n}
         item = schema["$defs"]["ParagraphTopic"]["properties"]
-        item["topic"], item["aspect"], item["summary"] = ({**item[k], "maxLength": m} for k, m in
+        scale = chars_per_token(listing)   # the bounds are CJK characters; a Latin text needs about three times as many
+        item["topic"], item["aspect"], item["summary"] = ({**item[k], "maxLength": int(m * scale)} for k, m in
                                                           (("topic", 40), ("aspect", 40), ("summary", 80)))
 
         def check(ans: Outline, n=n) -> None:
@@ -757,6 +743,67 @@ async def _boundaries(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, 
         notes.append(f"{key} 主題判斷無效，改在大主題寫法改變處切開：{e.detail[:120]}")
         return [j for j in range(2, n + 1) if _topic_key(lines[j - 1].topic) != _topic_key(lines[j - 2].topic)
                 and "未判斷" not in lines[j - 1].topic]
+
+
+async def _joins(blocks: list[SourceBlock], chunks: list[list[int]], topic: str, deps: PlannerDeps, key: str,
+                 notes: list[str]) -> list[bool]:
+    """For each pair of neighbouring paragraphs, whether the second one goes in the same 導讀段 (segment_passages).
+    The model reads the paragraphs themselves: what a paragraph does for its neighbour shows in its text."""
+    n = len(chunks)
+    listing = "\n\n".join(f"【P{j}】\n{chunk_preview(blocks, c)}" for j, c in enumerate(chunks, 1))
+    pairs = "\n".join(f"B{j}：P{j} → P{j + 1}" for j in range(1, n))
+    prompt = deps.prompts["segment_passages"].replace("{{material_title}}", deps.material_title) \
+        .replace("{{topic}}", topic).replace("{{count}}", str(n)).replace("{{pair_count}}", str(n - 1)) \
+        .replace("{{paragraphs}}", listing).replace("{{pairs}}", pairs)
+    schema = PassageJoins.model_json_schema()
+    schema["properties"]["joins"] = {**schema["properties"]["joins"], "minItems": n - 1, "maxItems": n - 1}
+
+    def check(ans: PassageJoins) -> None:
+        from ..llm.tasks import OutputInvalid
+        if len(ans.joins) != n - 1:
+            raise OutputInvalid(f"joins 必須剛好 {n - 1} 個（每對相鄰段落一個），收到 {len(ans.joins)} 個")
+
+    try:
+        ans, _ = await run_structured(deps.make_ctx("segment_passages", key), [HumanMessage(content=prompt)],
+                                      PassageJoins, task="segment_passages", node=f"segment.{key}",
+                                      prompt_version=deps.prompt_version,
+                                      meta={"step": "segment_passages", "paragraphs": n},
+                                      source_ids=[blocks[i].block_id for c in chunks for i in c], check=check,
+                                      json_schema=schema, min_max_tokens=512, min_context_tokens=16384)
+        return [x == "join" for x in ans.joins]
+    except TaskError as e:
+        if e.kind == "unavailable":
+            raise
+        notes.append(f"{key} 導讀段判斷無效，每段各自成為導讀段：{e.detail[:120]}")
+        return [False] * (n - 1)
+
+
+async def passage_groups(blocks: list[SourceBlock], chunks: list[list[int]], unit: list[int], topic: str,
+                         deps: PlannerDeps, done: dict, on_window, notes: list[str], u: int) -> list[list[int]]:
+    """The unit's paragraphs (indices into chunks) grouped into 導讀段 by the model, in batches that share their
+    edge paragraph so every neighbouring pair is judged once."""
+    if len(unit) < 2 or "segment_passages" not in deps.prompts:
+        return [[k] for k in unit]
+    joins: list[bool] = []
+    pos, b = 0, 0
+    while pos < len(unit) - 1:
+        b += 1
+        part = unit[pos:pos + PASSAGE_BATCH]
+        key = f"p{u:02d}{b:02d}"
+        owned = [blocks[i].block_id for k in part for i in chunks[k]]
+        saved = done.get(key)
+        if saved and saved.get("owned") == owned:
+            got = saved["joins"]
+        else:
+            got = await _joins(blocks, [chunks[k] for k in part], topic, deps, key, notes)
+            if on_window:
+                on_window(key, {"owned": owned, "joins": got})
+        joins += got
+        pos += len(part) - 1
+    groups = [[unit[0]]]
+    for k, joined in zip(unit[1:], joins):
+        groups[-1].append(k) if joined else groups.append([k])
+    return groups
 
 
 def _topic_key(t: str) -> str:
@@ -977,6 +1024,19 @@ def skipped_view(unit: str, plan: SegmentationPlan, by_id: dict[str, SourceBlock
     return out
 
 
+def passage_chunk(ps: list[int], ids: list[list[str]], outline: list[ParagraphTopic]) -> UnitChunk:
+    """One 導讀段 of several paragraphs: their blocks, the first one's topic, every paragraph's aspect and summary."""
+    def joined(field: str, sep: str) -> str:
+        seen: list[str] = []
+        for c in ps:
+            v = getattr(outline[c], field).strip()
+            if v and v not in seen:
+                seen.append(v)
+        return sep.join(seen)
+    return UnitChunk(block_ids=[x for c in ps for x in ids[c]], topic=outline[ps[0]].topic.strip(),
+                     aspect=joined("aspect", "；"), summary=joined("summary", " "))
+
+
 async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_windows: dict, on_window) -> SegmentationPlan:
     notes: list[str] = []
     tocs = toc_blocks(blocks)
@@ -1017,12 +1077,13 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
     units = []
     for k, u in enumerate(units_k):
         g = groups[k]
+        passages = await passage_groups(blocks, chunks, u, outline[u[0]].topic.strip(), deps, done_windows, on_window,
+                                        notes, k + 1)
         units.append(SourceUnit(
             unit_id=f"unit-{stable_hash([blocks[g[0]].block_id, blocks[g[-1]].block_id], 10)}", ordinal=k,
             block_ids=[blocks[i].block_id for i in g], boundary_reason=outline[u[0]].topic.strip(),
             segmentation_version=SEGMENTATION_VERSION,
-            chunks=[UnitChunk(block_ids=ids[c], topic=outline[c].topic.strip(), aspect=outline[c].aspect.strip(),
-                              summary=outline[c].summary.strip()) for c in u]))
+            chunks=[passage_chunk(ps, ids, outline) for ps in passages]))
     return SegmentationPlan(units=units, warnings=notes, planner="model", relations=glue_plan(blocks)[1],
                             windows=[{"window_id": "outline", "chunks": len(chunks), "notes": notes, "planner": "model"}],
                             skipped=sorted([{"block_ids": [blocks[i].block_id for i in r], "role": "toc", "topic": "目錄",

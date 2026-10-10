@@ -119,6 +119,12 @@ class Boundaries(BaseModel):
     boundaries: list[Literal["same", "new"]] = Field(default_factory=list)
 
 
+class PassageJoins(BaseModel):
+    """segment_passages output: for each pair of neighbouring paragraphs of one unit, whether the second one belongs
+    to the same 導讀段 as the first (it teaches nothing on its own) or opens a new one."""
+    joins: list[Literal["join", "split"]] = Field(default_factory=list)
+
+
 class TopicStarts(BaseModel):
     """segment_topic output: the paragraph numbers (1-based) where a new topic begins; empty = one topic."""
     new_topic_at: list[int] = Field(default_factory=list)

@@ -47,7 +47,7 @@ from langgraph.types import interrupt
 
 from .. import config
 from ..db import Database
-from ..llm.context import ContextItem, ContextOverflow, Packet
+from ..llm.context import ContextItem, ContextOverflow, Packet, chars_per_token
 from ..llm.runtime import BackendPool, CallBudget, ModelRuntime, ModelSnapshot, stable_hash
 from ..llm.tasks import TaskContext, TaskError, ToolDispatcher, run_structured, select_context
 from ..models import ModelJudgement
@@ -125,9 +125,13 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
     def runtime(sid: str) -> ModelRuntime:
         return ModelRuntime(ModelSnapshot.from_config(meta(row(sid))["model_snapshot"]), deps.pool)
 
+    def output(r: dict) -> dict:
+        """What the session writes in (and so which version of each prompt it uses)."""
+        return reading.session_output(meta(r), (r["content_snapshot"].get("source") or {}).get("text") or "")
+
     def prompts(sid: str) -> dict[str, str]:
-        m = meta(row(sid))
-        return reading.with_language(m["prompt_bundle"]["prompts"], m.get("guide_language", "zh-TW"))
+        r = row(sid)
+        return reading.with_language(meta(r)["prompt_bundle"]["prompts"], output(r))
 
     def ctx(state: WorkflowState, task: str, op: str) -> TaskContext:
         b = CallBudget.for_task(task)
@@ -249,7 +253,7 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                                    attempt=attempt, learning=learning_snapshot(r, idx, assume_read),
                                    source_kind="pdf" if content["source"]["unit"] == "page" else "md",
                                    depends_on_prev=bool(q.get("depends_on_prev")),
-                                   symbol_evidence=symbol_evidence(r, q), language=m.get("guide_language", "zh-TW"))
+                                   symbol_evidence=symbol_evidence(r, q), language=output(r)["code"])
 
     def prefetch_key(t: ra.ReadingTaskInput) -> str:
         """Everything the guide depends on; a question asked meanwhile or another model / prompt misses the cache."""
@@ -277,9 +281,11 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         b.calls = repo.count_calls(key)
         c = TaskContext(runtime(sid), b, sink, session_id=sid, command_id=command_id, operation_key=key)
         schema = TopicOverview.model_json_schema()
-        schema["properties"]["summary"] = {**schema["properties"]["summary"], "maxLength": 200}
-        schema["properties"]["check"] = {**schema["properties"]["check"], "maxLength": 100}
-        schema["properties"]["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 3}
+        scale = chars_per_token(q["text"])   # bounds in CJK characters; a Latin text needs about three times as many
+        schema["properties"]["summary"] = {**schema["properties"]["summary"], "maxLength": int(200 * scale)}
+        schema["properties"]["check"] = {**schema["properties"]["check"], "maxLength": int(100 * scale)}
+        schema["properties"]["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": int(80 * scale)},
+                                              "maxItems": 3}
         try:
             ov, _ = await run_structured(c, [HumanMessage(content=msg)], TopicOverview, task="topic", node="topic",
                                          prompt_version=task.prompt_bundle_hash, meta={"step": "reading_topic"},

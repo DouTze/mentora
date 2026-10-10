@@ -73,17 +73,38 @@ def test_guide_language_follows_the_material_setting(graph_app):
     assert state_of(c, s["id"])["workflow_meta"]["guide_language"] == "source"   # a started session keeps its own
 
 
+EN = ("# Markov decision processes\n\nIn this chapter we introduce the formal problem of finite Markov decision "
+      "processes, which we try to solve in the rest of the book.\n\nMDPs are a classical formalization of sequential "
+      "decision making, where actions influence not just immediate rewards but also subsequent states.\n")
+
+
 def test_prompts_carry_the_session_language(graph_app):
-    """Every request of a session says which language to write in, and no language field is left unfilled."""
-    from app.tutor.reading import LANGUAGE_FIELDS
+    """Every request of a session names the language to write in — the one the program reads from the source in
+    source mode — and no language field is left unfilled."""
+    from app.tutor.reading import ZH_RULE
     c = graph_app
-    s = start_with(c)
+    s = start_with(c)                                                        # a Chinese material, source mode
     mid = s["source"]["material_id"]
     c.patch(f"/api/materials/{mid}", json={"translate_zh": True})
     s2 = c.post("/api/sessions", json={"material_id": mid, "start": 1, "end": len(MD.splitlines())}).json()
     idle(c, s2["id"])
-    for sid, lang in ((s["id"], "source"), (s2["id"], "zh-TW")):
+    m = c.post("/api/materials", files={"file": ("mdp.md", io.BytesIO(EN.encode()))}).json()
+    s3 = idle(c, c.post("/api/sessions", json={"material_id": m["id"], "start": 1, "end": len(EN.splitlines())}).json()["id"])
+    for sid, rule in ((s["id"], ZH_RULE), (s2["id"], ZH_RULE), (s3["id"], "一律使用英文撰寫")):
         bodies = [m["content"] for x in c.app_ref.state.repo.list_llm_calls(sid) for m in x["request"]["messages"]
                   if isinstance(m.get("content"), str)]
-        assert bodies and not any("{{language" in b or "{{write_rule}}" in b for b in bodies)
-        assert any(LANGUAGE_FIELDS[lang]["language_rule"] in b for b in bodies)
+        assert bodies and not any("{{language" in b for b in bodies)
+        assert any(rule in b for b in bodies)
+    draft = next(x for x in c.app_ref.state.repo.list_llm_calls(s3["id"]) if x["node"] == "draft")
+    assert "講義用**英文**撰寫" in draft["request"]["messages"][0]["content"]
+
+
+def test_the_source_language_is_read_from_its_writing_system():
+    from app.tutor.reading import language_fields, output_language, source_language
+    assert source_language(EN) == "英文" and source_language(MD) == "中文"
+    assert source_language("これは日本語の文章です。") == "日文" and source_language("12345 + 678") is None
+    assert source_language("Les processus de décision markoviens sont une formalisation classique.") is None
+    assert output_language("source", source_language(EN)) == {"code": "src", "name": "英文"}
+    assert language_fields(output_language("source", None))["language"] == "課本原文的語言"
+    assert output_language("zh-TW", "英文") == {"code": "zh", "name": "繁體中文"}         # translate_zh wins
+    assert output_language("source", "中文")["code"] == "zh"                              # a Chinese material

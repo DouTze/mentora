@@ -40,7 +40,7 @@ class ReadingTaskInput(BaseModel):
     # a 區塊 of a 主題 (docs/reading-block-guide-plan.md): {"summary": 主題總摘要, "chunks": [{"topic", "aspect",
     # "summary"} …], "index": this 區塊}. The 區塊's summary is what its handout must teach; the rest is scope
     topic: dict | None = None
-    language: str = "zh-TW"                      # what the handout is written in: "zh-TW" or "source" (its own language)
+    language: str = "zh"                         # the session's output language: "zh" (繁體中文) or "src" (the source's own)
 
     @property
     def source_hash(self) -> str:

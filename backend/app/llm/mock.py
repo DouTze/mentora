@@ -50,6 +50,8 @@ class MockBackend(LLMBackend):
         elif step == "segment_boundaries":   # simulated: a new unit where the topic wording changes
             ts = meta.get("topics") or []
             text = json.dumps({"boundaries": ["same" if a == b else "new" for a, b in zip(ts, ts[1:])]}, ensure_ascii=False)
+        elif step == "segment_passages":   # simulated: every paragraph is its own 導讀段
+            text = json.dumps({"joins": ["split"] * (int(meta.get("paragraphs", 1)) - 1)}, ensure_ascii=False)
         elif step == "segment_topic":   # simulated: a new topic where the topic wording changes
             ts = meta.get("topics") or []
             text = json.dumps({"new_topic_at": [k for k in range(2, len(ts) + 1) if ts[k - 1] != ts[k - 2]]},
@@ -59,14 +61,24 @@ class MockBackend(LLMBackend):
                                "check": "你能用自己的話說出這個主題的重點嗎？"}, ensure_ascii=False)
         elif step == "context":
             text = json.dumps({"action": "ready", "calls": [], "reason": "（模擬）不需要補充"}, ensure_ascii=False)
-        elif step == "draft":   # simulated 講義: names the 區塊's point, writes the textbook's equations, no reprint
+        elif step == "intent":   # simulated: this 導讀段 teaches what its summary says
+            pts = [p for _, p in meta.get("points") or []] or [self._first_sentence(meta.get("quote_text", ""))]
+            role = "(Simulated) This passage introduces its topic." if self._writes_source_language(meta) else "（模擬）介紹這一段的主題。"
+            text = json.dumps({"role": role, "teaches": pts[:3]}, ensure_ascii=False)
+        elif step == "draft":   # simulated 講義 in the session's output language: the 區塊's point, its equations
             pts = [p for _, p in meta.get("points") or []]
             lead = (pts[0] if pts else self._first_sentence(meta.get("quote_text", "")))[:60]
-            body = f"（模擬講義）這一段要學會的是：{lead}。"
-            body += "".join(f"\n\n$${f}$$\n\n（模擬講義）上式說明了這一段的關係。" for f in meta.get("evidence_formulas") or [])
-            body += "\n\n（模擬講義）讀完後，試著用自己的話說一次這個重點。"
-            text = json.dumps({"guide": body, "key_points": [lead[:40]], "check": "你能用自己的話說出這一段的重點嗎？"},
-                              ensure_ascii=False)
+            if self._writes_source_language(meta):
+                body = "(Simulated handout) The point of this passage: " + self._first_sentence(meta.get("quote_text", ""))
+                body += "".join(f"\n\n$${f}$$\n\n(Simulated handout) The equation above relates the terms." for f in
+                                meta.get("evidence_formulas") or [])
+                check = "Can you state the point in your own words?"
+            else:
+                body = f"（模擬講義）這一段要學會的是：{lead}。"
+                body += "".join(f"\n\n$${f}$$\n\n（模擬講義）上式說明了這一段的關係。" for f in meta.get("evidence_formulas") or [])
+                body += "\n\n（模擬講義）讀完後，試著用自己的話說一次這個重點。"
+                check = "你能用自己的話說出這一段的重點嗎？"
+            text = json.dumps({"guide": body, "key_points": [lead[:40]], "check": check}, ensure_ascii=False)
         elif step == "review_points":   # simulated review A: every point taught, quoting the handout's first sentence
             first = self._first_sentence(meta.get("guide", ""))
             text = json.dumps({"points": [{"id": i, "taught": "yes", "guide_quote": first} for i, _ in meta.get("points") or []]},
@@ -74,8 +86,9 @@ class MockBackend(LLMBackend):
         elif step == "review_conflicts":   # simulated review B: finds nothing
             text = json.dumps({"conflicts": []}, ensure_ascii=False)
         elif step == "fix":   # simulated correction: each problem's suggested text added at the end
+            mark = "(Simulated fix) " if self._writes_source_language(meta) else "（模擬修正）"
             text = json.dumps({"edits": [{"problem": f"F{k}", "action": "insert_after", "old": "",
-                                          "new": f"（模擬修正）{p.get('suggested_fix') or p.get('detail', '')}"[:200]}
+                                          "new": f"{mark}{p.get('suggested_fix') or p.get('detail', '')}"[:200]}
                                          for k, p in enumerate(meta.get("problems") or [], 1)]}, ensure_ascii=False)
         elif step in ("notes", "notes_revise"):   # simulated notes: one per verified claim, its statement as is
             text = json.dumps({"notes": [{"id": f"N{i}", "kind": "point", "text": st, "claim_refs": [k]}
@@ -141,6 +154,11 @@ class MockBackend(LLMBackend):
         return {**base, "assessment": "partial", "reasoning_ok": False,
                 "evidence": "學生指出兩件事一起發生，但未排除共同原因",
                 "feedback": "你已經找到兩者的關聯，還需要想想其他可能原因。", "hint": next_hint}
+
+    @staticmethod
+    def _writes_source_language(meta: dict) -> bool:
+        """A session writing the source's own language, for a source with no CJK text: the simulated text is English."""
+        return meta.get("language") == "src" and not re.search(r"[一-鿿]", meta.get("quote_text", ""))
 
     @staticmethod
     def _first_sentence(text: str) -> str:

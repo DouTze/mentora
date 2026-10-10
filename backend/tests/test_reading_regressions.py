@@ -102,3 +102,37 @@ def test_a_merged_quotation_counts_only_when_every_piece_is_in_the_guide():
     assert ra.expand_quote(guide, invented) == ""                      # one piece is not in the guide
     hidden = "在均衡價格下，不，消費者想買的數量恰好等於生產者想賣的數量"
     assert ra.expand_quote(guide, hidden) == ""                        # a short inserted piece is checked too
+
+
+def test_a_handout_slipping_into_another_script_is_a_program_fact():
+    """qwen3-vl:4b wrote "a mapping from state-action pairs to next状态" in an English handout. Characters of a script
+    the source does not use are a slip in source mode; in a 繁體中文 handout English terms are normal."""
+    slipped = "The transition function is a mapping from state-action pairs to next状态. It is a probability."
+    fs = gates.handout_program(task(EN, language="src"), slipped)
+    assert [(f.code, f.draft_excerpt) for f in fs] == [("language_mixed", "The transition function is a mapping from "
+                                                                          "state-action pairs to next状态.")]
+    assert gates.handout_program(task(EN, language="zh"), "轉移函數 (transition function) 把狀態對應到下一個狀態。") == []
+    assert gates.handout_program(task(ZH, language="src"), "NLP（自然語言處理）讓機器理解語言。") == []
+
+
+def test_the_handout_bound_is_converted_to_characters_by_the_sources_language():
+    """A bound of 80 % of the token budget counted in characters cut English handouts at 1638 characters (about 400
+    tokens): an English character is a third of a token or less."""
+    en, zh = EN * 3, ZH * 3
+    assert gates.handout_chars(en) > 2.5 * gates.handout_chars(zh)
+    assert gates.handout_schema(en)["properties"]["guide"]["maxLength"] == gates.handout_chars(en)
+
+
+def test_another_answer_field_written_into_the_handout_is_a_program_fact():
+    """qwen3-vl:4b once wrote `key_points: ["…"]` at the end of the handout text and left key_points empty."""
+    g = "MDPs combine evaluative feedback with an associative aspect.\n\nkey_points: [\"MDPs formalize decisions.\"]"
+    fs = gates.handout_program(task(EN, language="src"), g)
+    assert [(f.code, f.draft_excerpt) for f in fs] == [("field_leak", 'key_points: ["MDPs formalize decisions."]')]
+    assert gates.handout_program(task(EN, language="src"), "Quick check: can you name the two parts of an MDP?") == []
+
+
+def test_every_bound_of_a_handout_answer_follows_the_sources_language():
+    """key_points and check were still bounded in CJK characters: an English key point stopped at "…and optimal"."""
+    en, zh = gates.handout_schema(EN * 3)["properties"], gates.handout_schema(ZH * 3)["properties"]
+    assert en["key_points"]["items"]["maxLength"] > 2 * zh["key_points"]["items"]["maxLength"]
+    assert en["check"]["maxLength"] > 2 * zh["check"]["maxLength"]

@@ -141,3 +141,20 @@ def test_math_fonts_settle_letter_styles_and_correct_a_vision_misreading():
     assert fixes == ["A：粗體 → 斜體", "R：粗體 → 斜體"]
     _, _, conflicts = fix_by_fonts(SymbolTranscription(formulas=[r"\mathbf{S}_t"]), {"S": ["calligraphic", "italic"]})
     assert conflicts and "書法體或斜體" in conflicts[0]
+
+
+def test_footnotes_leave_the_sentence_flow_and_figure_labels_are_dropped():
+    import pymupdf
+    from app.materials import pdf_page_paragraphs
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_textbox((50, 50, 550, 110), "The body text starts a sentence that runs on and on across the line" + " and on" * 12 + ".1", fontsize=10)
+    page.draw_rect((100, 150, 400, 300), color=(0, 0, 0))
+    page.insert_text((150, 220), "state s", fontsize=9)
+    page.insert_text((100, 320), "Figure 1: An agent and its world.", fontsize=10)
+    page.insert_textbox((50, 360, 550, 420), "More body text follows the figure and keeps going" + " and going" * 12 + ".", fontsize=10)
+    page.insert_text((50, 760), "1 A note explaining a term.", fontsize=7)
+    texts = [t for t, _ in pdf_page_paragraphs(page)]
+    assert not any("state s" in t for t in texts)                    # a label drawn inside the figure
+    assert any(t.startswith("Figure 1") for t in texts)              # the caption stays
+    assert texts[-1] == "[^1]: A note explaining a term."

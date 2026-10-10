@@ -47,24 +47,75 @@ def guide_language(material: dict) -> str:
     return "zh-TW" if material.get("translate_zh") else "source"
 
 
-LANGUAGE_FIELDS = {
-    "zh-TW": {"language": "繁體中文", "language_rule": "一律使用繁體中文（台灣用語）。"},
-    "source": {"language": "原文的語言",
-               "language_rule": "一律使用原文的語言撰寫：原文是英文就用英文，原文是中文就用繁體中文（台灣用語），其他語言亦同；"
-                                "不要翻譯成其他語言。"},
-}
+ZH_RULE = "一律使用繁體中文（台灣用語）。"
+SCRIPTS = (("日文", re.compile(r"[぀-ヿ]")), ("韓文", re.compile(r"[가-힯ᄀ-ᇿ]")),
+           ("中文", re.compile(r"[㐀-䶿一-鿿豈-﫿]")), ("拉丁", re.compile(r"[A-Za-zÀ-ɏ]")))
+# the most frequent English function words: in English prose they are well over a tenth of the words
+EN_FUNCTION_WORDS = frozenset("the of and to a in is that for it as with are be by this on not or from an which "
+                              "we can at have its these their was were has but if each".split())
 
 
-def with_language(prompts: dict[str, str], language: str = "zh-TW") -> dict[str, str]:
-    """The prompts with the language fields ({{language}}, {{language_rule}}) filled for a session's guide language.
-    Prompts from before these fields have nothing to fill and stay as they were."""
-    fields = LANGUAGE_FIELDS.get(language, LANGUAGE_FIELDS["zh-TW"])
-    out = {}
+def source_language(text: str) -> str | None:
+    """The language of a passage, named for the prompts, from its writing system (kana → 日文, hangul → 韓文, han
+    → 中文; Latin letters are 英文 when English function words are a tenth of its words). None when it cannot be
+    told: the prompt then asks for "the source's language" in general."""
+    text = (text or "")[:20000]   # the opening of a range says what it is written in
+    counts = {name: len(rx.findall(text)) for name, rx in SCRIPTS}
+    total = sum(counts.values())
+    if not total:
+        return None
+    if counts["日文"] >= 0.1 * total:
+        return "日文"
+    if counts["韓文"] >= 0.3 * total:
+        return "韓文"
+    if counts["中文"] >= 0.3 * total:
+        return "中文"
+    words = re.findall(r"[A-Za-z]+", text)
+    if counts["拉丁"] >= 0.5 * total and words and sum(w.lower() in EN_FUNCTION_WORDS for w in words) >= 0.1 * len(words):
+        return "英文"
+    return None
+
+
+ZH_OUTPUT = {"code": "zh", "name": "繁體中文"}
+
+
+def output_language(guide_lang: str = "zh-TW", material_language: str | None = None) -> dict:
+    """What a session writes in, decided when it starts: {"code": "zh" | "src", "name": the language, or None when
+    it cannot be told}. 繁體中文 when the reader asked for it or the material is Chinese; otherwise the material's
+    own language (read when it was imported)."""
+    if guide_lang == "zh-TW" or material_language == "中文":
+        return dict(ZH_OUTPUT)
+    return {"code": "src", "name": material_language}
+
+
+def session_output(meta: dict, source_text: str = "") -> dict:
+    """A session's output language: stored when it started; for a session from before that, read from its source."""
+    if meta.get("output_language"):
+        return meta["output_language"]
+    return output_language(meta.get("guide_language", "zh-TW"), source_language(source_text))
+
+
+def language_fields(out: dict | None = None) -> dict[str, str]:
+    """{{language}} and {{language_rule}}: the output language named outright. A small model asked to "write in the
+    source's language" among Chinese instructions writes Chinese; told "英文", it writes English."""
+    out = out or ZH_OUTPUT
+    if out.get("code") != "src":
+        return {"language": "繁體中文", "language_rule": ZH_RULE}
+    if out.get("name"):
+        return {"language": out["name"], "language_rule": f"一律使用{out['name']}撰寫，和課本原文相同的語言。"}
+    return {"language": "課本原文的語言", "language_rule": "一律使用和課本原文相同的語言撰寫，不要翻譯成其他語言。"}
+
+
+def with_language(prompts: dict[str, str], out: dict | None = None) -> dict[str, str]:
+    """The prompts with the language fields ({{language}}, {{language_rule}}) filled for a session's output
+    language. Prompts from before these fields have nothing to fill and stay as they were."""
+    fields = language_fields(out)
+    filled = {}
     for k, text in prompts.items():
         for f, v in fields.items():
             text = text.replace("{{" + f + "}}", v)
-        out[k] = text
-    return out
+        filled[k] = text
+    return filled
 
 
 def ask_history(quotes: list[dict], rd: dict, index: int) -> list[dict]:

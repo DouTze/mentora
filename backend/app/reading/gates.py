@@ -272,6 +272,14 @@ def handout_tokens(source: str) -> int:
     return max(2048, min(4096, 2 * estimate_tokens(source) + 512))
 
 
+def handout_chars(source: str) -> int:
+    """The longest handout (in characters) that fits 80 % of its token budget. A bound in characters means another
+    length in each language: a CJK character is about a token, a Latin one a third or less (estimate_tokens), so the
+    bound is converted with the passage's own characters per token."""
+    from ..llm.context import chars_per_token
+    return int(handout_tokens(source) * 0.8 * chars_per_token(source))
+
+
 def handout_schema(source: str) -> dict:
     """Constrained-decoding schema of a handout with bounded strings. A small model sometimes falls into repeating
     "\\n" until the token limit, leaving JSON that cannot be parsed; with a length bound the string is closed and the
@@ -279,10 +287,25 @@ def handout_schema(source: str) -> dict:
     from .contracts import HandoutDraft
     sch = HandoutDraft.model_json_schema()
     props = dict(sch["properties"])
-    props["guide"] = {**props["guide"], "maxLength": int(handout_tokens(source) * 0.8)}
-    props["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": 160}, "maxItems": 3}
-    props["check"] = {**props["check"], "maxLength": 240}
+    from ..llm.context import chars_per_token
+    scale = chars_per_token(source)
+    props["guide"] = {**props["guide"], "maxLength": handout_chars(source)}
+    props["key_points"] = {"type": "array", "items": {"type": "string", "maxLength": int(160 * scale)}, "maxItems": 3}
+    props["check"] = {**props["check"], "maxLength": int(240 * scale)}
     sch["properties"] = props
+    return sch
+
+
+def intent_schema(source: str) -> dict:
+    """What a 導讀段 teaches: a role and 1–3 one-sentence items, bounded in the source's own language."""
+    from ..llm.context import chars_per_token
+    from .contracts import TeachingIntent
+    scale = chars_per_token(source)
+    sch = TeachingIntent.model_json_schema()
+    sch["properties"]["role"] = {**sch["properties"]["role"], "maxLength": int(120 * scale)}
+    sch["properties"]["teaches"] = {"type": "array", "items": {"type": "string", "maxLength": int(120 * scale)},
+                                    "minItems": 1, "maxItems": 3}
+    sch["required"] = ["role", "teaches"]
     return sch
 
 
@@ -340,6 +363,9 @@ def conflict_findings(review, guide: str, source: str) -> list[ra.Finding]:
 
 # A handout may reuse the textbook's own sentences where they are already clear: whether a passage needed explaining
 # is a judgement about meaning, so no program check counts copied text.
+# the handout answer's other fields (HandoutDraft) named in its text, as a model writes them when they run together
+OUTPUT_FIELD_RE = re.compile(r"[\"']?\b(key_points)\b[\"']?\s*[:：]|[\"'](check)[\"']\s*[:：]")
+CJK_SCRIPT_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]+")
 EQUATION_RE = re.compile(r"=|<|>|\\(?:doteq|triangleq|approx|equiv|propto|leftarrow|gets|rightarrow|to|leq?|geq?|neq|sim)\b")
 
 
@@ -359,10 +385,14 @@ def repeated_sentences(text: str, times: int = 3, min_chars: int = 10) -> list[s
     return [x for x, n in Counter(x for x in sents if len(x) >= min_chars).items() if n >= times]
 
 
+SENTENCE_END_RE = re.compile(r"[。！？\n]|[.!?](?=\s|$)")
+
+
 def _sentence_of(text: str, start: int) -> str:
-    a = max(text.rfind(ch, 0, start) for ch in "。！？!?\n") + 1
-    ends = [i for i in (text.find(ch, start) for ch in "。！？!?\n") if i != -1]
-    return text[a:(min(ends) + 1 if ends else len(text))].strip()
+    """The sentence of `text` around position `start` (Chinese or Latin sentence ends)."""
+    a = max((m.end() for m in SENTENCE_END_RE.finditer(text, 0, start)), default=0)
+    m = SENTENCE_END_RE.search(text, start)
+    return text[a:(m.end() if m else len(text))].strip()
 
 
 def handout_program(t: ra.ReadingTaskInput, guide: str, symbol_evidence: dict | None = None) -> list[ra.Finding]:
@@ -386,11 +416,22 @@ def handout_program(t: ra.ReadingTaskInput, guide: str, symbol_evidence: dict | 
     m = PRODUCTION_RE.search(g)
     if m:
         add("process_leak", f"講義敘述了寫作或修改過程：「{m.group(0)}」", excerpt=_sentence_of(g, m.start()))
+    m = OUTPUT_FIELD_RE.search(g)
+    if m:   # another field of the answer written into the handout's text: the fields ran together
+        a, b = g.rfind("\n", 0, m.start()) + 1, g.find("\n\n", m.end())
+        add("field_leak", f"講義正文裡寫進了輸出格式的欄位「{m.group(1) or m.group(2)}」，那部分不屬於講義，要刪除",
+            excerpt=g[a:b if b != -1 else len(g)].strip())
     for s in repeated_sentences(g)[:1]:
         add("repeated_text", f"講義同一句重複了三次以上：「{s[:40]}」", excerpt=s)
     if symbol_evidence:
         for d in notation_mismatches(symbol_evidence, [g]):
             add("notation_mismatch", d)
+    if t.language == "src" and not CJK_SCRIPT_RE.search(t.text):
+        # written in the source's own language, which uses none of these scripts: such characters are a slip into
+        # another language mid-sentence (qwen models do this)
+        for sentence in dict.fromkeys(_sentence_of(g, m.start()) for m in CJK_SCRIPT_RE.finditer(g)):
+            runs = "、".join(dict.fromkeys(CJK_SCRIPT_RE.findall(sentence)))
+            add("language_mixed", f"講義混入了課本沒有用到的文字「{runs}」，這一句要和課本用同一種語言", excerpt=sentence)
     return out
 
 
@@ -401,6 +442,7 @@ NOTE_TEXT = {
     "conflict_unconfirmed": lambda f: f"這段講義的「{f.draft_excerpt[:60]}」可能和課本不一致，建議對照課本",
     "formula_missing": lambda f: f"這段講義沒有寫出課本的公式 {f.suggested_fix[:80]}",
     "notation_mismatch": lambda f: f.detail[:100],
+    "language_mixed": lambda f: f"這段講義夾雜了其他語言的文字：{f.draft_excerpt[:80]}",
     "notation_unverified": lambda f: f"PDF 的數學符號沒能確認字型，符號寫法建議對照課本：{f.detail[:80]}",
 }
 

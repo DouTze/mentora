@@ -12,7 +12,7 @@ from app.llm.runtime import BUDGETS, BackendPool, ListSink, ModelRuntime, ModelS
 from app.persistence.repository import DbSink, Repository
 from app.reading import agent as ra
 from app.reading.prompts import load_bundle
-from app.tutor.reading import with_language
+from app.tutor.reading import output_language, source_language, with_language
 from app.workflows import invoke
 from app.workflows.reading_graph import MAX_FIXES, ReadingDeps, ReadingUnavailable, build_reading_graph, initial_state
 
@@ -37,6 +37,7 @@ def taught(m: dict) -> dict:
 
 
 DEFAULTS = {
+    "intent": lambda m: {"role": "說明 NLP 是什麼、怎麼發展", "teaches": [p for _, p in m["points"]] or ["NLP 的目標與發展"]},
     "draft": lambda m: handout(),
     "review_points": taught,
     "review_conflicts": lambda m: {"conflicts": []},
@@ -70,16 +71,21 @@ class Scripted(LLMBackend):
     def steps(self) -> list[str]:
         return [c["step"] for c in self.calls]
 
+    def prompt(self, step: str, n: int = 0) -> str:
+        return [c["prompt"] for c in self.calls if c["step"] == step][n]
 
-def make(backend, *, repo=None, topic=TOPIC, text=SOURCE, language="zh-TW"):
+
+def make(backend, *, repo=None, topic=TOPIC, text=SOURCE, translate_zh=True):
+    """translate_zh: the material's setting; otherwise the session writes the source's own language (read from it)."""
+    out = output_language("zh-TW" if translate_zh else "source", source_language(text))
     pool = BackendPool(build=lambda c: backend)
     sink = DbSink(repo) if repo else ListSink()
     deps = ReadingDeps(runtime_for=lambda sid: ModelRuntime(SNAP, pool),
-                       prompts_for=lambda sid: with_language(BUNDLE["prompts"], language), sink=sink, repo=repo,
+                       prompts_for=lambda sid: with_language(BUNDLE["prompts"], out), sink=sink, repo=repo,
                        render_region=lambda path, page, bbox: b"\x89PNG-stub")
     task = ra.ReadingTaskInput(session_id="s1", unit_id="u-b1", index=0, total=1, label="第 1 行", text=text,
                                block_ids=["b0"], material_title="AI 應用", range_label="第 1–2 行",
-                               model_config_hash="h", prompt_bundle_hash=BUNDLE["hash"], topic=topic, language=language)
+                               model_config_hash="h", prompt_bundle_hash=BUNDLE["hash"], topic=topic, language=out["code"])
     return deps, task
 
 
@@ -99,11 +105,14 @@ async def test_a_handout_that_teaches_and_does_not_contradict_is_published_as_wr
     out = await run(b)
     a = out["artifact"]
     assert out["status"] == "accepted" and a["guide"] == HANDOUT and a["review_status"] == "passed" and not a["revised"]
-    assert b.steps() == ["draft", "review_points", "review_conflicts"]
+    assert b.steps() == ["intent", "draft", "review_points", "review_conflicts"]
     assert a["points"] == ["（NLP｜定義與發展）NLP 讓機器理解語言，並從語言分析進階到語意理解"]
-    first = b.calls[0]["prompt"]
-    assert "這一段的重點" in first and "NLP 讓機器理解語言" in first and "一律使用繁體中文" in first
-    assert "補充說明" not in first.split("## 寫作要求")[0]          # no claims list, no approved-bridges section
+    assert a["role"] == "說明 NLP 是什麼、怎麼發展"
+    # the overview places the 導讀段 when what it teaches is read; the handout is written from the text and that only
+    assert "AI 的子領域" in b.prompt("intent") and "NLP 讓機器理解語言" in b.prompt("intent")
+    draft = b.prompt("draft")
+    assert "這一段課文想教的內容" in draft and "說明 NLP 是什麼、怎麼發展" in draft and "NLP 讓機器理解語言" in draft
+    assert "AI 的子領域" not in draft and "一律使用繁體中文" in draft
 
 
 async def test_a_contradiction_is_corrected_in_place_and_only_the_changed_passage_is_reviewed_again():
@@ -115,9 +124,9 @@ async def test_a_contradiction_is_corrected_in_place_and_only_the_changed_passag
     a = out["artifact"]
     assert out["status"] == "accepted" and a["fixes"] == 1 and a["revised"]
     assert a["guide"] == wrong.replace(WRONG, fixed)                     # the other paragraphs are untouched
-    assert b.steps() == ["draft", "review_points", "review_conflicts", "fix", "review_conflicts"]
+    assert b.steps() == ["intent", "draft", "review_points", "review_conflicts", "fix", "review_conflicts"]
     assert b.calls[-1]["meta"]["guide"] == fixed                         # only what the correction wrote
-    assert "F1［和課本矛盾］" in b.calls[3]["prompt"] and "從簡單的語言分析進階到複雜的語意理解" in b.calls[3]["prompt"]
+    assert "F1［和課本矛盾］" in b.prompt("fix") and "從簡單的語言分析進階到複雜的語意理解" in b.prompt("fix")
 
 
 async def test_a_contradiction_left_after_three_corrections_is_not_published():
@@ -144,6 +153,18 @@ async def test_a_point_still_missing_after_the_corrections_is_published_with_a_n
     assert [u["code"] for u in a["unverified"]] == ["point_missing"] and "可能沒有教到" in a["unverified"][0]["text"]
     # each re-check asks only the point still missing, against the whole handout; conflicts only on what was added
     assert [c["meta"]["guide"] for c in b.calls if c["step"] == "review_conflicts"][1:] == ["補充第 0 次。", "補充第 1 次。", "補充第 2 次。"]
+
+
+async def test_a_passage_written_back_as_it_was_is_reviewed_again_and_the_new_verdict_counts():
+    """SBRL 2026-10-08: review B called an addition a contradiction; the corrector wrote the sentence back unchanged
+    (it disagreed), the re-review found nothing, yet the old verdict was carried because the sentence was still in
+    the handout, and the handout was held. A passage the correction wrote is judged by its re-review alone."""
+    sentence = "它的發展是從語言分析一路走到語意理解，也就是不只看字面，還要掌握意思。"
+    b = Scripted({"review_conflicts": [conflict_on("從語言分析一路走到語意理解"), {"conflicts": []}],
+                  "fix": [{"edits": [{"problem": "F1", "action": "replace", "old": sentence, "new": " " + sentence}]}]})
+    out = await run(b)
+    assert out["status"] == "accepted" and out["artifact"]["fixes"] == 1 and out["artifact"]["guide"] == HANDOUT
+    assert b.steps() == ["intent", "draft", "review_points", "review_conflicts", "fix", "review_conflicts"]
 
 
 async def test_a_correction_that_changes_nothing_stops_the_loop():
@@ -174,16 +195,34 @@ async def test_a_handout_reusing_the_textbook_and_a_rewording_the_reviewer_can_r
     assert out["artifact"]["guide"].startswith(SOURCE) and out["artifact"]["unverified"] == []
 
 
-async def test_a_handout_in_the_source_language_is_asked_for_in_it():
+async def test_a_handout_in_the_source_language_is_asked_for_in_it_by_name():
+    """In source mode the program names the language it reads from the source: among Chinese instructions and
+    Chinese summaries, "write in the source's language" got Chinese from qwen3-vl:4b; "use 英文" got English."""
     b = Scripted()
-    await run(b, language="source")
-    assert "原文是英文就用英文" in b.calls[0]["prompt"] and "一律使用繁體中文" not in b.calls[0]["prompt"]
+    await run(b, translate_zh=False, text="MDPs are a classical formalization of sequential decision making, where "
+                                         "actions influence not just immediate rewards but also subsequent states.")
+    draft = b.prompt("draft")
+    assert "講義用**英文**撰寫" in draft and "一律使用英文撰寫" in draft and "一律使用繁體中文" not in draft
+    assert "一律使用英文撰寫" in b.prompt("intent")                    # what it teaches is written in English too
+    b = Scripted()
+    await run(b, translate_zh=False)                                  # a Chinese source in source mode: Chinese
+    assert "講義用**繁體中文**撰寫" in b.prompt("draft")
 
 
-async def test_a_unit_without_a_summary_is_written_and_not_checked_for_points():
+async def test_a_unit_without_a_summary_is_taught_from_what_its_text_teaches():
+    """No summary and no overview (a rule-planned unit): what it teaches is read from its text alone, and that is
+    what review A checks."""
     b = Scripted()
     out = await run(b, topic=None)
-    assert out["status"] == "accepted" and "review_points" not in b.steps() and out["artifact"]["points"] == []
+    assert out["status"] == "accepted" and out["artifact"]["points"] == ["NLP 的目標與發展"]
+    assert "沒有總覽" in b.prompt("intent") and "review_points" in b.steps()
+
+
+async def test_an_unreadable_intent_leaves_the_summary_to_stand_in():
+    b = Scripted({"intent": ["不是 JSON"] * 3})
+    out = await run(b)
+    assert out["status"] == "accepted" and out["artifact"]["points"] == [
+        "（NLP｜定義與發展）NLP 讓機器理解語言，並從語言分析進階到語意理解"]
 
 
 async def test_symbols_that_cannot_be_confirmed_do_not_stop_the_handout():

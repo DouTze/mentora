@@ -62,7 +62,7 @@ def block_entry(k: int, ch: dict, out: dict, attempt: int) -> dict:
     if out.get("status") == "accepted":
         a = out["artifact"]
         return {**base, "status": "accepted", "guide": a["guide"], "key_points": a.get("key_points") or [],
-                "check": a.get("check") or "", "points": a.get("points") or [],
+                "check": a.get("check") or "", "points": a.get("points") or [], "role": a.get("role") or "",
                 "unverified": a.get("unverified") or [], "warnings": a.get("warnings") or [],
                 "open_findings": a.get("open_findings") or [], "limits": a.get("limits") or [],
                 "review_status": a.get("review_status"), "revised": a.get("revised", False), "fixes": a.get("fixes", 0),

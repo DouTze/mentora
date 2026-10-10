@@ -2,8 +2,9 @@
 
 ```mermaid
 flowchart TD
-    P[prepare] -->|PDF symbols| SY[symbols: rendered regions read by the session's vision model] --> D
-    P --> D[draft: 講義 from the textbook, the 區塊 summary points and the 主題 overview]
+    P[prepare] -->|PDF symbols| SY[symbols: rendered regions read by the session's vision model] --> I
+    P --> I[intent: what this 導讀段 itself teaches, from its text, its summary and the 導讀區塊 overview]
+    I --> D[draft: 講義 from the text and what it teaches only; the overview never reaches it]
     D --> R{review: program checks + A points taught + B no conflict with the textbook}
     R -->|nothing blocks| OK[accept]
     R -->|blocking, fewer than 3 corrections| F[fix: edits to the flagged passages only] --> R
@@ -12,8 +13,9 @@ flowchart TD
     S -->|only points / program facts left| OK2[accept with notes]
 ```
 
-- The textbook is the textbook; the handout teaches what it teaches. Its points are the 區塊 summary of Step 1,
-  never a claim-by-claim restatement: the handout may reorder, explain, add examples; it may not contradict.
+- The textbook is the textbook; the handout makes clear what this 導讀段 sets out to teach. That is read first, from
+  the text itself (the overview only places it): written with the overview in view, a small model taught the later
+  導讀段' content ahead. The handout may reorder, explain, add examples; it may not contradict or run ahead.
 - A reviewer's finding counts only with quotations that are really in the texts (gates); otherwise it is a note.
 - A correction is never a new draft: the corrector names the passages it replaces or adds after, the program
   applies them where they are, and only the changed passages are reviewed for conflicts again (the points still
@@ -38,7 +40,7 @@ from ..reading import agent as ra
 from ..reading import gates
 from ..reading import pdf_evidence
 from ..reading.contracts import (CONTRACT_VERSION, ConflictsReview, HandoutDraft, HandoutFix, PointsReview,
-                                 SymbolTranscription)
+                                 SymbolTranscription, TeachingIntent)
 from . import faults
 
 MAX_FIXES = 3
@@ -61,6 +63,7 @@ class GuideState(TypedDict, total=False):
     budget_base: int             # calls spent by earlier, discarded runs of this attempt (carried, never refilled)
     rounds: dict                 # model node → times it has run (part of its step-cache key)
     symbol_evidence: dict | None # R5: the 區塊's symbol evidence, confirmed by the symbols node when possible
+    intent: dict | None          # TeachingIntent: what this 導讀段 teaches (None: its summary stands in)
     draft: dict | None           # HandoutDraft as first written
     guide: str                   # the handout as it stands (after the corrections so far)
     findings: list[dict]         # what the last review left open
@@ -92,7 +95,7 @@ def initial_state(task: ra.ReadingTaskInput, op: str, command_id: str | None = N
     rules changed keeps its spending; the budget is never refilled)."""
     return {"task": task.model_dump(), "op": op, "command_id": command_id, "gate_rules": gates.GATE_RULES_VERSION,
             "budget": budget or CallBudget.for_task("guide").to_dict(), "budget_base": int((budget or {}).get("calls") or 0),
-            "rounds": {}, "symbol_evidence": task.symbol_evidence, "draft": None, "guide": "", "findings": [],
+            "rounds": {}, "symbol_evidence": task.symbol_evidence, "intent": None, "draft": None, "guide": "", "findings": [],
             "fixes": 0, "changed": [], "stalled": False, "fix_log": [], "decision": None, "status": "running",
             "error": None, "artifact": None, "history": []}
 
@@ -160,20 +163,15 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                   for x in tr["symbols"]]
         return "\n".join(lines)
 
-    def topic_text(t: ra.ReadingTaskInput) -> str:
-        """Where this 區塊 sits in its 主題: the 主題總摘要 and every 區塊's outline, this one marked. Scope only."""
-        tp = t.topic or {}
-        chunks = tp.get("chunks") or []
-        if not chunks:
-            return "（這一段就是一個完整主題，沒有分區塊）"
-        k = int(tp.get("index", 0))
-        lines = [f"主題總摘要：{tp.get('summary') or '（無）'}",
-                 f"這個主題分成 {len(chunks)} 個區塊，你現在只處理第 {k + 1} 塊（標 ▶）："]
-        for j, c in enumerate(chunks):
-            lines.append(f"{'▶' if j == k else '  '} 第 {j + 1} 塊｜{c.get('topic') or '—'}｜{c.get('aspect') or '—'}"
-                         f"｜{c.get('summary') or '—'}")
-        lines.append(f"只講第 {k + 1} 塊的內容；前面的區塊學生已經讀過，後面的區塊會另外講。")
-        return "\n".join(lines)
+    def overview_of(t: ra.ReadingTaskInput) -> str:
+        """The 導讀區塊's overview: where this 導讀段 sits. Not the other 導讀段' summaries — shown them, a small
+        model taught their content here."""
+        return ((t.topic or {}).get("summary") or "").strip() or "（這一段就是一個完整的導讀區塊，沒有總覽）"
+
+    def points_of(state, t: ra.ReadingTaskInput) -> list[tuple[str, str]]:
+        """What the handout must make clear (review A checks it): what this 導讀段 teaches, or its summary."""
+        teaches = ((state.get("intent") or {}).get("teaches")) or []
+        return [(f"P{i}", x.strip()) for i, x in enumerate(teaches, 1) if x.strip()] or gates.handout_points(t)
 
     def items_for(state, t: ra.ReadingTaskInput, keys: tuple[str, ...]) -> list[ContextItem]:
         """Required: the textbook passage, the points, the handout under review; optional (dropped first when the
@@ -182,10 +180,13 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         make = {
             "quote_text": lambda: ContextItem(key="quote_text", text=f["quote_text"], source_ids=t.block_ids,
                                               version=t.source_hash),
-            "points": lambda: ContextItem(key="points", text=gates.points_text(gates.handout_points(t))),
+            "points": lambda: ContextItem(key="points", text=gates.points_text(points_of(state, t))),
+            "role": lambda: ContextItem(key="role", text=((state.get("intent") or {}).get("role") or "（無）").strip()),
+            "teaches": lambda: ContextItem(key="teaches", text="\n".join(f"- {p}" for _, p in points_of(state, t))),
             "symbol_evidence": lambda: ContextItem(key="symbol_evidence", text=symbol_text(state.get("symbol_evidence")),
                                                    version=(state.get("symbol_evidence") or {}).get("version")),
-            "topic_context": lambda: ContextItem(key="topic_context", text=topic_text(t), required=False, priority=3),
+            "topic_context": lambda: ContextItem(key="topic_context", text=f"主題總摘要：{overview_of(t)}", required=False,
+                                                 priority=3),
             "prev_points": lambda: ContextItem(key="prev_points", text=f["prev_points"], required=False, priority=2),
             "qa_context": lambda: ContextItem(key="qa_context", text=f["qa_context"], required=False, priority=1),
         }
@@ -271,16 +272,36 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                     "font_fixes": fixes, "summary": summary,
                                     "model": f"{ctx.runtime.backend.name}:{ctx.runtime.backend.model}"}}
 
+    async def intent(state, ctx):
+        """What this 導讀段 itself sets out to teach, read from its text with its summary and the 導讀區塊 overview
+        in view. An answer that cannot be read leaves the summary to stand in; the handout is still written."""
+        t = task(state)
+        extra = {"summary": gates.points_text(gates.handout_points(t)), "overview": overview_of(t)}
+        msg, rec = await prompt_for(ctx, state, "intent", "reading_intent", ("quote_text",), extra, 1024)
+        try:
+            ti, _ = await run_structured(ctx, [HumanMessage(content=msg)], TeachingIntent, task="guide", node="intent",
+                                         prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
+                                         json_schema=gates.intent_schema(t.text),
+                                         meta={"step": "intent", "quote_text": t.text, "points": gates.handout_points(t),
+                                               "language": t.language},
+                                         min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+        except TaskError as e:
+            if e.kind in ("unavailable", "budget", "context_overflow"):
+                raise
+            return {"intent": None}
+        return {"intent": ti.model_dump()}
+
     async def draft(state, ctx):
         t = task(state)
         out_tokens = gates.handout_tokens(t.text)
-        msg, rec = await prompt_for(ctx, state, "draft", "reading_body",
-                                    ("quote_text", "points", "symbol_evidence", "topic_context", "prev_points",
-                                     "qa_context"), {}, out_tokens)
+        tmpl = prompts(state)["reading_body"]   # a session pinned to an older bundle asks for points and position
+        keys = tuple(k for k in ("quote_text", "role", "teaches", "points", "symbol_evidence", "topic_context",
+                                 "prev_points", "qa_context") if "{{" + k + "}}" in tmpl)
+        msg, rec = await prompt_for(ctx, state, "draft", "reading_body", keys, {}, out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], HandoutDraft, task="guide", node="draft",
                                     prose_fields=("guide",), json_schema=gates.handout_schema(t.text),
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
-                                    meta={"step": "draft", "quote_text": t.text, "points": gates.handout_points(t),
+                                    meta={"step": "draft", "quote_text": t.text, "points": points_of(state, t), "language": t.language,
                                           "evidence_formulas": gates.required_formulas(t, state.get("symbol_evidence"))},
                                     min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         return {"draft": d.model_dump(), "guide": d.guide.strip()}
@@ -299,7 +320,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         guide = state["guide"]
         prior = [ra.Finding.model_validate(f) for f in state.get("findings") or []]
         recheck = int(state.get("fixes") or 0) > 0
-        points = gates.handout_points(t)
+        points = points_of(state, t)
         still = {f.item for f in prior if f.code == "point_missing"}
         pending = [p for p in points if p[0] in still] if recheck else points
         found = gates.handout_program(t, guide, state.get("symbol_evidence")) + symbol_note(state)
@@ -316,7 +337,11 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             found += gates.points_findings(pending, a, guide)
         if recheck:   # earlier verdicts on what no correction touched still stand
             found += [f for f in prior if f.check == "points" and f.item not in {i for i, _ in pending}]
-            found += [f for f in prior if f.check == "conflicts" and gates._locate(guide, f.draft_excerpt)]
+            # a passage the last correction wrote (even back as it was) is reviewed again below: its new verdict
+            # replaces the old one; only conflicts in passages it did not write are carried
+            rewritten = [ra.norm_text(p) for p in state.get("changed") or []]
+            found += [f for f in prior if f.check == "conflicts" and gates._locate(guide, f.draft_excerpt)
+                      and not any(ra.norm_text(f.draft_excerpt) in p for p in rewritten)]
         passages = guide if not recheck else "\n\n".join(state.get("changed") or [])
         if passages.strip():
             msg, rec = await prompt_for(ctx, state, "review", "reading_review_conflicts", ("quote_text", "symbol_evidence"),
@@ -347,12 +372,14 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                     {"guide": guide, "problems": gates.problems_text(blocking)}, gates.handout_tokens(t.text))
         x, _ = await run_structured(ctx, [HumanMessage(content=msg)], HandoutFix, task="guide", node="fix",
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
-                                    purpose="revision", json_schema=gates.bound_strings(HandoutFix.model_json_schema(), 1500),
-                                    meta={"step": "fix", "quote_text": t.text, "guide": guide,
+                                    purpose="revision", json_schema=gates.bound_strings(HandoutFix.model_json_schema(), gates.handout_chars(t.text)),
+                                    meta={"step": "fix", "quote_text": t.text, "guide": guide, "language": t.language,
                                           "problems": [f.model_dump() for f in blocking]},
                                     min_max_tokens=gates.handout_tokens(t.text), min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         new, applied, skipped = gates.apply_edits(guide, x.edits)
-        stalled = new == guide
+        # no edit could be applied: another review would see the same handout. A passage written back as it was is
+        # the corrector disputing the problem; it is reviewed again (the new verdict replaces the old one)
+        stalled = not applied
         return {"guide": new, "fixes": int(state.get("fixes") or 0) + 1, "stalled": stalled,
                 "changed": [a["passage"] for a in applied if a["passage"]],
                 "fix_log": (state.get("fix_log") or []) + [{"problems": [f.detail[:160] for f in blocking],
@@ -382,7 +409,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         ev = state.get("symbol_evidence") or {}
         return {"status": "accepted", "artifact": {
             "guide": state["guide"], "key_points": d.get("key_points") or [], "check": d.get("check") or "",
-            "limits": [], "points": [p for _, p in gates.handout_points(ra.ReadingTaskInput.model_validate(t))],
+            "limits": [], "points": [p for _, p in points_of(state, task(state))], "role": (state.get("intent") or {}).get("role", ""),
             "unverified": notes, "warnings": [f.model_dump() for f in fs if f.severity == "minor"],
             "open_findings": [f.model_dump() for f in fs if f.severity == "major"],
             "review_status": "passed_with_notes" if notes else "passed",
@@ -402,7 +429,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
 
     g = StateGraph(GuideState)
     g.add_node("prepare", prepare)
-    for name, fn in (("symbols", symbols), ("draft", draft), ("review", review), ("fix", fix)):
+    for name, fn in (("symbols", symbols), ("intent", intent), ("draft", draft), ("review", review), ("fix", fix)):
         g.add_node(name, model_node(name, fn))
     for name, fn in (("settle", settle), ("accept", accept), ("hold", hold)):
         g.add_node(name, fn)
@@ -411,8 +438,12 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         return lambda s: "hold" if s.get("status") == "failed" else route(s)
 
     g.add_edge(START, "prepare")
-    g.add_conditional_edges("prepare", lambda s: "symbols" if needs_symbols(s) else "draft", ["symbols", "draft"])
-    g.add_conditional_edges("symbols", failed_or(lambda s: "draft"), ["draft", "hold"])
+    # a session pinned to a bundle without the intent prompt writes from the 導讀段 summary, as it did
+    before_draft = lambda s: "intent" if "reading_intent" in prompts(s) else "draft"   # noqa: E731
+    g.add_conditional_edges("prepare", lambda s: "symbols" if needs_symbols(s) else before_draft(s),
+                            ["symbols", "intent", "draft"])
+    g.add_conditional_edges("symbols", failed_or(before_draft), ["intent", "draft", "hold"])
+    g.add_conditional_edges("intent", failed_or(lambda s: "draft"), ["draft", "hold"])
     g.add_conditional_edges("draft", failed_or(lambda s: "review"), ["review", "hold"])
     g.add_conditional_edges("review", failed_or(lambda s: s["decision"]), ["accept", "fix", "settle", "hold"])
     g.add_conditional_edges("fix", failed_or(lambda s: "settle" if s.get("stalled") else "review"), ["review", "settle", "hold"])

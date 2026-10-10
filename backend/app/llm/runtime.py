@@ -78,10 +78,11 @@ BUDGETS: dict[str, dict[str, int]] = {
     "segment_outline": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},  # outlines of one batch of 區塊
     "segment_matter": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},   # which 區塊 of a stretch need no guide
     "segment_boundaries": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},  # same unit / new unit, pair by pair
+    "segment_passages": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},  # same 導讀段 / new one, pair by pair
     "topic": {"max_calls": 2, "max_format_fixes": 1, "max_revisions": 0},            # one unit's summary, key points, check
-    # one 區塊's handout: symbols, draft, the two reviews, then up to three corrections each re-checked by both
-    # reviews (13 calls); format fixes are calls too
-    "guide": {"max_calls": 17, "max_format_fixes": 4, "max_revisions": 3, "max_tool_rounds": 0, "max_tools_per_round": 0},
+    # one 導讀段's handout: symbols, what it teaches, draft, the two reviews, then up to three corrections each
+    # re-checked by both reviews (14 calls); format fixes are calls too
+    "guide": {"max_calls": 18, "max_format_fixes": 4, "max_revisions": 3, "max_tool_rounds": 0, "max_tools_per_round": 0},
     "ask": {"max_calls": 4, "max_format_fixes": 1, "max_revisions": 1, "max_tool_rounds": 1, "max_tools_per_round": 2},
     "compact": {"max_calls": 5, "max_format_fixes": 1, "max_revisions": 1},     # notes, audit, one revision + audit
     "generate": {"max_calls": 3, "max_format_fixes": 1, "max_revisions": 0},    # questions, audit
