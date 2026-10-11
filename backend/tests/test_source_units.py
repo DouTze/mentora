@@ -43,13 +43,13 @@ class Scripted(LLMBackend):
         return LLMResult(text=out if isinstance(out, str) else json.dumps(out), latency_ms=1)
 
 
-def deps_for(backend, outline: bool = False, matter: bool = False, boundaries: bool = False, passages: bool = False):
+def deps_for(backend, outline: bool = False, matter: bool = False, boundaries: bool = False):
     """Planner deps over the current prompt bundle. Without `outline` the bundle lacks segment_outline, like a
     session pinned to a snapshot from before units-v9: the buffer planner (segment_blocks …) is what is tested."""
     rt = ModelRuntime(ModelSnapshot("mock", "", "", "", "", 0.2, 512, 8192), BackendPool(build=lambda c: backend))
     sink = ListSink()
     b = load_bundle()
-    drop = ({"segment_outline"} if not outline else set()) | ({"segment_matter"} if not matter else set())         | ({"segment_boundaries"} if not boundaries else set()) | ({"segment_passages"} if not passages else set())
+    drop = ({"segment_outline"} if not outline else set()) | ({"segment_matter"} if not matter else set())         | ({"segment_boundaries"} if not boundaries else set())
     prompts = {k: v for k, v in b["prompts"].items() if k not in drop}
     return seg.PlannerDeps(make_ctx=lambda task, key: TaskContext(rt, CallBudget.for_task(task), sink),
                            prompts=prompts, prompt_version=b["hash"], material_title="t"), sink
@@ -788,18 +788,18 @@ async def test_units_are_decided_pair_by_pair_from_the_content_summaries():
     assert [len(u.chunks) for u in plan.units] == [2, 2]
 
 
-async def test_the_model_groups_a_units_paragraphs_into_passages_by_content():
-    """Which paragraphs form one 導讀段 is the model's call from their text, pair by pair; no size rule merges them."""
+async def test_each_paragraph_of_a_unit_is_its_own_passage():
+    """A 導讀段 is the book's paragraph: no model call and no size rule merges paragraphs (asked which ones teach
+    nothing on their own, a small model joined every pair on one topic)."""
     blocks = paragraphs(4)
     b = Scripted([{"paragraphs": [{"topic": "同一主題", "aspect": f"面向{k}", "summary": f"第{k}段說的內容"} for k in range(1, 5)]},
-                  {"boundaries": ["same", "same", "same"]}, {"joins": ["join", "split", "split"]}])
-    deps, _ = deps_for(b, outline=True, boundaries=True, passages=True)
+                  {"boundaries": ["same", "same", "same"]}])
+    deps, _ = deps_for(b, outline=True, boundaries=True)
     plan = await seg.plan_units(blocks, deps)
-    ask = b.requests[2]["messages"][0]["content"]
-    assert "【P2】\n第2段" in ask and "B3：P3 → P4" in ask
+    assert len(b.requests) == 2
     (unit,) = plan.units
-    assert [len(c.block_ids) for c in unit.chunks] == [2, 1, 1]
-    assert unit.chunks[0].summary == "第1段說的內容 第2段說的內容" and unit.chunks[0].aspect == "面向1；面向2"
+    assert [len(c.block_ids) for c in unit.chunks] == [1, 1, 1, 1]
+    assert unit.chunks[1].summary == "第2段說的內容" and unit.chunks[1].aspect == "面向2"
 
 
 def test_pdf_paragraphs_close_on_a_latin_period_and_captions_stay_with_the_text():
@@ -848,3 +848,101 @@ async def test_a_numbered_section_always_opens_a_unit_and_topics_are_judged_insi
     assert [u.boundary_reason for u in plan.units] == ["t", "t"] and len(plan.units) == 2
     asks = [r["messages"][0]["content"] for r in b.requests if r["meta"]["step"] == "segment_boundaries"]
     assert len(asks) == 2 and all("P3" not in a for a in asks)        # one judgement per section, two paragraphs each
+
+
+def _with_layout(blocks, layout):
+    """blocks with PDF paragraph layout evidence, by the opening words of their text: (indent, full last line)."""
+    out = []
+    for b in blocks:
+        ind, full = next((v for k, v in layout.items() if b.text.startswith(k)), (False, False))
+        out.append(b.model_copy(update={"meta": {**b.meta, "pdf": {"indent": ind, "full_end": full, "space_above": 0.3}}}))
+    return out
+
+
+def test_a_paragraph_going_on_after_a_formula_or_a_page_break_stays_one_paragraph_chunk():
+    """The extractor opens a new paragraph after every display formula and at a page's last sentence end. The text
+    goes on when it starts in lower case or the formula ends with a comma; in a book whose paragraphs open with an
+    indent, a first line that is not indented goes on after a formula, or after a page that ended on a full line. A
+    numbered exercise is never part of the paragraph before it, and an indented line opens a new one."""
+    page1 = "\n\n".join([
+        "Paragraphs in this book open with an indent.",
+        "We can also compute the expected reward as",
+        "$$r(s,a)=\\sum_{r}r\\,p(r|s,a), \\tag{3.5}$$",
+        "and the expected reward of a triple as",
+        "$$r(s,a,s')=\\sum_{r}r\\,p(r|s,a,s'). \\tag{3.6}$$",
+        "In this book, we usually use the first function.",
+        "Exercise 3.5 Give the modified equation.",
+        "Of course, the states and actions vary greatly from task to task."])
+    page2 = "\n\n".join([
+        "In this book we offer some advice on representing them.",
+        "A new paragraph opens with an indent."])
+    _, blocks = extract_blocks("m", "page", 1, 2, [page1, page2])
+    blocks = _with_layout(blocks, {"Paragraphs": (True, False), "We can": (True, False), "Of course": (True, True),
+                                   "A new": (True, False)})
+    chunks = [" ".join(blocks[i].text for i in c) for c in seg.make_chunks(blocks)]
+    assert [c[:12] for c in chunks] == ["Paragraphs i", "We can also ", "Exercise 3.5", "Of course, t", "A new paragr"]
+    assert chunks[1].endswith("In this book, we usually use the first function.")
+    assert chunks[3].endswith("In this book we offer some advice on representing them.")
+    # without the layout (a text export) only the sentence that plainly goes on is kept with its formula
+    plain = [" ".join(blocks[i].text[:12] for i in c) for c in seg.make_chunks(
+        [b.model_copy(update={"meta": {k: v for k, v in b.meta.items() if k != "pdf"}}) for b in blocks])]
+    assert any(c.startswith("We can also ") and "and the expe" in c and "In this book" not in c for c in plain)
+
+
+def test_an_end_mark_closes_an_exercise_and_lines_beside_a_formula_are_no_headings():
+    """"… examples. □" ends the exercise even though the line ends with the mark, not a full stop; "(by (3.9))" or
+    "for all s ∈ S," set beside a display are lower-case remarks going on with the sentence, never headings."""
+    page = "\n\n".join([
+        "Exercise 3.1 Make the examples different. $\\square$",
+        "Exercise 3.2 Is the framework adequate?",
+        "$$v(s)=\\mathbb{E}[G_{t}|S_{t}=s]$$",
+        "(by (3.9))",
+        "for all $s\\in\\mathscr{S},$",
+        "where the actions are taken from the set."])
+    _, blocks = extract_blocks("m", "page", 1, 1, [page])
+    assert not [b.text for b in blocks if b.kind == "heading"]
+    chunks = [" ".join(blocks[i].text for i in c) for c in seg.make_chunks(blocks)]
+    assert chunks[0] == "Exercise 3.1 Make the examples different. $\\square$"
+    assert chunks[1].startswith("Exercise 3.2") and chunks[1].endswith("where the actions are taken from the set.")
+
+
+def test_a_period_set_inside_a_closing_formula_ends_the_paragraph():
+    """"… sets are then $A(\\text{low})=\\{a,b\\}.$" ends its sentence and its paragraph: the next paragraph is not
+    read as going on with it."""
+    page = "\n\n".join([
+        "The robot can search or wait. The action sets are then $\\mathscr{A}(\\text{low})=\\{\\text{search},\\text{wait}\\}.$",
+        "The rewards are zero most of the time."])
+    _, blocks = extract_blocks("m", "page", 1, 1, [page])
+    chunks = [" ".join(blocks[i].text for i in c) for c in seg.make_chunks(blocks)]
+    assert len(chunks) == 2 and chunks[1] == "The rewards are zero most of the time."
+
+
+async def test_an_exercise_gets_no_handout_but_is_listed_as_left_out():
+    """An exercise left to the reader ("Exercise 3.10 …", "習題 2.1 …") is no lesson to write a handout for; an example
+    is ("Example 3.1: …"). The reader still sees the exercise among what was left out."""
+    page = "\n\n".join([
+        "The return is the sum of the discounted rewards received after a time step, and it is what the agent maximizes.",
+        "Example 3.1: Bioreactor Suppose reinforcement learning is applied to set temperatures for a bioreactor.",
+        "Exercise 3.10 Prove the second equality in (3.10). $\\square$",
+        "習題 2.1 請說明折扣率的作用。"])
+    _, blocks = extract_blocks("m", "page", 1, 1, [page])
+    deps, _ = deps_for(MockBackend(), outline=True, boundaries=True)
+    plan = await seg.plan_units(blocks, deps)
+    assert [x["role"] for x in plan.skipped] == ["exercise", "exercise"]
+    kept = " ".join(b.text for b in blocks if b.block_id in {i for u in plan.units for i in u.block_ids})
+    assert "Example 3.1" in kept and "Exercise 3.10" not in kept and "習題 2.1" not in kept
+
+
+def test_an_english_paragraph_on_the_same_subject_is_no_summary_by_its_letters():
+    """Pairs of letters are shared by any two English paragraphs: a chapter's key paragraph was left out as a summary.
+    Pairs of words tell a paragraph that says it again from one that goes on."""
+    first = ("The agent and the environment interact at each of a sequence of discrete time steps. The agent selects "
+             "actions and the environment responds with rewards and new states.")
+    new = ("The framework is a considerable abstraction of the problem of goal-directed learning from interaction: "
+           "any such problem reduces to three signals passing between an agent and its environment.")
+    again = ("The agent and the environment interact at each of a sequence of discrete time steps; the agent selects "
+             "actions and the environment responds with rewards and new states.")
+    _, blocks = extract_blocks("m", "page", 1, 1, ["\n\n".join([first, new, again])])
+    chunks = seg.make_chunks(blocks)
+    assert seg.repeated_share(blocks, chunks[1], chunks[0]) < seg.REPEAT_MIN_WORDS
+    assert seg.repeated_share(blocks, chunks[2], chunks[0]) > seg.REPEAT_MIN_WORDS

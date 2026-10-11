@@ -36,10 +36,10 @@ from langchain_core.messages import HumanMessage
 from ..llm.context import chars_per_token
 from ..llm.runtime import CallBudget, stable_hash
 from ..llm.tasks import TaskContext, TaskError, run_structured
-from .schemas import (Boundaries, MatterLabels, Outline, ParagraphTopic, PlannedUnit, PassageJoins, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
+from .schemas import (Boundaries, MatterLabels, Outline, ParagraphTopic, PlannedUnit, ReadingPart, SegmentationPlan, SourceBlock, SourceUnit, TopicStarts,
                       TopicSummary, UnitChunk, WindowPlan)
 
-SEGMENTATION_VERSION = "units-v12"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out; v11: the model groups a unit's paragraphs into 導讀段 by content, no size rule merges them; v12: numbered sections open units
+SEGMENTATION_VERSION = "units-v13"   # v2: argument / example / enumeration relations, section-bounded parts; v3: BUF carry-over; v4: topic units with a strict size limit; v5: per-unit repair; v6: one-topic check; v7: topic starts, headings stay with their section; v8: topic check via paragraph summaries; v9: units from 區塊 outlines, every unit carries its 區塊; v10: 區塊 that need no guide (contents, summaries) are left out; v11: the model groups a unit's paragraphs into 導讀段 by content, no size rule merges them; v12: numbered sections open units; v13: a paragraph going on after a display formula or a page break stays one, each paragraph is its own 導讀段 (no model join), exercises get no handout
 MIN_UNIT_CHARS = 40
 MAX_UNIT_CHARS = 700
 WINDOW_CHARS = 5000
@@ -60,6 +60,10 @@ CODE_EXPLAIN_RE = re.compile(r"^\s*(這段程式|上面的程式|上述程式|�
 TABLE_EXPLAIN_RE = re.compile(r"^\s*(上表|此表|這張表|表中|the table above|this table)", re.I)
 TOKEN_METHOD = "heuristic-cjk1.0-other0.3"
 WHERE_RE = re.compile(r"^\s*(其中|式中|這裡的?|此處|where\b|here\b|with\b)", re.I)
+LOWER_START_RE = re.compile(r"^[\s(\"'“‘]*[a-z]")   # a Latin sentence that goes on starts in lower case
+LINE_SPACE = 1.0   # text set closer than one line height under a display formula goes on with its paragraph
+# a numbered block label ("Exercise 3.5", "Example 3.7:", "定理 2.1") opens a block of its own
+NUMBERED_LABEL_RE = re.compile(r"^\s*(?:[A-Z][a-z]+|[一-鿿]{1,3})\s*\d+(?:\.\d+)*[a-z]?\s*[:.：]?(?=\s|$)")
 
 
 class PlanInvalid(Exception):
@@ -112,6 +116,39 @@ def glue_reason(a: SourceBlock, b: SourceBlock, enum_open: bool = False) -> str 
     return None
 
 
+def _formula_goes_on(text: str) -> bool:
+    """A display formula that ends with a comma or semicolon: its sentence goes on after it."""
+    t = re.sub(r"\\tag\{[^}]*\}", "", text.strip().strip("$")).rstrip()
+    return t[-1:] in (",", ";", "，", "；")
+
+
+def continuations(blocks: list[SourceBlock]) -> list[bool]:
+    """cont[i]: blocks[i] goes on with the paragraph before it (footnotes set in between skipped) although the
+    extractor opened a new paragraph there. The sentence goes on after a display formula: it starts in lower case,
+    or the formula ends with a comma. In a text whose paragraphs open with an indented line (the PDF layout says so),
+    a first line that is not indented goes on with the paragraph right under a display formula (no space left above
+    it), or after a page that ended with a full line. A block opening with a numbered label (an exercise, an example)
+    never goes on with what is before it."""
+    indented = any((b.meta.get("pdf") or {}).get("indent") for b in blocks if b.kind == "paragraph")
+    out = [False] * len(blocks)
+    for i, b in enumerate(blocks):
+        if i == 0 or b.kind != "paragraph" or same_para(blocks, i) or b.meta.get("footnote") or b.meta.get("caption") \
+                or NUMBERED_LABEL_RE.match(b.text):
+            continue
+        j = i - 1
+        while j > 0 and blocks[j].meta.get("footnote"):
+            j -= 1
+        a = blocks[j]
+        ev, before = b.meta.get("pdf") or {}, a.meta.get("pdf") or {}
+        if a.kind == "formula" and (LOWER_START_RE.match(b.text) or _formula_goes_on(a.text)):
+            out[i] = True
+        elif indented and ev.get("indent") is False and (
+                a.kind == "formula" and (ev.get("space_above") or 0) < LINE_SPACE
+                or a.kind == "paragraph" and before.get("full_end") and b.locator.start != a.locator.end):
+            out[i] = True
+    return out
+
+
 def glue_plan(blocks: list[SourceBlock]) -> tuple[list[str | None], list[dict]]:
     """(glues, relations). A soft relation that would grow its chain beyond ARGUMENT_MAX_CHARS is not enforced as
     one unit; it is kept as a relation (the units stay in the same Part and the later one gets the earlier one as
@@ -120,6 +157,14 @@ def glue_plan(blocks: list[SourceBlock]) -> tuple[list[str | None], list[dict]]:
     for a, b in zip(blocks, blocks[1:]):
         enum_open = (enum_open or bool(ENUM_FIRST_RE.search(a.text))) and a.kind != "heading"
         raw.append(glue_reason(a, b, enum_open))
+    for i, goes_on in enumerate(continuations(blocks)):
+        k = i - 1
+        while goes_on and k >= 0:   # the paragraph goes on: every pair from its open part to here holds
+            if not raw[k] or raw[k].startswith("軟："):
+                raw[k] = "段落在公式後或換頁後延續"
+            if not blocks[k].meta.get("footnote"):
+                break
+            k -= 1
     out: list[str | None] = []
     relations: list[dict] = []
     # rest[i]: blocks[i] plus the rest of its paragraph, which usually goes with it
@@ -620,14 +665,14 @@ OUTLINE_BATCH = 12        # 區塊 per segment_outline call
 OUTLINE_PREVIEW = 500     # chars of one 區塊 shown to segment_outline
 TOPIC_BATCH = 30          # outline lines per segment_topic call
 BOUNDARY_BATCH = 8        # paragraphs per segment_boundaries call: with 18, qwen3-vl:4b copied the example for every pair
-PASSAGE_BATCH = 8         # paragraphs per segment_passages call (the same pairwise judgement, inside one unit)
 
 
 def make_chunks(blocks: list[SourceBlock], lo: int = 0, hi: int | None = None) -> list[list[int]]:
     """Group blocks[lo:hi] into 區塊: one paragraph each (the extractor's paragraph marks); a heading opens one and
     stays with its first paragraph; a footnote or a figure caption stays with the 區塊 before it; glued blocks are
-    never separated. Size never cuts or merges paragraphs: which ones form one 導讀段 is the model's call
-    (passage_groups)."""
+    never separated. Each 區塊 is one 導讀段: the book's own paragraph, with the formulas and the lines that go on
+    after them (continuations). Size never cuts or merges paragraphs, and neither does a model: asked which
+    neighbouring paragraphs teach nothing on their own, a small model joined every pair on one topic."""
     hi = len(blocks) if hi is None else hi
     g = glues(blocks)
     raw: list[list[int]] = []
@@ -745,67 +790,6 @@ async def _boundaries(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, 
                 and "未判斷" not in lines[j - 1].topic]
 
 
-async def _joins(blocks: list[SourceBlock], chunks: list[list[int]], topic: str, deps: PlannerDeps, key: str,
-                 notes: list[str]) -> list[bool]:
-    """For each pair of neighbouring paragraphs, whether the second one goes in the same 導讀段 (segment_passages).
-    The model reads the paragraphs themselves: what a paragraph does for its neighbour shows in its text."""
-    n = len(chunks)
-    listing = "\n\n".join(f"【P{j}】\n{chunk_preview(blocks, c)}" for j, c in enumerate(chunks, 1))
-    pairs = "\n".join(f"B{j}：P{j} → P{j + 1}" for j in range(1, n))
-    prompt = deps.prompts["segment_passages"].replace("{{material_title}}", deps.material_title) \
-        .replace("{{topic}}", topic).replace("{{count}}", str(n)).replace("{{pair_count}}", str(n - 1)) \
-        .replace("{{paragraphs}}", listing).replace("{{pairs}}", pairs)
-    schema = PassageJoins.model_json_schema()
-    schema["properties"]["joins"] = {**schema["properties"]["joins"], "minItems": n - 1, "maxItems": n - 1}
-
-    def check(ans: PassageJoins) -> None:
-        from ..llm.tasks import OutputInvalid
-        if len(ans.joins) != n - 1:
-            raise OutputInvalid(f"joins 必須剛好 {n - 1} 個（每對相鄰段落一個），收到 {len(ans.joins)} 個")
-
-    try:
-        ans, _ = await run_structured(deps.make_ctx("segment_passages", key), [HumanMessage(content=prompt)],
-                                      PassageJoins, task="segment_passages", node=f"segment.{key}",
-                                      prompt_version=deps.prompt_version,
-                                      meta={"step": "segment_passages", "paragraphs": n},
-                                      source_ids=[blocks[i].block_id for c in chunks for i in c], check=check,
-                                      json_schema=schema, min_max_tokens=512, min_context_tokens=16384)
-        return [x == "join" for x in ans.joins]
-    except TaskError as e:
-        if e.kind == "unavailable":
-            raise
-        notes.append(f"{key} 導讀段判斷無效，每段各自成為導讀段：{e.detail[:120]}")
-        return [False] * (n - 1)
-
-
-async def passage_groups(blocks: list[SourceBlock], chunks: list[list[int]], unit: list[int], topic: str,
-                         deps: PlannerDeps, done: dict, on_window, notes: list[str], u: int) -> list[list[int]]:
-    """The unit's paragraphs (indices into chunks) grouped into 導讀段 by the model, in batches that share their
-    edge paragraph so every neighbouring pair is judged once."""
-    if len(unit) < 2 or "segment_passages" not in deps.prompts:
-        return [[k] for k in unit]
-    joins: list[bool] = []
-    pos, b = 0, 0
-    while pos < len(unit) - 1:
-        b += 1
-        part = unit[pos:pos + PASSAGE_BATCH]
-        key = f"p{u:02d}{b:02d}"
-        owned = [blocks[i].block_id for k in part for i in chunks[k]]
-        saved = done.get(key)
-        if saved and saved.get("owned") == owned:
-            got = saved["joins"]
-        else:
-            got = await _joins(blocks, [chunks[k] for k in part], topic, deps, key, notes)
-            if on_window:
-                on_window(key, {"owned": owned, "joins": got})
-        joins += got
-        pos += len(part) - 1
-    groups = [[unit[0]]]
-    for k, joined in zip(unit[1:], joins):
-        groups[-1].append(k) if joined else groups.append([k])
-    return groups
-
-
 def _topic_key(t: str) -> str:
     return re.sub(r"[\s「」『』（）()：:，,。]", "", t or "")
 
@@ -875,7 +859,10 @@ async def _decide(lines: list[ParagraphTopic], deps: PlannerDeps, key: str, owne
                 and "未判斷" not in lines[j - 1].topic]
 
 
-ROLE_NAMES = {"toc": "目錄", "summary": "摘要／重點回顧", "meta": "非學科內容"}
+ROLE_NAMES = {"toc": "目錄", "summary": "摘要／重點回顧", "meta": "非學科內容", "exercise": "練習題"}
+# an exercise left to the reader opens with its numbered label ("Exercise 3.4", "習題 2.1", "練習 3"): it gets no
+# handout (the handout would solve it, and a small model solves it wrong); the reader still sees it in the text
+EXERCISE_RE = re.compile(r"^\s*(?:\*\*)?(?:exercises?|習題|練習題?)\s*[\d一二三四五六七八九十]+(?:[.．\-]\d+)*", re.I)
 # a table-of-contents entry: dot leaders (or a wide gap) then a page number, also chapter-paged ("1-1", "3-12")
 TOC_ENTRY_RE = re.compile(r"(?:[.．·・…]{4,}|…{2,}| {3,}|\t)\s*\d{1,4}(?:-\d{1,4})?(?!\d)")
 # an entry without leaders: a numbered title ending in its page number ("3.1 The Agent–Environment Interface 48")
@@ -918,13 +905,16 @@ def toc_blocks(blocks: list[SourceBlock]) -> list[list[int]]:
 
 MATTER_BATCH = 40     # outline lines per segment_matter call: enough of the range to see what is lesson and what is not
 REPEAT_MIN = 0.35     # share of a 區塊's wording already in the range before it: a summary repeats, new teaching does not
+REPEAT_MIN_WORDS = 0.5   # the same for a text in words (a chapter's teaching shares up to ~0.5 of its word pairs)
 
 
 def repeated_share(blocks: list[SourceBlock], c: list[int], earlier: list[int]) -> float:
-    """How much of 區塊 `c`'s wording (character bigrams) is already in the earlier blocks."""
-    def grams(t: str) -> set[str]:
-        t = re.sub(r"[^\w]", "", t or "")
-        return {t[i:i + 2] for i in range(len(t) - 1)}
+    """How much of 區塊 `c`'s wording is already in the earlier blocks: pairs of neighbouring words (a CJK character
+    is a word), formulas aside. Pairs of letters said nothing in a Latin text: any English paragraph shares most of
+    them with the pages before it, so a chapter's key paragraph passed as a summary."""
+    def grams(t: str) -> set[tuple[str, str]]:
+        words = re.findall(r"[぀-ヿ㐀-䶿一-鿿]|[^\W\d_]{2,}", re.sub(r"\$\$.+?\$\$|\$[^$\n]+\$", " ", t or "", flags=re.S).lower())
+        return set(zip(words, words[1:]))
     own = grams(" ".join(blocks[i].text for i in c if blocks[i].kind != "heading"))
     if not own:
         return 0.0
@@ -1005,7 +995,8 @@ async def _matter_pass(blocks: list[SourceBlock], chunks: list[list[int]], outli
                 continue
             if m["kind"] == "summary":
                 earlier = [i for j in range(k) if j not in out for i in chunks[j]]
-                if repeated_share(blocks, c, earlier) < REPEAT_MIN:
+                cjk = re.search(r"[぀-ヿ㐀-䶿一-鿿]", " ".join(blocks[i].text for i in c))
+                if repeated_share(blocks, c, earlier) < (REPEAT_MIN if cjk else REPEAT_MIN_WORDS):
                     continue   # says something the range has not: it is teaching, whatever it is called
             if m["kind"] == "toc" and not toc_entries("\n".join(blocks[i].text for i in c)):
                 continue
@@ -1030,17 +1021,10 @@ def section_opens(blocks: list[SourceBlock], chunk: list[int]) -> bool:
     return any(blocks[i].kind == "heading" and SECTION_HEAD_RE.match(blocks[i].text) for i in chunk)
 
 
-def passage_chunk(ps: list[int], ids: list[list[str]], outline: list[ParagraphTopic]) -> UnitChunk:
-    """One 導讀段 of several paragraphs: their blocks, the first one's topic, every paragraph's aspect and summary."""
-    def joined(field: str, sep: str) -> str:
-        seen: list[str] = []
-        for c in ps:
-            v = getattr(outline[c], field).strip()
-            if v and v not in seen:
-                seen.append(v)
-        return sep.join(seen)
-    return UnitChunk(block_ids=[x for c in ps for x in ids[c]], topic=outline[ps[0]].topic.strip(),
-                     aspect=joined("aspect", "；"), summary=joined("summary", " "))
+def passage_chunk(c: int, ids: list[list[str]], outline: list[ParagraphTopic]) -> UnitChunk:
+    """One 導讀段, one paragraph: its blocks and its outline line."""
+    o = outline[c]
+    return UnitChunk(block_ids=ids[c], topic=o.topic.strip(), aspect=o.aspect.strip(), summary=o.summary.strip())
 
 
 async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_windows: dict, on_window) -> SegmentationPlan:
@@ -1063,6 +1047,7 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
     ids = [[blocks[i].block_id for i in c] for c in chunks]
     outline = await outline_chunks(blocks, chunks, deps, done_windows, on_window, notes)
     skip = await matter_marks(blocks, chunks, outline, deps, done_windows, on_window, notes)
+    skip |= {k: "exercise" for k, c in enumerate(chunks) if EXERCISE_RE.match(blocks[c[0]].text)}
     if len(skip) == len(chunks):   # a range that would leave nothing to read: keep it all
         notes.append("所有區塊都被判斷為不需要導讀，改為全部保留")
         skip = {}
@@ -1091,13 +1076,11 @@ async def plan_by_outline(blocks: list[SourceBlock], deps: PlannerDeps, done_win
     units = []
     for k, u in enumerate(units_k):
         g = groups[k]
-        passages = await passage_groups(blocks, chunks, u, outline[u[0]].topic.strip(), deps, done_windows, on_window,
-                                        notes, k + 1)
         units.append(SourceUnit(
             unit_id=f"unit-{stable_hash([blocks[g[0]].block_id, blocks[g[-1]].block_id], 10)}", ordinal=k,
             block_ids=[blocks[i].block_id for i in g], boundary_reason=outline[u[0]].topic.strip(),
             segmentation_version=SEGMENTATION_VERSION,
-            chunks=[passage_chunk(ps, ids, outline) for ps in passages]))
+            chunks=[passage_chunk(c, ids, outline) for c in u]))
     return SegmentationPlan(units=units, warnings=notes, planner="model", relations=glue_plan(blocks)[1],
                             windows=[{"window_id": "outline", "chunks": len(chunks), "notes": notes, "planner": "model"}],
                             skipped=sorted([{"block_ids": [blocks[i].block_id for i in r], "role": "toc", "topic": "目錄",

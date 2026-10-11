@@ -92,9 +92,9 @@ def _join_lines(lines: list[str]) -> str:
     return re.sub(r"[ \t]+", " ", out).strip()
 
 
-def _page_text_blocks(page, math=None) -> list[tuple[str, tuple[float, float, float, float], bool, float, list[str], list[str]]]:
-    """(joined text, bbox, at the top / bottom edge, dominant font size, its lines, the plain lines) of the page's text
-    blocks, in PyMuPDF's reading order. With `math` (app.pdfdoc.math.PageMath of the page, same flags) the text has
+def _page_text_blocks(page, math=None) -> list[tuple[str, tuple[float, float, float, float], bool, float, list[str], list[str], list]]:
+    """(joined text, bbox, at the top / bottom edge, dominant font size, its lines, the plain lines, the boxes of its
+    layout lines) of the page's text blocks, in PyMuPDF's reading order. With `math` (app.pdfdoc.math.PageMath of the page, same flags) the text has
     glyphs read through their names and formulas as $…$ / $$…$$; a block whose glyphs all went into a formula of
     another block is left out. The plain lines are PyMuPDF's own characters, for the decisions on the layout (margins,
     footnote marks, captions), the same with or without formulas."""
@@ -104,20 +104,22 @@ def _page_text_blocks(page, math=None) -> list[tuple[str, tuple[float, float, fl
     out = []
     if math is None:
         sizes: dict[int, float] = {}
-        for b in page.get_text("dict", flags=pymupdf.TEXT_DEHYPHENATE)["blocks"]:
+        boxes: dict[int, list] = {}
+        for b in page.get_text("dict", flags=pymupdf.TEXT_DEHYPHENATE | pymupdf.TEXT_MEDIABOX_CLIP)["blocks"]:
+            boxes[b["number"]] = [tuple(ln["bbox"]) for ln in b.get("lines", [])]
             counts: dict[float, int] = {}
             for ln in b.get("lines", []):
                 for sp in ln["spans"]:
                     counts[round(sp["size"], 1)] = counts.get(round(sp["size"], 1), 0) + len(sp["text"].strip())
             if counts:
                 sizes[b["number"]] = max(counts, key=counts.get)
-        for x0, y0, x1, y1, text, number, kind in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE):
+        for x0, y0, x1, y1, text, number, kind in page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE | pymupdf.TEXT_MEDIABOX_CLIP):
             if kind != 0:   # block type: 0 text, 1 image
                 continue
             lines = [PUA_BULLET_RE.sub("• ", ln.strip()) for ln in text.split("\n") if ln.strip()]
             if lines:
                 out.append((_join_lines(lines), (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE),
-                            sizes.get(number, 0.0), lines, lines))
+                            sizes.get(number, 0.0), lines, lines, boxes.get(number, [])))
         return out
     for bi, b in enumerate(math.blocks):
         plain = [PUA_BULLET_RE.sub("• ", "".join(g.c for g in ln["glyphs"]).strip()) for ln in b["lines"]]
@@ -131,7 +133,8 @@ def _page_text_blocks(page, math=None) -> list[tuple[str, tuple[float, float, fl
                         counts[round(g.size, 1)] = counts.get(round(g.size, 1), 0) + 1
             x0, y0, x1, y1 = b["bbox"]
             out.append((_join_lines(lines), (x0, y0, x1, y1), y1 < height * MARGIN_EDGE or y0 > height * (1 - MARGIN_EDGE),
-                        max(counts, key=counts.get) if counts else 0.0, lines, plain))
+                        max(counts, key=counts.get) if counts else 0.0, lines, plain,
+                        [tuple(ln["bbox"]) for ln in b["lines"]]))
     return out
 
 
@@ -139,29 +142,187 @@ def _plain(block) -> str:
     return _join_lines(block[5])
 
 
+WHITE = 0.98   # a fill whose colour components are all above this is white: on a white page it draws nothing
+
+
+def _drawings(page, blocks) -> list[tuple[float, float, float, float]]:
+    """The page's vector drawings, each cluster of touching paths one rect. A path drawn around running text (the
+    shaded box of an example or a sidebar) frames the text rather than drawing a picture, and is left out: clustered
+    with it, a diagram inside the box would become one drawing as tall as the box. A white fill with no stroke (the
+    background an embedded figure brings along) draws nothing on the page and is left out too."""
+    text = [b[1] for b in blocks if len(_plain(b)) > 200]
+    paths = [d for d in page.get_drawings() if not any(_inside(t, tuple(d["rect"])) for t in text)
+             and not (d.get("color") is None and d.get("fill") and min(d["fill"]) > WHITE)]
+    return [tuple(r) for r in page.cluster_drawings(drawings=paths)] if paths else []
+
+
+PARA_GAP = 0.5      # a gap between two blocks under this many font sizes is the line spacing, not a paragraph break
+PARA_INDENT = 0.5   # a first line set in by more than this many font sizes opens a paragraph
+
+
+def _rejoin_paragraphs(blocks: list, body: float) -> list:
+    """The page's blocks with a paragraph PyMuPDF cut into two blocks put back together. A new paragraph shows in the
+    layout: its first line is set in, or space is left above it, and the paragraph before it ends on a short line.
+    A block with none of these, in the same type and column as the block before it, goes on with that paragraph,
+    however that block's last sentence ended ("…between agent and environment?" / "On what basis …")."""
+    out: list = []
+    for b in blocks:
+        a = out[-1] if out else None
+        if a and a[6] and b[6] and body and abs(a[3] - b[3]) < 0.3 and abs(b[3] - body) <= 0.1 * body \
+                and not b[5][0].startswith("•") and not FIGURE_CAPTION_RE.match(_plain(b)) \
+                and not a[0].startswith("$$") and not b[0].startswith("$$"):   # a display formula stands apart
+            size = b[3]
+            left = min(x[0] for x in a[6] + b[6])
+            right = max(x[2] for x in a[6] + b[6])
+            # the paragraph before has not ended on a short line: its last line runs from margin to margin (an end
+            # mark set alone at the right margin is no full line)
+            full = a[6][-1][0] - left < PARA_INDENT * size and a[6][-1][2] >= right - 2 * size
+            close = b[6][0][1] - a[6][-1][3] < PARA_GAP * size      # no space left above
+            flush = b[6][0][0] - left < PARA_INDENT * size           # no first-line indent
+            if full and close and flush and abs(a[1][0] - b[1][0]) < size:
+                out[-1] = (_join_lines([a[0], b[0]]), (min(a[1][0], b[1][0]), a[1][1], max(a[1][2], b[1][2]), b[1][3]),
+                           a[2], a[3], a[4] + b[4], a[5] + b[5], a[6] + b[6])
+                continue
+        out.append(b)
+    return out
+
+
+TABLE_MIN_ROWS = 3
+TABLE_MIN_COLS = 2
+RULE_THIN = 1.5   # a filled rect this thin is a rule, as a stroked line is
+
+
+def _ruled(paths: list[dict]) -> bool:
+    """Drawn with straight horizontal / vertical rules only: a table's rules (the three lines of a booktabs table),
+    never a diagram, whose circles, curves and slanted arrows are other strokes."""
+    def rule(item) -> bool:
+        if item[0] == "l":
+            return abs(item[1].x - item[2].x) < 0.5 or abs(item[1].y - item[2].y) < 0.5
+        return item[0] == "re" and min(item[1].width, item[1].height) < RULE_THIN
+    return bool(paths) and all(rule(it) for p in paths for it in p["items"])
+
+
+def _cell_text(glyphs: list) -> str:
+    """A table cell's text from its glyphs (app.pdfdoc.math): plain words as they are, a cell holding math as one
+    $…$ with its words as \\text{…} and lowered / raised runs as subscripts / superscripts (r_search, s′)."""
+    gs = sorted((g for g in glyphs if not g.space), key=lambda g: g.rect[0])
+    if not gs:
+        return ""
+    main, base = gs[0].size, gs[0].oy   # a cell's text starts on its baseline
+
+    def spaced(run: list) -> str:
+        s = ""
+        for a, b in zip([None] + run[:-1], run):
+            s += (" " if a is not None and b.rect[0] - a.rect[2] > 0.25 * b.size else "") + b.text
+        return s
+    if not any(g.math for g in gs):
+        return spaced(gs)
+    out, runs = "", []
+    for g in gs:
+        pos = "_" if g.oy > base + 0.15 * main else "^" if g.oy < base - 0.15 * main else ""
+        if runs and runs[-1][0] == pos and runs[-1][1] == g.math:
+            runs[-1][2].append(g)
+        else:
+            runs.append((pos, g.math, [g]))
+    for pos, is_math, run in runs:
+        tex = "".join(g.tex + (" " if g.tex.startswith("\\") else "") for g in run).strip() if is_math \
+            else (r"\text{" + spaced(run) + "}" if any(c.isalpha() for c in spaced(run)) else spaced(run))
+        if pos == "^" and tex == r"\prime":
+            out += "'"
+        elif pos:
+            out += pos + "{" + tex + "}"
+        else:
+            out += tex
+    return "$" + out + "$"
+
+
+def _ruled_tables(page, blocks, math) -> list[tuple[tuple[float, float, float, float], str]]:
+    """(region, Markdown table) of each table drawn with rules but no grid: PyMuPDF's line strategy needs the cell
+    walls, so such a table is read as words aligned in rows and columns inside its rules. Its cells set apart, its
+    text would run together (or be read as one formula), losing which value goes with which row."""
+    text = [b[1] for b in blocks if len(_plain(b)) > 200]
+    paths = [d for d in page.get_drawings() if not any(_inside(t, tuple(d["rect"])) for t in text)]
+    # one table's rules touch each other (column rules on a header rule) or, drawn apart (top, below the header,
+    # bottom), are as wide as each other; a rule alone (under a heading, above a footnote) is no table
+    rules = [tuple(p["rect"]) for p in paths if _ruled([p])]
+
+    def together(a, b) -> bool:
+        touch = min(a[2], b[2]) + 3 >= max(a[0], b[0]) and min(a[3], b[3]) + 3 >= max(a[1], b[1])
+        return touch or (abs(a[0] - b[0]) < 3 and abs(a[2] - b[2]) < 3 and a[2] - a[0] > 3 * RULE_THIN)
+    groups: list[list[tuple[float, float, float, float]]] = []
+    for r in rules:
+        near = [g for g in groups if any(together(r, q) for q in g)]
+        groups = [g for g in groups if g not in near] + [[r] + [q for g in near for q in g]]
+    out = []
+    for g in groups:
+        if len(g) < 2:
+            continue
+        r = (min(q[0] for q in g), min(q[1] for q in g), max(q[2] for q in g), max(q[3] for q in g))
+        if not any(_inside(b[1], r) for b in blocks):
+            continue
+        clip = (r[0] - 3, r[1] - 3, r[2] + 3, r[3] + 3)
+        try:
+            found = page.find_tables(clip=clip, vertical_strategy="text", horizontal_strategy="text").tables
+        except Exception:  # noqa: BLE001 — a table not read stays the text it was
+            continue
+        t = max(found, key=lambda t: t.row_count * t.col_count, default=None)
+        if t is None or t.row_count < TABLE_MIN_ROWS or t.col_count < TABLE_MIN_COLS:
+            continue
+        glyphs = [g for b in math.blocks for ln in b["lines"] for g in ln["glyphs"]] if math else None
+        # a glyph goes to the column it starts in: the cells found from words end at a word's start sometimes
+        lefts = [c.bbox[0] for c in t.columns] if hasattr(t, "columns") else [c[0] for c in t.rows[0].cells if c]
+        rows = []
+        for row, plain in zip(t.rows, t.extract()):
+            if glyphs is None:
+                cells = [" ".join((pl or "").split()) for pl in plain]
+            else:
+                y0, y1 = row.bbox[1], row.bbox[3]
+                mine = [g for g in glyphs if y0 - 1 <= (g.rect[1] + g.rect[3]) / 2 <= y1 + 1
+                        and clip[0] <= g.rect[0] and g.rect[2] <= clip[2]]
+                cols: list[list] = [[] for _ in lefts]
+                for g in mine:
+                    cx = (g.rect[0] + g.rect[2]) / 2
+                    cols[max([k for k, x in enumerate(lefts) if x - 1 <= cx] or [0])].append(g)
+                cells = [_cell_text(c) for c in cols]
+            if any(cells):
+                rows.append("| " + " | ".join(c.replace("|", r"\vert ") for c in cells) + " |")
+        if len(rows) >= TABLE_MIN_ROWS:
+            rows.insert(1, "|" + " --- |" * t.col_count)
+            out.append((r, "\n".join(rows)))
+    return out
+
+
 def _figure_regions(page, blocks) -> list[tuple[float, float, float, float]]:
     """Drawings and images that a figure caption ("Figure 3.1", "圖 2") sits right below or above: the figure's body,
     whose labels are part of the picture, not of the text. A table's lines are content and never count."""
-    rects = [tuple(r) for r in page.cluster_drawings()] + [tuple(im["bbox"]) for im in page.get_image_info()]
+    rects = _drawings(page, blocks) + [tuple(im["bbox"]) for im in page.get_image_info()]
     captions = [b[1] for b in blocks if FIGURE_CAPTION_RE.match(_plain(b))]
     out = []
+    parts: dict[int, list[tuple[float, float, float, float]]] = {}
     for r in rects:
         if r[3] - r[1] > FIGURE_MAX_HEIGHT * page.rect.height:
             continue
-        for c in captions:
+        for k, c in enumerate(captions):
             side = (r[1] - FIGURE_CAPTION_GAP <= c[1] and c[1] - r[3] <= FIGURE_CAPTION_GAP and c[1] >= r[3] - 2) or \
                    (c[3] <= r[1] + 2 and r[1] - c[3] <= FIGURE_CAPTION_GAP)
             if side and min(r[2], c[2]) > max(r[0], c[0]):
-                out.append(r)
+                # what lies between the drawing and its caption (panel labels "a) … b) …") is part of the figure
+                y0, y1 = (r[1], max(r[3], c[1])) if c[1] >= r[3] - 2 else (min(r[1], c[3]), r[3])
+                out.append((min(r[0], c[0]), y0, max(r[2], c[2]), y1))
+                parts.setdefault(k, []).append(out[-1])
                 break
+    # the panels of one figure, side by side over one caption, make one figure with what is set between them
+    out += [(min(p[0] for p in ps), min(p[1] for p in ps), max(p[2] for p in ps), max(p[3] for p in ps))
+            for ps in parts.values() if len(ps) > 1]
     return out
 
 
 def _drawing_labels(page, blocks) -> set[int]:
     """Blocks that are labels of a drawing with no caption next to it (a backup diagram in an exercise, a figure whose
-    caption is set inside its frame): a short, narrow block, not larger than the text, level with a vector drawing. Table cells are short
+    caption is set inside its frame): a short, narrow block, not larger than the text, level with a vector drawing or
+    right above or below it. Table cells are short
     and drawn around too, so blocks inside a table PyMuPDF finds are never labels."""
-    drawings = [tuple(r) for r in page.cluster_drawings() if r[3] - r[1] <= FIGURE_MAX_HEIGHT * page.rect.height]
+    drawings = [r for r in _drawings(page, blocks) if r[3] - r[1] <= FIGURE_MAX_HEIGHT * page.rect.height]
     if not drawings:
         return set()
     try:
@@ -176,11 +337,15 @@ def _drawing_labels(page, blocks) -> set[int]:
         x0, y0, x1, y1 = b[1]
         if len(_plain(b)) > LABEL_MAX_CHARS or x1 - x0 > LABEL_MAX_WIDTH * column or FIGURE_CAPTION_RE.match(_plain(b)):
             continue
-        if body and b[3] > 1.05 * body:   # set larger than the text: a heading in a decorated frame, not a label
+        # set larger than the text, in words: a heading in a decorated frame, not a label (a symbol in a math font
+        # may be set a little larger than the text and still be a label)
+        if body and b[3] > 1.05 * body and re.search(r"[^\W\d_]{3}", _plain(b)):
             continue
         if any(_inside(b[1], t) for t in tables):
             continue
-        if any(min(y1, r[3]) > max(y0, r[1]) for r in drawings):   # level with a drawing
+        near = body or b[3]   # a label over a loop or an arrow sits within a line of the drawing's edge
+        if any(min(y1, r[3]) > max(y0, r[1]) or
+               (min(y1 + near, r[3]) > max(y0 - near, r[1]) and min(x1, r[2]) > max(x0, r[0])) for r in drawings):
             out.add(i)
     return out
 
@@ -225,7 +390,7 @@ def pdf_page_math(doc, page, fonts=None):
     from .pdfdoc.math import FontNames, page_math, wants_math
     if not wants_math(doc, page.number):
         return None
-    return page_math(page, fonts or FontNames(doc), pymupdf.TEXT_DEHYPHENATE)
+    return page_math(page, fonts or FontNames(doc), pymupdf.TEXT_DEHYPHENATE | pymupdf.TEXT_MEDIABOX_CLIP)
 
 
 def pdf_running_margins(doc) -> frozenset[str]:
@@ -257,10 +422,18 @@ def pdf_page_paragraphs(page, margins: frozenset[str] = frozenset(), math=None) 
     body = _body_size(blocks)
     blocks = [b for b in blocks if _is_note(b, body) or not (b[2] and len(_plain(b)) <= 80 and (
         PAGE_MARGIN_RE.search(_plain(b)) or _margin_key(_plain(b)) in margins))]
+    tables = _ruled_tables(page, blocks, math)
     figures = _figure_regions(page, blocks)
     labels = _drawing_labels(page, blocks)
-    blocks = [b for i, b in enumerate(blocks) if i not in labels
+    blocks = [b for i, b in enumerate(blocks) if (i not in labels or any(_inside(b[1], r) for r, _ in tables))
               and (FIGURE_CAPTION_RE.match(_plain(b)) or not any(_inside(b[1], r) for r in figures))]
+    for r, table in tables:   # the table in place of the blocks its cells were read into
+        inside = [k for k, b in enumerate(blocks) if _inside(b[1], r)]
+        if not inside:
+            continue
+        blocks = blocks[:inside[0]] + [(table, r, False, body, table.split("\n"), table.split("\n"), [])] + \
+            [b for k, b in enumerate(blocks) if k > inside[0] and k not in inside]
+    blocks = _rejoin_paragraphs(blocks, body)
     height = page.rect.height or 1
     n = len(blocks)
     while n and body and blocks[n - 1][3] <= FOOTNOTE_SIZE * body and blocks[n - 1][1][1] > FOOTNOTE_ZONE * height:
@@ -270,7 +443,7 @@ def pdf_page_paragraphs(page, margins: frozenset[str] = frozenset(), math=None) 
     out: list[tuple[str, tuple[float, float, float, float]]] = [(b[0], b[1]) for b in blocks[:n]]
     notes: list[list[tuple[str, str]]] = []   # per note: (plain line, text line)
     boxes: list[tuple[float, float, float, float]] = []
-    for _, bbox, _, _, lines, plain in blocks[n:]:
+    for _, bbox, _, _, lines, plain, _ in blocks[n:]:
         pairs = list(zip(plain, lines)) if len(plain) == len(lines) else [(_join_lines(plain), _join_lines(lines))]
         for k, (pl, line) in enumerate(pairs):
             # a mark opens a note at a block's start, or on a line after a closed sentence (two notes set in one block)

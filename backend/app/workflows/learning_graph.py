@@ -257,15 +257,18 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
                                    attempt=attempt, learning=learning_snapshot(r, idx, assume_read),
                                    source_kind="pdf" if content["source"]["unit"] == "page" else "md",
                                    depends_on_prev=bool(q.get("depends_on_prev")),
-                                   symbol_evidence=symbol_evidence(r, q), language=output(r)["code"])
+                                   symbol_evidence=symbol_evidence(r, q), language=output(r)["code"],
+                                   cited=ra.cited_formulas(q["text"], [x["text"] for i, x in enumerate(content["quotes"])
+                                                                       if i != idx]))
 
     def contract_of(r: dict | None) -> tuple:
         """What a guide is written for besides its source: the reading depth, goal, the reader's background and the
-        language it is written in."""
+        language it is written in; and the prompts it was written with (a guide written before the prompts changed is
+        written again, not passed on)."""
         m = meta(r) if r else {}
         tc = m.get("task_contract") or {}
         return (tc.get("depth", "close"), tc.get("goal", ""), tc.get("reader_background", ""),
-                (m.get("output_language") or {}).get("code", "zh"))
+                (m.get("output_language") or {}).get("code", "zh"), (m.get("prompt_bundle") or {}).get("hash"))
 
     def reusable_guide(sid: str, q: dict) -> dict | None:
         """An accepted guide of the same unit written by another reading of this material (its study, or an earlier
@@ -275,8 +278,11 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         want = contract_of(row(sid))
         for g in repo.accepted_guides(q["unit_id"], stable_hash([q["unit_id"], q["text"], q["block_ids"]]),
                                       ra.READING_WORKFLOW_VERSION, exclude_session=sid):
-            if any(b.get("status") != "accepted" for b in (g.get("payload") or {}).get("blocks") or []):
+            blocks = (g.get("payload") or {}).get("blocks") or []
+            if any(b.get("status") != "accepted" for b in blocks):
                 continue   # a guide with a part that did not pass is written again, not passed on as it is
+            if any(b.get("gate_rules") != gates.GATE_RULES_VERSION for b in blocks):
+                continue   # checked and corrected under other rules than the program's now
             other = deps.db.get_session(g["session_id"]) if g.get("session_id") else None
             if other and contract_of(other) == want:
                 return g

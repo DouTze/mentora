@@ -19,9 +19,10 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from statistics import median
 from pathlib import Path
 
-EVIDENCE_VERSION = "pdf-evidence-v1"
+EVIDENCE_VERSION = "pdf-evidence-v2"   # v2: paragraph layout (first-line indent, space above, full last line)
 MATH_FONT_RE = re.compile(r"CM(MI|SY|EX|BX|MIB|BSY)|MSBM|MSAM|Symbol|Math|STIX|Euler|EUFM|EUSM|rsfs|mathptmx|TeXGyre.*Math", re.I)
 CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.|Table|圖|表)\s*[\dA-Z一二三四五六七八九十.\-:：]", re.I)
 MAX_SPANS = 300
@@ -35,6 +36,8 @@ FONT_STYLES = [(re.compile(p, re.I), style) for p, style in (
     (r"^(EUFM|EUFB)", "fraktur"),
 )]
 LETTER_RUN_RE = re.compile(r"[A-Za-z]+")
+FULL_LINE = 0.8   # a line this share of the page's widest line or wider is a full line of a text column
+INDENT = 0.5      # a first line starting this many line heights right of the column is indented
 
 
 def font_style(font: str) -> str | None:
@@ -74,6 +77,28 @@ def _is_bullet_span(line_spans: list[dict], k: int) -> bool:
     return bool(t) and all("" <= ch <= "" for ch in t) and not "".join(s["text"] for s in line_spans[:k]).strip()
 
 
+def _layout(lines: list[tuple[float, float, float, float]], bbox) -> tuple[bool | None, bool | None, float | None]:
+    """(first line indented from the text column, last line running to the column's right edge, space above the
+    paragraph in line heights) of the paragraph in `bbox`, from the page's text lines; None when the page shows no
+    column to measure against (the space: nothing above it in its column)."""
+    own = sorted((ln for ln in lines if bbox[0] - 1 <= (ln[0] + ln[2]) / 2 <= bbox[2] + 1
+                  and bbox[1] - 1 <= (ln[1] + ln[3]) / 2 <= bbox[3] + 1), key=lambda ln: (ln[1], ln[0]))
+    if not own:
+        return None, None, None
+    widest = max(ln[2] - ln[0] for ln in lines)
+    # the column: full lines that share the paragraph's horizontal extent (each column of a two-column page its own)
+    full = [ln for ln in lines if ln[2] - ln[0] >= FULL_LINE * widest and min(ln[2], bbox[2]) - max(ln[0], bbox[0]) > 0]
+    if len(full) < 2:
+        return None, None, None
+    left, right = median(ln[0] for ln in full), median(ln[2] for ln in full)
+    height = median(ln[3] - ln[1] for ln in full)
+    top = own[0][1]
+    above = [ln[3] for ln in lines if ln not in own and ln[3] <= top + 0.5 * height
+             and min(ln[2], bbox[2]) - max(ln[0], bbox[0]) > 0]
+    space = round(max(0.0, top - max(above)) / height, 2) if above else None
+    return own[0][0] - left > INDENT * height, right - own[-1][2] < height, space
+
+
 def page_evidence(page, margins: frozenset[str] = frozenset(), math=None) -> list[dict]:
     """Evidence of every paragraph of one page, in the importer's paragraph order (`math`: the page's formulas when
     the material's text was made with them, materials.TEXT_VERSION 2)."""
@@ -83,6 +108,8 @@ def page_evidence(page, margins: frozenset[str] = frozenset(), math=None) -> lis
     spans = [s for b in page.get_text("dict")["blocks"] if b.get("type") == 0
              for ln in b["lines"] for k, s in enumerate(ln["spans"]) if s["text"].strip() and not _is_bullet_span(ln["spans"], k)]
     images = [tuple(round(v, 1) for v in im["bbox"]) for im in page.get_image_info()]
+    lines = [tuple(ln["bbox"]) for b in page.get_text("dict")["blocks"] if b.get("type") == 0 for ln in b["lines"]
+             if "".join(s["text"] for s in ln["spans"]).strip()]
     out = []
     for k, (text, bbox) in enumerate(paras, 1):
         own = [s for s in spans if _overlap(s["bbox"], bbox) > 0.5]
@@ -91,6 +118,7 @@ def page_evidence(page, margins: frozenset[str] = frozenset(), math=None) -> lis
         sup = sorted({s["text"].strip() for s in own if s["flags"] & 1})
         fonts = sorted({s["font"] for s in own})
         near = [im for im in images if abs(im[1] - bbox[3]) < 60 or abs(bbox[1] - im[3]) < 60 or _overlap(bbox, im) > 0]
+        indent, full_end, space = _layout(lines, bbox)
         out.append({
             "version": EVIDENCE_VERSION, "page": page.number + 1, "para": k, "bbox": [round(v, 1) for v in bbox],
             "spans": [{"t": s["text"], "font": s["font"], "flags": s["flags"], "size": round(s["size"], 1)} for s in own][:MAX_SPANS],
@@ -98,6 +126,7 @@ def page_evidence(page, margins: frozenset[str] = frozenset(), math=None) -> lis
             "bold_tokens": bold, "italic_tokens": italic, "superscripts": sup,
             "lost_glyphs": any(_lost(s["text"]) for s in own) or _lost(text),
             "images_near": near, "caption": bool(near and CAPTION_RE.match(text)),
+            "indent": indent, "full_end": full_end, "space_above": space,
         })
     return out
 
@@ -122,6 +151,7 @@ def merge_evidence(evs: list[dict]) -> dict:
         "lost_glyphs": any(e["lost_glyphs"] for e in evs),
         "images_near": [list(x) for x in dict.fromkeys(tuple(im) for e in evs for im in e["images_near"])],
         "caption": any(e["caption"] for e in evs),
+        "indent": evs[0].get("indent"), "space_above": evs[0].get("space_above"), "full_end": evs[-1].get("full_end"),
     }
 
 

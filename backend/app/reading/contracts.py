@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from ..llm.runtime import stable_hash
 
-CONTRACT_VERSION = "reading-contracts-v2"
+CONTRACT_VERSION = "reading-contracts-v3"
 
 # -- T: task contract and learning state ------------------------------------------------------
 
@@ -84,17 +84,21 @@ class PointsReview(BaseModel):
     points: list[PointVerdict]
 
 
-class Conflict(BaseModel):
-    guide_quote: str                          # the handout passage (verbatim)
-    source_quote: str                         # the textbook passage it contradicts (verbatim)
-    why: str = ""
-    both_true: Literal["yes", "no"]           # can the two passages both be true? "yes" = not a contradiction
+class ParagraphCheck(BaseModel):
+    """One handout paragraph against the textbook: what it says, the textbook sentence on the same matter (verbatim,
+    "" if none), what that says, and how the two relate."""
+    id: str                                   # P1, P2 … of the paragraph listing
+    guide_says: str = ""
+    source_quote: str = ""
+    source_says: str = ""
+    relation: Literal["consistent", "addition", "conflict"]
 
 
-class ConflictsReview(BaseModel):
-    """Review B: where does the handout say something that cannot be true if the textbook is? Rewording, additions
-    and simplifications can both be true with the textbook, so they are not conflicts."""
-    conflicts: list[Conflict] = Field(default_factory=list)
+class ParagraphsReview(BaseModel):
+    """Review B: every paragraph of the handout checked against the textbook, each given a relation: the same claim
+    (consistent), a claim the textbook does not make (addition: background, an example), or one that cannot be true
+    together with the textbook sentence (conflict). A verdict on every paragraph, not a search for faults."""
+    paragraphs: list[ParagraphCheck] = Field(default_factory=list)
 
 
 class Edit(BaseModel):

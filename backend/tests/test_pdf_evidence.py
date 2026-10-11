@@ -177,3 +177,83 @@ def test_labels_of_a_drawing_without_a_caption_are_dropped_but_a_larger_heading_
     page.insert_textbox((50, 360, 550, 440), "Body text continues after the heading" + " and keeps going" * 10 + ".", fontsize=10)
     texts = [t for t, _ in pdf_page_paragraphs(page)]
     assert "v(s)" not in texts and "4.1 Evaluation" in texts and len(texts) == 3
+
+
+def test_a_diagram_inside_a_shaded_example_box_still_has_its_labels_dropped():
+    """An example set on a shaded box: the box frames the text, it is not part of the diagram drawn inside it, whose
+    labels (on the drawing, or just above a loop arrow) stay out of the text."""
+    import pymupdf
+    from app.materials import pdf_page_paragraphs
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    page.draw_rect((40, 40, 560, 760), color=None, fill=(0.95, 0.95, 0.95))
+    page.insert_textbox((50, 50, 550, 200), "Example 3.3 A mobile robot collects empty cans" + " in an office" * 12 + ".",
+                        fontsize=10)
+    page.draw_circle((200, 300), 20, color=(0, 0, 0))
+    page.draw_circle((400, 300), 20, color=(0, 0, 0))
+    page.draw_line((220, 300), (380, 300), color=(0, 0, 0))
+    page.insert_text((290, 295), "wait", fontsize=7)
+    page.insert_text((190, 276), "1, r", fontsize=7)                  # just above the circle, over no stroke
+    page.insert_textbox((50, 360, 550, 440), "Note that there is a row in the table" + " for each state" * 10 + ".", fontsize=10)
+    texts = [t for t, _ in pdf_page_paragraphs(page)]
+    assert texts[0].startswith("Example 3.3") and texts[-1].startswith("Note that") and len(texts) == 2
+
+
+def test_a_table_drawn_with_rules_only_is_read_as_a_table():
+    """A booktabs table has three horizontal rules and no cell walls: its cells are read from the words aligned in
+    rows and columns, so each value stays in its row instead of the rows running together."""
+    import pymupdf
+    from app.materials import pdf_page_paragraphs
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_textbox((50, 50, 550, 150), "The dynamics are given in the table below" + " for every state" * 10 + ".",
+                        fontsize=10)
+    for y in (180, 196, 260):
+        page.draw_line((100, y), (400, y), color=(0, 0, 0))
+    rows = [("state", "action", "next", "prob"), ("high", "search", "high", "0.7"), ("high", "search", "low", "0.3"),
+            ("low", "wait", "low", "1")]
+    for k, row in enumerate(rows):
+        for j, cell in enumerate(row):
+            page.insert_text((110 + 75 * j, 192 + 18 * k + (4 if k else 0)), cell, fontsize=8)
+    page.insert_textbox((50, 290, 550, 380), "Note that there is a row for each combination" + " of states" * 10 + ".",
+                        fontsize=10)
+    texts = [t for t, _ in pdf_page_paragraphs(page)]
+    table = next(t for t in texts if t.startswith("|"))
+    assert table.split("\n")[0] == "| state | action | next | prob |" and "| high | search | low | 0.3 |" in table
+    assert len(texts) == 3
+
+
+
+def test_a_paragraph_cut_into_two_blocks_is_rejoined_but_paragraphs_set_apart_stay_apart():
+    """PyMuPDF sometimes cuts a paragraph into two blocks; with no indent, no space above and a full last line before
+    it, the second block goes on with the paragraph whatever its last sentence ended with. Space left above, an
+    indented first line, or a last line ending short (an end mark alone at the right margin) opens a new one."""
+    from app.materials import _rejoin_paragraphs
+
+    def block(text, lines):   # lines: (x0, y0, x1, y1) of each layout line
+        return (text, (min(x[0] for x in lines), lines[0][1], max(x[2] for x in lines), lines[-1][3]), False, 10.0,
+                [text], [text], lines)
+    a = block("What is the right place to draw the line?", [(61, 500, 445, 510), (61, 512, 444, 522)])
+    b = block("On what basis is one preferred?", [(61, 524, 443, 534), (61, 536, 300, 546)])
+    spaced = block("Exercise 3.4 Give a table.", [(61, 556, 443, 566)])
+    indented = block("A new paragraph starts here.", [(72, 524, 443, 534)])
+    ended = block("Exercise 3.2 Any exceptions?", [(61, 500, 300, 510), (435, 500, 443, 512)])
+    out = _rejoin_paragraphs([a, b, spaced], 10.0)
+    assert [x[0] for x in out] == ["What is the right place to draw the line? On what basis is one preferred?",
+                                   "Exercise 3.4 Give a table."]
+    assert len(_rejoin_paragraphs([a, indented], 10.0)) == 2
+    assert len(_rejoin_paragraphs([ended, b], 10.0)) == 2
+
+
+def test_paragraph_layout_says_indent_full_last_line_and_space_above():
+    """Measured against the page's text column: a first line set in, a last line running to the right edge, the space
+    left above the paragraph in line heights."""
+    from app.reading.pdf_evidence import _layout
+    lines = [(61, 100, 443, 110), (61, 112, 443, 122), (61, 124, 300, 134),      # a paragraph ending short
+             (72, 136, 443, 146), (61, 148, 443, 158),                           # indented, ends on a full line
+             (61, 175, 443, 185), (61, 187, 200, 197)]                           # flush, space left above
+    assert _layout(lines, (61, 100, 443, 134)) == (False, False, None)
+    indent, full, space = _layout(lines, (61, 136, 443, 158))
+    assert (indent, full) == (True, True) and space < 0.5
+    indent, full, space = _layout(lines, (61, 175, 443, 197))
+    assert (indent, full) == (False, False) and space > 1.5

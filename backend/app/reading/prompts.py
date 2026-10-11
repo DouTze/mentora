@@ -5,8 +5,8 @@ from __future__ import annotations
 from .. import config
 from ..llm.runtime import stable_hash
 
-BUNDLE_VERSION = "reading-bundle-v4"
-PROMPT_IDS = ("segment_blocks", "segment_split", "segment_topic_summary", "segment_outline", "segment_matter", "segment_boundaries", "segment_passages", "segment_topic", "reading_topic",
+BUNDLE_VERSION = "reading-bundle-v8"
+PROMPT_IDS = ("segment_blocks", "segment_split", "segment_topic_summary", "segment_outline", "segment_matter", "segment_boundaries", "segment_topic", "reading_topic",
               "reading_symbols", "reading_intent", "reading_body", "reading_review_points", "reading_review_conflicts", "reading_fix",
               "reading_notes", "reading_notes_revise", "reading_notes_audit", "quiz_generate",
               "quiz_audit", "ask", "compact", "generate", "assess")

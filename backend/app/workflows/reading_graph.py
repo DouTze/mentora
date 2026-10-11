@@ -39,7 +39,7 @@ from ..llm.tasks import TaskContext, TaskError, run_structured
 from ..reading import agent as ra
 from ..reading import gates
 from ..reading import pdf_evidence
-from ..reading.contracts import (CONTRACT_VERSION, ConflictsReview, HandoutDraft, HandoutFix, PointsReview,
+from ..reading.contracts import (CONTRACT_VERSION, HandoutDraft, HandoutFix, ParagraphsReview, PointsReview,
                                  SymbolTranscription, TeachingIntent)
 from . import faults
 
@@ -158,10 +158,14 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         if not ev or ev.get("status") != "confirmed":
             return "（這一段沒有經過確認的符號取證；公式照課本的寫法）"
         tr = ev.get("transcription") or {"formulas": [], "symbols": []}
+        # only what changes how a symbol is written: an italic or upright letter is how math is written anyway, and
+        # a list of every letter with its style is what a small model copies into the handout
+        styled = [x["latex"] for x in tr["symbols"] if x["style"] not in ("italic", "upright", "other")]
+        if not tr["formulas"] and not styled:
+            return "（這一段的符號都是一般寫法；公式照課本的寫法）"
         lines = ["依原書版面的視覺取證（以此為準，不要依文字層或常識改寫）："]
         lines += [f"- 公式：${f}$" for f in tr["formulas"]]
-        lines += [f"- {x['symbol']}：{x['latex']}（{x['style']}{'' if x['script'] == 'none' else '，' + x['script']}）"
-                  for x in tr["symbols"]]
+        lines += [f"- 符號寫成 ${s}$" for s in dict.fromkeys(styled)]
         return "\n".join(lines)
 
     def overview_of(t: ra.ReadingTaskInput) -> str:
@@ -262,7 +266,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                      meta={"step": "symbols", "quote_text": t.text, "regions": ev["regions"]},
                                      json_schema=gates.symbols_schema(), min_max_tokens=1024,
                                      min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
-        tr, fixes, conflicts = gates.fix_by_fonts(tr, letter_fonts)
+        tr, fixes, conflicts = gates.fix_by_fonts(gates.anchored(tr, t.text), letter_fonts)
         problems = conflicts + gates.transcription_against_clues(tr, clues)
         if problems:
             reason = "PDF 符號的視覺判讀與字型線索不一致：" + "；".join(problems)
@@ -298,14 +302,15 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
         tmpl = prompts(state)["reading_body"]   # a session pinned to an older bundle asks for points and position
         keys = tuple(k for k in ("quote_text", "role", "teaches", "points", "symbol_evidence", "topic_context",
                                  "prev_points", "qa_context") if "{{" + k + "}}" in tmpl)
-        msg, rec = await prompt_for(ctx, state, "draft", "reading_body", keys, {}, out_tokens)
+        msg, rec = await prompt_for(ctx, state, "draft", "reading_body", keys,
+                                    {"length": gates.handout_length(t.text, t.language)}, out_tokens)
         d, _ = await run_structured(ctx, [HumanMessage(content=msg)], HandoutDraft, task="guide", node="draft",
                                     prose_fields=("guide",), json_schema=gates.handout_schema(t.text),
                                     prompt_version=t.prompt_bundle_hash, packet=rec, source_ids=t.block_ids,
                                     meta={"step": "draft", "quote_text": t.text, "points": points_of(state, t), "language": t.language,
                                           "evidence_formulas": gates.required_formulas(t, state.get("symbol_evidence"))},
                                     min_max_tokens=out_tokens, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
-        return {"draft": d.model_dump(), "guide": d.guide.strip()}
+        return {"draft": d.model_dump(), "guide": gates.tidy_handout(d.guide.strip(), t.text)}
 
     def symbol_note(state) -> list[ra.Finding]:
         ev = state.get("symbol_evidence") or {}
@@ -344,15 +349,29 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
             found += [f for f in prior if f.check == "conflicts" and gates._locate(guide, f.draft_excerpt)
                       and not any(ra.norm_text(f.draft_excerpt) in p for p in rewritten)]
         passages = guide if not recheck else "\n\n".join(state.get("changed") or [])
-        if passages.strip():
-            msg, rec = await prompt_for(ctx, state, "review", "reading_review_conflicts", ("quote_text", "symbol_evidence"),
-                                        {"guide": passages}, 1024)
-            b, _ = await run_structured(ctx, [HumanMessage(content=msg)], ConflictsReview, task="guide",
-                                        node="review_conflicts", prompt_version=t.prompt_bundle_hash, packet=rec,
-                                        source_ids=t.block_ids, json_schema=gates.conflicts_schema(),
-                                        meta={"step": "review_conflicts", "quote_text": t.text, "guide": passages},
-                                        min_max_tokens=1024, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
-            found += gates.conflict_findings(b, guide, t.text)
+        paras = gates.review_paragraphs(passages)
+        if paras:
+            msg, rec = await prompt_for(ctx, state, "review", "reading_review_conflicts", ("quote_text",),
+                                        {"paragraphs": gates.paragraphs_text(paras),
+                                         "output_template": gates.paragraphs_template(len(paras))}, 2048)
+            ids = [f"P{k}" for k in range(1, len(paras) + 1)]
+
+            def every_paragraph(ans: ParagraphsReview) -> None:
+                from ..llm.tasks import OutputInvalid
+                if sorted(c.id for c in ans.paragraphs) != sorted(ids):
+                    raise OutputInvalid(f"paragraphs 必須依序回報 {', '.join(ids)}，每段一筆")
+
+            reviews = []
+            for run in range(gates.REVIEW_B_RUNS):   # read twice: a conflict either reading finds is corrected
+                b, _ = await run_structured(ctx, [HumanMessage(content=msg)], ParagraphsReview, task="guide",
+                                            node="review_conflicts", prompt_version=t.prompt_bundle_hash, packet=rec,
+                                            source_ids=t.block_ids, json_schema=gates.paragraphs_schema(len(paras)),
+                                            check=every_paragraph,
+                                            meta={"step": "review_conflicts", "quote_text": t.text, "guide": passages,
+                                                  "paragraphs": len(paras), "run": run + 1},
+                                            min_max_tokens=2048, min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
+                reviews.append(b)
+            found += gates.paragraph_findings(reviews, paras, t.text)
         blocking = [f for f in found if f.severity == "major" and f.status == "confirmed"]
         if not blocking:
             decision = "accept"
@@ -371,7 +390,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                     if f["severity"] == "major" and f["status"] == "confirmed"]
         problems = gates.problems_text(blocking)
         if state.get("refix"):   # the last correction's edits pointed at passages the handout does not have
-            problems += ("\n\n上一次的修正沒有套用，因為 old 在講義中找不到：" + "；".join(state["refix"])
+            problems += ("\n\n上一次的修正沒有套用：" + "；".join(state["refix"])
                          + "。old 要從上面「目前的講義」一字不改地複製，只複製要換掉的那一兩句。")
         msg, rec = await prompt_for(ctx, state, "fix", "reading_fix", ("quote_text", "symbol_evidence"),
                                     {"guide": guide, "problems": problems}, gates.handout_tokens(t.text))
@@ -382,6 +401,7 @@ def build_reading_graph(deps: ReadingDeps, checkpointer=None):
                                           "problems": [f.model_dump() for f in blocking]},
                                     min_max_tokens=gates.handout_tokens(t.text), min_context_tokens=ra.GUIDE_CONTEXT_TOKENS)
         new, applied, skipped = gates.apply_edits(guide, x.edits)
+        new = gates.tidy_handout(new, t.text)
         fixes = int(state.get("fixes") or 0) + 1
         # no edit could be applied: another review would see the same handout, so the next correction is asked
         # again, told which passages were not found; with the corrections spent it settles. A passage written back

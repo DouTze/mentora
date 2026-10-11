@@ -942,6 +942,9 @@ button.block { width: 100%; padding: 9px 14px; }
 .reader-ask textarea::placeholder { color: var(--muted); opacity: .85; }
 .reader-ask-bar { display: flex; align-items: center; gap: 6px; }
 .reader-ask-bar .spacer { flex: 1; }
+.reader-range { display: flex; align-items: center; gap: 6px; padding: 6px 2px; flex-wrap: wrap; }
+.reader-range input { width: 4.5em; }
+.reader-range .spacer { flex: 1; }
 .reader-at { font: 12px var(--mono); color: var(--muted); }
 .reader-chip { padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; background: transparent; font-size: var(--t-meta); color: var(--muted); }
 .reader-chip:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); background: transparent; }

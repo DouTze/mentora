@@ -41,6 +41,9 @@ class ReadingTaskInput(BaseModel):
     # "summary"} …], "index": this 區塊}. The 區塊's summary is what its handout must teach; the rest is scope
     topic: dict | None = None
     language: str = "zh"                         # the session's output language: "zh" (繁體中文) or "src" (the source's own)
+    # display formulas ("$$…$$") set elsewhere in the reading that this passage names by their number (an exercise
+    # "prove the second equality in (3.10)"): shown with the passage so nothing about them is made up
+    cited: list[str] = Field(default_factory=list)
 
     @property
     def source_hash(self) -> str:
@@ -118,7 +121,25 @@ def _norm_math(s: str) -> str:
     """Cosmetic KaTeX differences only: spacing commands, \\left/\\right, \\dfrac/\\tfrac, braces around one token."""
     t = re.sub(r"\\[,;:!]|\\(?:left|right|displaystyle)\b|\s+", "", s or "")
     t = re.sub(r"\\[dt]frac", r"\\frac", t)
-    return re.sub(r"([_^])\{(\\?[A-Za-z0-9])\}", r"\1\2", t)
+    return re.sub(r"([_^])\{(\\[A-Za-z]+|[A-Za-z0-9])\}", r"\1\2", t)
+
+
+EQ_REF_RE = re.compile(r"\((\d+(?:\.\d+)*[a-z]?)\)")   # an equation named by its number in the text: "(3.10)"
+EQ_TAG_RE = re.compile(r"\\tag\{([^{}]*)\}")
+CITED_MAX = 3
+
+
+def cited_formulas(text: str, others: list[str]) -> list[str]:
+    """The display formulas ("$$…$$", from the texts `others`) whose equation numbers `text` names but does not set
+    itself, in the order it names them."""
+    own = set(EQ_TAG_RE.findall(text or ""))
+    named = [n for n in EQ_REF_RE.findall(re.sub(r"\$\$.+?\$\$", " ", text or "", flags=re.S)) if n not in own]
+    pool: dict[str, str] = {}
+    for o in others:
+        for d in re.findall(r"\$\$.+?\$\$", o or "", re.S):
+            for n in EQ_TAG_RE.findall(d):
+                pool.setdefault(n, d)
+    return list(dict.fromkeys(pool[n] for n in named if n in pool))[:CITED_MAX]
 
 
 def source_formulas(text: str) -> tuple[list[str], list[str]]:
@@ -141,6 +162,8 @@ def qa_text(qa: list[dict]) -> str:
 def task_fields(t: ReadingTaskInput) -> dict[str, str]:
     heading = t.heading or "（無）"
     text = t.text + ("\n\n（注意：這一段含有圖，但圖片內容沒有被抽取出來，只能依文字說明。）" if t.has_figure else "")
+    if t.cited:
+        text += "\n\n（這一段提到的公式寫在課文別處，原式如下，只供對照：）\n" + "\n".join(t.cited)
     return {"material_title": t.material_title, "range_label": t.range_label, "position": f"{t.index + 1}/{t.total}",
             "quote_label": t.label, "heading": heading, "quote_text": text, "unit_id": t.unit_id,
             "prev_points": "\n".join(f"- {p}" for p in t.prev_points) or "（這是第一段）",

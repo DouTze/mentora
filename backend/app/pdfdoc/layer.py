@@ -76,7 +76,7 @@ def page_math(doc, page) -> list[dict]:
     from .math import FontNames, page_math as read, wants_math
     if not wants_math(doc, page.number):
         return []
-    pm = read(page, FontNames(doc), pymupdf.TEXT_DEHYPHENATE)
+    pm = read(page, FontNames(doc), pymupdf.TEXT_DEHYPHENATE | pymupdf.TEXT_MEDIABOX_CLIP)
     return [{"rect": view_rect(page, r.rect), "latex": r.latex, "display": r.display, "tag": r.tag, "tex": r.markup()}
             for r in pm.regions]
 

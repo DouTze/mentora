@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .agent import ReadingTaskInput
+from .agent import ReadingTaskInput, cited_formulas
 
 TOPIC_GUIDE_VERSION = "topic-blocks-v2"
 
@@ -45,10 +45,12 @@ def block_task(task: ReadingTaskInput, q: dict, k: int, overview: dict, evidence
     chunks = chunks_of(q)
     ch = chunks[k]
     prev = chunks[k - 1] if k > 0 else None
+    others = [c["text"] for j, c in enumerate(chunks) if j != k] + task.cited
     return task.model_copy(update={
         "unit_id": f"{task.unit_id}-b{k + 1}", "text": ch["text"], "block_ids": ch["block_ids"],
         "label": f"{task.label}・第 {k + 1}/{len(chunks)} 塊", "heading": task.heading if k == 0 else ch.get("heading"),
         "depends_on_prev": task.depends_on_prev if k == 0 else False, "symbol_evidence": evidence,
+        "cited": cited_formulas(ch["text"], others),
         "topic": {"unit_id": task.unit_id, "index": k, "summary": overview.get("summary") or "",
                   "chunks": [{"topic": c.get("topic", ""), "aspect": c.get("aspect", ""), "summary": c.get("summary", "")}
                              for c in chunks],

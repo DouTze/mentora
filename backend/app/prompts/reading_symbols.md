@@ -17,5 +17,5 @@
 - unreadable：看不清楚、無法確定外觀的符號或式子；全部都能確定就給空陣列。不要猜。
 
 ## 輸出
-只輸出一個 JSON 物件，不要加任何說明文字：
-{"formulas":["\\mathbf{w} \\leftarrow \\mathbf{w} - \\eta \\nabla L"],"symbols":[{"symbol":"w","latex":"\\mathbf{w}","style":"bold","script":"none"}],"unreadable":[]}
+只輸出一個 JSON 物件，不要加任何說明文字。格式如下（引號裡的中文說明換成你從圖中讀到的內容；圖中沒有公式或符號就給空陣列）：
+{"formulas":["圖中第一個公式的 KaTeX","…"],"symbols":[{"symbol":"這個符號是哪個字母或符號","latex":"它的 KaTeX","style":"bold、italic、upright… 之一","script":"none、superscript、subscript 之一"}],"unreadable":[]}

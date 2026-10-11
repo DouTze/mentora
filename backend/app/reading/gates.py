@@ -18,6 +18,7 @@ Nothing here decides that two sentences mean the same thing; the program decides
 whether the evidence offered is real."""
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 
@@ -150,6 +151,33 @@ def fix_by_fonts(tr, letter_fonts: dict[str, list[str]]):
             list(dict.fromkeys(conflicts)))
 
 
+LETTER_RE = re.compile(r"(?<![\\A-Za-z])[A-Za-z](?![A-Za-z])")
+TEXT_ARG_RE = re.compile(r"\\(?:text|mathrm|operatorname)\s*\{[^{}]*\}")
+
+
+def _signs(text: str) -> tuple[set[str], set[str]]:
+    """(single Latin letters, other signs as LaTeX commands) written in `text`: inside its $…$ or as prose
+    characters (η, ∇)."""
+    from ..pdfdoc.math import uni_tex
+    t = TEXT_ARG_RE.sub(" ", text or "")
+    cmds = set(re.findall(r"\\([A-Za-z]+)", t)) | {uni_tex(c)[1:] for c in t if ord(c) > 127 and uni_tex(c).startswith("\\")}
+    return set(LETTER_RE.findall(re.sub(r"\\[A-Za-z]+", " ", t))), cmds
+
+
+def anchored(tr, source: str):
+    """The transcription without what the passage does not have: a formula is the passage's when each of its
+    letters is in the passage's text (the text layer loses a letter's style, rarely the letter) or, written with
+    no letter, one of its signs is. A small model reading an image sometimes answers with the prompt's example or
+    a formula from elsewhere; required from the handout, it would be taught as the textbook's."""
+    letters, cmds = _signs(source)
+
+    def ours(latex: str) -> bool:
+        ls, cs = _signs(latex)
+        return ls <= letters if ls else bool(cs & cmds)
+    return tr.model_copy(update={"formulas": [f for f in tr.formulas if ours(f)],
+                                 "symbols": [x for x in tr.symbols if ours(x.latex)]})
+
+
 def transcription_against_clues(tr, clues: dict) -> list[str]:
     """Contradictions between a vision transcription and the font clues of the same regions (empty = consistent).
     Letters set in known math fonts are settled by fix_by_fonts; for the rest, flags and text fonts are only clues
@@ -227,7 +255,7 @@ def bound_strings(sch: dict, limit: int = FREE_TEXT_MAX) -> dict:
 # the durable per-node results of a guide operation carry it). The label is bumped on purpose; the hash of the
 # modules that decide acceptance also changes it whenever that code changes, so a forgotten bump cannot reuse a
 # stale verdict.
-GATE_RULES_LABEL = "handout-v1"
+GATE_RULES_LABEL = "handout-v2"
 
 
 def _verifier_version() -> str:
@@ -266,15 +294,59 @@ def handout_points(t: ra.ReadingTaskInput) -> list[tuple[str, str]]:
     return []
 
 
-CONFLICTS_MAX = 5   # contradictions one review reports: more is a review copying the handout, not finding problems
+REVIEW_B_RUNS = 2   # review B reads each handout twice; a paragraph either run finds in conflict is corrected. On recorded
+#                     handouts one run caught 3–5 of 7 planted contradictions, the two runs together 6, with no more
+#                     false alarms (1 of 34 handouts) than one run
+DISPLAY_ONLY_RE = re.compile(r"^\s*\$\$.*\$\$\s*$", re.S)
 
 
-def conflicts_schema() -> dict:
-    """Review B's answer, bounded: short quotes (FREE_TEXT_MAX) and at most CONFLICTS_MAX items."""
-    from .contracts import ConflictsReview
-    sch = bound_strings(ConflictsReview.model_json_schema())
-    sch["properties"]["conflicts"] = {**sch["properties"]["conflicts"], "maxItems": CONFLICTS_MAX}
-    return sch
+def review_paragraphs(text: str) -> list[str]:
+    """The handout paragraphs review B checks: blank-line separated, a paragraph that is only a display formula left
+    to the program checks (whether a formula is written right is a fact the program compares, not a claim)."""
+    return [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip() and not DISPLAY_ONLY_RE.match(p)]
+
+
+def paragraphs_text(paras: list[str]) -> str:
+    return "\n\n".join(f"【P{k}】\n{p}" for k, p in enumerate(paras, 1))
+
+
+def paragraphs_template(n: int) -> str:
+    return json.dumps({"paragraphs": [{"id": f"P{k}", "guide_says": "…", "source_quote": "…", "source_says": "…",
+                                       "relation": "…"} for k in range(1, n + 1)]}, ensure_ascii=False)
+
+
+def paragraphs_schema(n: int) -> dict:
+    """One verdict per paragraph, in order, with bounded strings."""
+    item = {"type": "object", "properties": {
+        "id": {"type": "string", "enum": [f"P{k}" for k in range(1, n + 1)]},
+        "guide_says": {"type": "string", "maxLength": FREE_TEXT_MAX},
+        "source_quote": {"type": "string", "maxLength": FREE_TEXT_MAX},
+        "source_says": {"type": "string", "maxLength": FREE_TEXT_MAX},
+        "relation": {"type": "string", "enum": ["consistent", "addition", "conflict"]}},
+        "required": ["id", "guide_says", "source_quote", "source_says", "relation"]}
+    return {"type": "object", "properties": {"paragraphs": {"type": "array", "items": item, "minItems": n, "maxItems": n}},
+            "required": ["paragraphs"]}
+
+
+def paragraph_findings(reviews: list, paras: list[str], source: str) -> list[ra.Finding]:
+    """Review B's runs → findings, one per paragraph. A conflict is two passages that cannot both be true: it counts
+    when the textbook sentence it names is really in the textbook; a conflict with no such sentence is a note for the
+    reader ("may not match"). Either run naming a paragraph is enough."""
+    found: dict[int, ra.Finding] = {}
+    for review in reviews:
+        for c in review.paragraphs:
+            k = int(c.id[1:]) - 1 if re.fullmatch(r"P\d+", c.id or "") else -1
+            if c.relation != "conflict" or not 0 <= k < len(paras):
+                continue
+            s = ra.expand_quote(source, c.source_quote, 4) if c.source_quote.strip() else ""
+            said = f"講義說「{c.guide_says.strip()}」" + (f"，課本說「{c.source_says.strip()}」" if c.source_says.strip() else "")
+            if s:
+                found[k] = ra.Finding(code="conflict", check="conflicts", severity="major", draft_excerpt=paras[k],
+                                      source_excerpt=s, detail=f"{said}，兩者不可能同時成立")
+            elif k not in found:
+                found[k] = ra.Finding(code="conflict_unconfirmed", check="conflicts", severity="minor", status="unconfirmed",
+                                      draft_excerpt=paras[k][:120], detail=f"審稿認為這段可能和課本不一致，但找不到對應的課本原句：{said}")
+    return [found[k] for k in sorted(found)]
 
 
 def fix_schema(source: str, problems: int) -> dict:
@@ -299,6 +371,27 @@ def handout_chars(source: str) -> int:
     bound is converted with the passage's own characters per token."""
     from ..llm.context import chars_per_token
     return int(handout_tokens(source) * 0.8 * chars_per_token(source))
+
+
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’-]*")
+LATIN_WORD_CHARS = 1.7     # a Latin word says about as much as this many Chinese characters
+HANDOUT_PER_SOURCE = 2     # a handout explains its passage in about twice its length …
+HANDOUT_MIN_ZH = 250       # … and a passage of a sentence or two still in a short paragraph or two
+HANDOUT_MIN_WORDS = 120
+
+
+def handout_length(text: str, language: str) -> str:
+    """How long the handout should be, as the model can count it: Chinese characters or Latin words of the output
+    language. Told only to keep it short, a small model writes a sentence of the textbook into thousands of
+    characters, repeating itself and inventing what the passage never says."""
+    cjk = sum(len(m) for m in CJK_SCRIPT_RE.findall(text or ""))
+    words = len(WORD_RE.findall(re.sub(r"\$\$.+?\$\$|\$[^$\n]+\$", " ", text or "", flags=re.S)))
+    size = cjk + LATIN_WORD_CHARS * words
+    if language != "src" or cjk > words:
+        src = f"約 {cjk} 字" if cjk > words else f"約 {words} 個英文單字"
+        return f"這一段課文{src}，講義寫到約 {max(HANDOUT_MIN_ZH, round(HANDOUT_PER_SOURCE * size, -1)):.0f} 字以內就夠。"
+    return (f"這一段課文約 {words} 個單字，講義寫到約 "
+            f"{max(HANDOUT_MIN_WORDS, round(HANDOUT_PER_SOURCE * words, -1)):.0f} 個單字以內就夠。")
 
 
 def handout_schema(source: str) -> dict:
@@ -359,43 +452,57 @@ def points_findings(points: list[tuple[str, str]], review, guide: str) -> list[r
 
 # -- conflicts with the textbook ------------------------------------------------------------------------------
 
-def conflict_findings(review, guide: str, source: str) -> list[ra.Finding]:
-    """Review B → findings. A contradiction is two passages that cannot both be true; one the reviewer itself says
-    can both be true (a rewording, an addition) is dropped. It counts when both quotations are real: the handout
-    passage and the textbook passage it contradicts. Otherwise it is a note for the reader ("may not match")."""
-    out = []
-    for c in review.conflicts:
-        if c.both_true == "yes":
-            continue
-        g = ra.expand_quote(guide, c.guide_quote, 4)
-        s = ra.expand_quote(source, c.source_quote, 4)
-        why = (c.why or "").strip()
-        if g and s:
-            out.append(ra.Finding(code="conflict", check="conflicts", severity="major", draft_excerpt=c.guide_quote.strip(),
-                                  source_excerpt=s, detail=f"講義「{g[:80]}」和課本「{s[:80]}」矛盾" + (f"：{why}" if why else "")))
-        elif c.guide_quote.strip():
-            out.append(ra.Finding(code="conflict_unconfirmed", check="conflicts", severity="minor", status="unconfirmed",
-                                  draft_excerpt=c.guide_quote.strip()[:120], source_excerpt=c.source_quote.strip()[:120],
-                                  detail="審稿認為這裡可能和課本不一致，但引用的句子對不上原文或講義" + (f"：{why}" if why else "")))
-    return out
-
-
 # -- program checks ---------------------------------------------------------------------------------------------
 
 # A handout may reuse the textbook's own sentences where they are already clear: whether a passage needed explaining
 # is a judgement about meaning, so no program check counts copied text.
 # the handout answer's other fields (HandoutDraft) named in its text, as a model writes them when they run together
-OUTPUT_FIELD_RE = re.compile(r"[\"']?\b(key_points)\b[\"']?\s*[:：]|[\"'](check)[\"']\s*[:：]")
+OUTPUT_FIELD_RE = re.compile(r"[\"']?\b(key_points)\b[\"']?\s*[:：]|[\"'](check)[\"']\s*[:：]"
+                             r"|\*\*\s*(key[ _]points|check)\s*(?:\*\*\s*[:：]|[:：]\s*\*\*)"   # also as a bold label
+                             r"|^[ \t]*(key[ _]points(?:[ \t]+\w+){0,3}|check)[ \t]*[:：]", re.I | re.M)   # or opening a paragraph
 CJK_SCRIPT_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]+")
 EQUATION_RE = re.compile(r"=|<|>|\\(?:doteq|triangleq|approx|equiv|propto|leftarrow|gets|rightarrow|to|leq?|geq?|neq|sim)\b")
+
+
+FORMULA_PUNCT_RE = re.compile(r"[.,;:]+(?=\\tag\{|\$|$)")
+
+
+def formula_bare(f: str) -> str:
+    """A normalized formula without the sentence's punctuation a display formula closes with ("…(s'|s,a). \\tag{3.6}")
+    and without its equation number: a handout writing the formula inside its own sentence leaves the punctuation out
+    or puts it elsewhere, and the equation is written whether or not it carries the textbook's number."""
+    return TAG_RE.sub("", FORMULA_PUNCT_RE.sub("", f))
+
+
+LONE_SIGN_RE = re.compile(r"\\[A-Za-z]+|.")
 
 
 def required_formulas(t: ra.ReadingTaskInput, symbol_evidence: dict | None) -> list[str]:
     """The textbook's equations a handout must write: its display formulas, and the equations read from the PDF
     region (a lone symbol such as S_t is notation, not an equation to teach)."""
-    display, _ = ra.source_formulas(t.text)
+    import difflib
+    display = [f for f in ra.source_formulas(t.text)[0] if not LONE_SIGN_RE.fullmatch(f)]   # an end mark (\square) is no formula
     ev = [ra._norm_math(f) for f in evidence_formulas(symbol_evidence) if EQUATION_RE.search(f) and len(f) >= 6]
-    return list(dict.fromkeys(display + ev))
+    def key(f: str) -> str:   # spacing, $ delimiters, rows of an aligned display and \text{\gamma} wrappers aside
+        f = re.sub(r"\\(?:text|mathrm)\{(\\[A-Za-z]+)\}", r"\1", formula_bare(f))
+        return re.sub(r"\\\\|&|\s|\$|\\(?:begin|end)\{[a-z]+\*?\}", "", f).rstrip("=.,")
+
+    def rows(d: str) -> list[str]:
+        """An aligned display read one row at a time (its left side and each row), and a chain of equalities one link
+        at a time (G = Σ γ^k = 1/(1−γ) also says G = 1/(1−γ))."""
+        parts = re.split(r"\\\\", d)
+        lhs = parts[0].split("&", 1)[0] if "&" in parts[0] else ""
+        out = [d] + ([lhs + p for p in parts] if len(parts) > 1 else [])
+        links = [x for x in key(d).split("=") if x]
+        return out + [links[0] + "=" + x for x in links[1:]]
+    bare = [key(r) for d in display + ra.source_formulas(t.text)[1] for r in rows(d)]
+
+    def own(e: str) -> bool:
+        """A formula the region shows that the passage already sets (read in part, a row of it, or with slips) is that
+        formula."""
+        b = key(e)
+        return any(b in d or difflib.SequenceMatcher(None, b, d, autojunk=False).ratio() >= COPY_MIN_RATIO for d in bare)
+    return list(dict.fromkeys(display + [e for e in ev if not own(e)]))
 
 
 def repeated_sentences(text: str, times: int = 3, min_chars: int = 10) -> list[str]:
@@ -406,6 +513,117 @@ def repeated_sentences(text: str, times: int = 3, min_chars: int = 10) -> list[s
     return [x for x, n in Counter(x for x in sents if len(x) >= min_chars).items() if n >= times]
 
 
+RESTATED_MIN = 0.85   # two sentences this alike, word for word, say the same thing twice
+
+
+def restated_sentences(text: str, min_chars: int = 40) -> list[str]:
+    """Sentences that say again, nearly word for word, what an earlier sentence of the handout said (formulas inside
+    a sentence count as words; display formulas and code are left out)."""
+    import difflib
+    prose = re.sub(r"```.*?```|\$\$.+?\$\$", " ", text or "", flags=re.S)
+    sents = [x.strip(" \n*-") for x in re.split(r"(?<=[.!?。！？])\s+|\n+", prose)]
+    sents = [x for x in sents if len(x) >= min_chars]
+    words = [re.findall(r"\$[^$]+\$|\w+", x.lower()) for x in sents]
+    out = []
+    for j in range(1, len(sents)):
+        if any(difflib.SequenceMatcher(None, words[i], words[j], autojunk=False).ratio() >= RESTATED_MIN for i in range(j)):
+            out.append(sents[j])
+    return out
+
+
+DISPLAY_RE = re.compile(r"\$\$(.+?)\$\$", re.S)
+PARAGRAPH_BREAK_RE = re.compile(r"\n\s*\n")
+
+
+def drop_repeats(text: str, times: int = 3) -> str:
+    """The handout without what a small model wrote over again in a loop: a paragraph the same as an earlier one, and
+    a display formula written `times` or more times, kept where it is first written (a copy standing as its own
+    paragraph is removed, a copy inside a sentence stays)."""
+    from collections import Counter
+    seen = Counter(ra._norm_math(m.group(1)) for m in DISPLAY_RE.finditer(text or ""))
+    loops = {f for f, n in seen.items() if n >= times}
+    kept, out = set(), []
+    for para in PARAGRAPH_BREAK_RE.split(text or ""):
+        m = DISPLAY_RE.fullmatch(para.strip())
+        key = ra._norm_math(m.group(1)) if m and ra._norm_math(m.group(1)) in loops else ra._norm_math(para.strip(" *"))
+        if key and key in kept:
+            continue
+        kept.add(key)
+        out.append(para)
+    return "\n\n".join(out).strip()
+
+
+COPY_MIN_RATIO = 0.85   # a display formula this close to one of the textbook's is a copy of it with slips
+TAG_RE = re.compile(r"\\tag\{([^{}]*)\}")
+
+
+def restore_formulas(text: str, source: str) -> str:
+    """The handout with each slipped copy of a textbook display formula replaced by the textbook's own. A small model
+    copying a formula through JSON loses commands on the way (\\doteq → \\buteq, \\mathbb{E} → \\bbE); asked to write
+    it again, it slips again, and every correction adds another broken copy. A copy is the formula carrying a textbook
+    equation's number, or, unnumbered, one close to a textbook formula; a formula with a number the textbook passage
+    does not have, or not close to any, is the handout's own and stays."""
+    import difflib
+    originals = {ra._norm_math(f): f.strip() for f in DISPLAY_RE.findall(source or "") if f.strip()}
+    if not originals:
+        return text
+
+    numbered = {tuple(TAG_RE.findall(o)): o for o in originals if TAG_RE.findall(o)}
+
+    def restored(m):
+        f = ra._norm_math(m.group(1))
+        if f in originals:
+            return m.group(0)
+        if TAG_RE.findall(f):   # an equation number names the textbook's equation: a formula numbered so is a copy of it
+            o = numbered.get(tuple(TAG_RE.findall(f)))
+            return f"$${originals[o]}$$" if o else m.group(0)
+        best = max(originals, key=lambda o: difflib.SequenceMatcher(None, f, o, autojunk=False).ratio())
+        close = difflib.SequenceMatcher(None, f, best, autojunk=False).ratio() >= COPY_MIN_RATIO
+        return f"$${originals[best]}$$" if close else m.group(0)
+    return DISPLAY_RE.sub(restored, text or "")
+
+
+def strip_field_leaks(text: str) -> str:
+    """The handout without another field of the answer written into its text (`key_points: [...]`, `"check": "…"`):
+    from the field's name to the end of its paragraph, nothing belongs to the handout."""
+    while (m := OUTPUT_FIELD_RE.search(text or "")):
+        end = text.find("\n\n", m.end())
+        text = text[:m.start()].rstrip(" \t\"',{[") + ("\n\n" + text[end:].lstrip() if end != -1 else "")
+    return (text or "").strip()
+
+
+def place_formulas(text: str, source: str) -> str:
+    """The handout with each textbook display formula it has not written in full written in by the program, as a
+    display after the paragraph whose math is closest to it (where the handout talks about it; after the first
+    paragraph when no math is close). A small model writes a long formula in part (its right-hand side, = for \\doteq)
+    and, asked to write it in full, adds another copy and another explanation each time it tries."""
+    import difflib
+    paras = [p for p in PARAGRAPH_BREAK_RE.split(text or "") if p.strip()]
+    if not paras:
+        return text
+    after: dict[int, list[str]] = {}
+    for raw in DISPLAY_RE.findall(source or ""):
+        f = ra._norm_math(raw)
+        if LONE_SIGN_RE.fullmatch(f) or formula_bare(f) in formula_bare(ra._norm_math("\n".join(paras))):
+            continue
+
+        def closeness(k: int) -> float:
+            maths = [ra._norm_math(a or b) for a, b in re.findall(r"\$\$(.+?)\$\$|\$([^$\n]+)\$", paras[k], re.S)]
+            return max((difflib.SequenceMatcher(None, m, f, autojunk=False).ratio() for m in maths), default=0.0)
+        k = max(range(len(paras)), key=closeness)
+        after.setdefault(k if closeness(k) >= 0.5 else 0, []).append(f"$${raw.strip()}$$")
+    if not after:
+        return text
+    return "\n\n".join(p + "".join("\n\n" + f for f in after.get(k, [])) for k, p in enumerate(paras)).strip()
+
+
+def tidy_handout(text: str, source: str) -> str:
+    """What the program corrects itself, after the draft and after every correction: facts it sees exactly, which a
+    small model asked to correct them gets wrong again and again (spending every correction on them)."""
+    text = re.sub(r"\${3,}", "$$", strip_field_leaks(text))   # $$$…$$$: a display around an inline formula
+    return drop_repeats(place_formulas(restore_formulas(text, source), source))
+
+
 SENTENCE_END_RE = re.compile(r"[。！？\n]|[.!?](?=\s|$)")
 
 
@@ -414,6 +632,23 @@ def _sentence_of(text: str, start: int) -> str:
     a = max((m.end() for m in SENTENCE_END_RE.finditer(text, 0, start)), default=0)
     m = SENTENCE_END_RE.search(text, start)
     return text[a:(m.end() if m else len(text))].strip()
+
+
+# a letter-like sign: a Greek letter or a quantifier. A handout writing one the passage never uses has put another
+# symbol in its place (γ written as \forall), or teaches notation the passage does not
+SYMBOL_SIGNS = frozenset("""alpha beta gamma Gamma delta Delta epsilon varepsilon zeta eta theta Theta vartheta iota kappa
+lambda Lambda mu nu xi Xi pi Pi rho varrho sigma Sigma tau upsilon phi Phi varphi chi psi Psi omega Omega forall
+exists mathcal mathscr mathbb mathfrak""".split())   # and a letter style the passage does not set its sets in (𝒮 as \mathcal)
+# an operator LaTeX has, written as a word: \text{sum} for \sum
+OPERATOR_WORD_RE = re.compile(r"\\(?:text|mathrm|operatorname)\s*\{(sum|prod|int|lim|max|min|log|exp|sup|inf|Pr)\}")
+MATH_RE = re.compile(r"\$\$(.+?)\$\$|\$([^$\n]+)\$", re.S)
+
+
+def foreign_signs(guide: str, source: str) -> list[str]:
+    """Letter-like signs (SYMBOL_SIGNS) the handout's math writes and the passage (with what it cites) never does."""
+    _, own = _signs(source)
+    used = [c for m in MATH_RE.finditer(guide or "") for c in re.findall(r"\\([A-Za-z]+)", m.group(1) or m.group(2))]
+    return [c for c in dict.fromkeys(used) if c in SYMBOL_SIGNS and c not in own]
 
 
 def handout_program(t: ra.ReadingTaskInput, guide: str, symbol_evidence: dict | None = None) -> list[ra.Finding]:
@@ -430,9 +665,9 @@ def handout_program(t: ra.ReadingTaskInput, guide: str, symbol_evidence: dict | 
         return out
     if (g.count("$") - 2 * g.count("$$")) % 2 or g.count("$$") % 2:
         add("broken_math", "講義的 $ 數量不成對，公式會無法顯示")
-    gn = ra._norm_math(g)
+    gn = formula_bare(ra._norm_math(g))
     for f in required_formulas(t, symbol_evidence):
-        if f not in gn:
+        if formula_bare(f) not in gn:   # the sentence punctuation left out on both sides
             add("formula_missing", f"講義沒有寫出課本的公式 $${f}$$（要寫出來並說明式中符號）", fix=f"$${f}$$")
     m = PRODUCTION_RE.search(g)
     if m:
@@ -440,10 +675,26 @@ def handout_program(t: ra.ReadingTaskInput, guide: str, symbol_evidence: dict | 
     m = OUTPUT_FIELD_RE.search(g)
     if m:   # another field of the answer written into the handout's text: the fields ran together
         a, b = g.rfind("\n", 0, m.start()) + 1, g.find("\n\n", m.end())
-        add("field_leak", f"講義正文裡寫進了輸出格式的欄位「{m.group(1) or m.group(2)}」，那部分不屬於講義，要刪除",
+        add("field_leak", f"講義正文裡寫進了輸出格式的欄位「{next(g for g in m.groups() if g)}」，那部分不屬於講義，要刪除",
             excerpt=g[a:b if b != -1 else len(g)].strip())
     for s in repeated_sentences(g)[:1]:
         add("repeated_text", f"講義同一句重複了三次以上：「{s[:40]}」", excerpt=s)
+    for s in restated_sentences(g)[:2]:
+        add("repeated_text", f"這一句和講義前面的一句幾乎一樣，重複了：「{s[:60]}」，刪掉這一句", excerpt=s)
+    for m in list(dict.fromkeys(OPERATOR_WORD_RE.findall(g)))[:2]:
+        add("math_word", f"講義的數學式把運算子寫成文字 \\text{{{m}}}，要寫成 \\{m}",
+            excerpt=_sentence_of(g, g.find("{" + m + "}")))
+    # the passage (with the formulas read from its PDF region: the text layer loses signs), the formulas it cites, the
+    # passage before it and what the reader has read: notation from there is the textbook's
+    own_text = "\n".join([t.text, *required_formulas(t, symbol_evidence)])
+    known_text = "\n".join([own_text, *t.cited, ((t.topic or {}).get("prev") or {}).get("text") or "", *t.prev_points])
+    foreign = foreign_signs(g, known_text)
+    if foreign:
+        _, own = _signs(own_text)
+        known = "、".join(f"`\\{c}`" for c in sorted(own & SYMBOL_SIGNS))
+        add("symbol_foreign", f"講義的數學式用了課文沒有的符號 {'、'.join(f'`\\{c}`' for c in foreign)}；"
+            + (f"這一段課文用的符號是 {known}，要改回課文的符號" if known else "課文沒有用這個符號，要改寫成不用它"),
+            excerpt=_sentence_of(g, g.find("\\" + foreign[0])))
     if symbol_evidence:
         for d in notation_mismatches(symbol_evidence, [g]):
             add("notation_mismatch", d)
@@ -463,6 +714,8 @@ NOTE_TEXT = {
     "conflict_unconfirmed": lambda f: f"這段講義的「{f.draft_excerpt[:60]}」可能和課本不一致，建議對照課本",
     "formula_missing": lambda f: f"這段講義沒有寫出課本的公式 {f.suggested_fix[:80]}",
     "notation_mismatch": lambda f: f.detail[:100],
+    "symbol_foreign": lambda f: f.detail[:100],
+    "math_word": lambda f: f.detail[:100],
     "language_mixed": lambda f: f"這段講義夾雜了其他語言的文字：{f.draft_excerpt[:80]}",
     "notation_unverified": lambda f: f"PDF 的數學符號沒能確認字型，符號寫法建議對照課本：{f.detail[:80]}",
 }
@@ -554,6 +807,7 @@ def _near(flat: str, q: str) -> tuple[int, int] | None:
     return None
 
 
+
 def apply_edits(guide: str, edits: list) -> tuple[str, list[dict], list[str]]:
     """(new handout, edits applied with the passage each produced, edits skipped and why). An edit applies only
     where its passage really is; everything else in the handout stays as it was."""
@@ -566,6 +820,11 @@ def apply_edits(guide: str, edits: list) -> tuple[str, list[dict], list[str]]:
                 skipped.append(f"{e.problem or '?'}：要換掉的句子不在講義中")
                 continue
             a, b = span
+            if PARAGRAPH_BREAK_RE.search(text[a:b]):
+                # a correction changes the sentences a problem is about; a passage running over paragraphs is the
+                # handout written anew (a small model has copied most of it and replaced it with the textbook)
+                skipped.append(f"{e.problem or '?'}：要換掉的文字跨了好幾段，修正只換有問題的那一兩句")
+                continue
             text = text[:a] + new + text[b:]
         else:
             if not new:

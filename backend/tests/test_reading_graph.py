@@ -40,7 +40,7 @@ DEFAULTS = {
     "intent": lambda m: {"role": "說明 NLP 是什麼、怎麼發展", "teaches": [p for _, p in m["points"]] or ["NLP 的目標與發展"]},
     "draft": lambda m: handout(),
     "review_points": taught,
-    "review_conflicts": lambda m: {"conflicts": []},
+    "review_conflicts": lambda m: verdicts(m),
     "fix": lambda m: {"edits": []},
 }
 
@@ -95,9 +95,20 @@ async def run(backend, *, repo=None, checkpointer=None, thread="t", **kw):
                         {"configurable": {"thread_id": thread}})
 
 
-def conflict_on(passage: str) -> dict:
-    return {"conflicts": [{"guide_quote": passage, "source_quote": "從簡單的語言分析進階到複雜的語意理解", "why": "方向弄反",
-                           "both_true": "no"}]}
+def verdicts(m: dict, passage: str | None = None, source: str = "從簡單的語言分析進階到複雜的語意理解") -> dict:
+    """Review B's answer: every paragraph of what it was shown consistent, the ones holding `passage` in conflict."""
+    from app.reading.gates import review_paragraphs
+    paras = review_paragraphs(m["guide"])
+    return {"paragraphs": [{"id": f"P{k}", "guide_says": "…", "source_quote": source if passage and passage in q else "",
+                            "source_says": "…", "relation": "conflict" if passage and passage in q else "consistent"}
+                           for k, q in enumerate(paras, 1)]}
+
+
+def conflict_on(passage: str):
+    return lambda m: verdicts(m, passage)
+
+
+REVIEW = ["review_points", "review_conflicts", "review_conflicts"]   # one review round: A once, B read twice
 
 
 async def test_a_handout_that_teaches_and_does_not_contradict_is_published_as_written():
@@ -105,7 +116,7 @@ async def test_a_handout_that_teaches_and_does_not_contradict_is_published_as_wr
     out = await run(b)
     a = out["artifact"]
     assert out["status"] == "accepted" and a["guide"] == HANDOUT and a["review_status"] == "passed" and not a["revised"]
-    assert b.steps() == ["intent", "draft", "review_points", "review_conflicts"]
+    assert b.steps() == ["intent", "draft", *REVIEW]
     assert a["points"] == ["（NLP｜定義與發展）NLP 讓機器理解語言，並從語言分析進階到語意理解"]
     assert a["role"] == "說明 NLP 是什麼、怎麼發展"
     # the overview places the 導讀段 when what it teaches is read; the handout is written from the text and that only
@@ -118,13 +129,13 @@ async def test_a_handout_that_teaches_and_does_not_contradict_is_published_as_wr
 async def test_a_contradiction_is_corrected_in_place_and_only_the_changed_passage_is_reviewed_again():
     wrong = HANDOUT.replace("它的發展是從語言分析一路走到語意理解，也就是不只看字面，還要掌握意思。", WRONG)
     fixed = "它的發展是從語言分析進階到語意理解。"
-    b = Scripted({"draft": [handout(wrong)], "review_conflicts": [conflict_on("從語意理解退回到語言分析")],
+    b = Scripted({"draft": [handout(wrong)], "review_conflicts": [conflict_on("從語意理解退回到語言分析")] * 2,
                   "fix": [{"edits": [{"problem": "F1", "action": "replace", "old": WRONG, "new": fixed}]}]})
     out = await run(b)
     a = out["artifact"]
     assert out["status"] == "accepted" and a["fixes"] == 1 and a["revised"]
     assert a["guide"] == wrong.replace(WRONG, fixed)                     # the other paragraphs are untouched
-    assert b.steps() == ["intent", "draft", "review_points", "review_conflicts", "fix", "review_conflicts"]
+    assert b.steps() == ["intent", "draft", *REVIEW, "fix", "review_conflicts", "review_conflicts"]
     assert b.calls[-1]["meta"]["guide"] == fixed                         # only what the correction wrote
     assert "F1［和課本矛盾］" in b.prompt("fix") and "從簡單的語言分析進階到複雜的語意理解" in b.prompt("fix")
 
@@ -133,7 +144,7 @@ async def test_a_contradiction_left_after_three_corrections_is_not_published():
     edits = [{"edits": [{"problem": "F1", "action": "replace", "old": p, "new": f"錯誤說法第 {k} 版。"}]}
              for k, p in enumerate([WRONG, "錯誤說法第 0 版。", "錯誤說法第 1 版。"])]
     b = Scripted({"draft": [handout(HANDOUT + "\n\n" + WRONG)],
-                  "review_conflicts": [conflict_on("從語意理解退回到語言分析")] + [lambda m: conflict_on(m["guide"])] * 3,
+                  "review_conflicts": [conflict_on("從語意理解退回到語言分析")] * 2 + [lambda m: verdicts(m, m["guide"])] * 6,
                   "fix": edits})
     out = await run(b)
     assert out["status"] == "failed" and out["error"]["code"] == "conflict_with_textbook" and out["artifact"] is None
@@ -152,7 +163,7 @@ async def test_a_point_still_missing_after_the_corrections_is_published_with_a_n
     assert out["status"] == "accepted" and a["fixes"] == MAX_FIXES and a["review_status"] == "passed_with_notes"
     assert [u["code"] for u in a["unverified"]] == ["point_missing"] and "可能沒有教到" in a["unverified"][0]["text"]
     # each re-check asks only the point still missing, against the whole handout; conflicts only on what was added
-    assert [c["meta"]["guide"] for c in b.calls if c["step"] == "review_conflicts"][1:] == ["補充第 0 次。", "補充第 1 次。", "補充第 2 次。"]
+    assert [c["meta"]["guide"] for c in b.calls if c["step"] == "review_conflicts"][2::2] == ["補充第 0 次。", "補充第 1 次。", "補充第 2 次。"]
 
 
 async def test_a_passage_written_back_as_it_was_is_reviewed_again_and_the_new_verdict_counts():
@@ -160,11 +171,11 @@ async def test_a_passage_written_back_as_it_was_is_reviewed_again_and_the_new_ve
     (it disagreed), the re-review found nothing, yet the old verdict was carried because the sentence was still in
     the handout, and the handout was held. A passage the correction wrote is judged by its re-review alone."""
     sentence = "它的發展是從語言分析一路走到語意理解，也就是不只看字面，還要掌握意思。"
-    b = Scripted({"review_conflicts": [conflict_on("從語言分析一路走到語意理解"), {"conflicts": []}],
+    b = Scripted({"review_conflicts": [conflict_on("從語言分析一路走到語意理解")] * 2,
                   "fix": [{"edits": [{"problem": "F1", "action": "replace", "old": sentence, "new": " " + sentence}]}]})
     out = await run(b)
     assert out["status"] == "accepted" and out["artifact"]["fixes"] == 1 and out["artifact"]["guide"] == HANDOUT
-    assert b.steps() == ["intent", "draft", "review_points", "review_conflicts", "fix", "review_conflicts"]
+    assert b.steps() == ["intent", "draft", *REVIEW, "fix", "review_conflicts", "review_conflicts"]
 
 
 async def test_a_correction_that_cannot_be_applied_is_asked_again_and_stops_when_the_corrections_are_spent():
@@ -195,8 +206,8 @@ async def test_a_passage_copied_with_a_slip_is_still_found():
 
 
 async def test_a_conflict_the_reviewer_cannot_quote_is_a_note_not_a_correction():
-    b = Scripted({"review_conflicts": [{"conflicts": [{"guide_quote": "NLP 只會找關鍵字", "source_quote": "課本沒有", "why": "?",
-                                                       "both_true": "no"}]}]})
+    """A contradiction is two passages that cannot both be true: with no textbook sentence there is none."""
+    b = Scripted({"review_conflicts": [lambda m: verdicts(m, "語言分析", source="課本沒有這句")] * 2})
     out = await run(b)
     a = out["artifact"]
     assert out["status"] == "accepted" and "fix" not in b.steps() and a["guide"] == HANDOUT
@@ -204,11 +215,13 @@ async def test_a_conflict_the_reviewer_cannot_quote_is_a_note_not_a_correction()
 
 
 async def test_a_handout_reusing_the_textbook_and_a_rewording_the_reviewer_can_reconcile_are_published_as_is():
-    """The textbook's own sentences may stay where they are clear, and a passage the reviewer itself says can be
-    true together with the textbook is not a contradiction: nothing is corrected."""
-    reworded = {"conflicts": [{"guide_quote": "讓機器理解、解釋並生成人類語言", "why": "用字不同", "both_true": "yes",
-                               "source_quote": "旨在使機器能夠理解、解釋並生成人類語言"}]}
-    b = Scripted({"draft": [handout(SOURCE + "\n\n" + HANDOUT)], "review_conflicts": [reworded]})
+    """The textbook's own sentences may stay where they are clear, and paragraphs the reviewer finds consistent with
+    the textbook or adding to it are not corrected."""
+    def mixed(m):
+        out = verdicts(m)
+        out["paragraphs"][-1]["relation"] = "addition"
+        return out
+    b = Scripted({"draft": [handout(SOURCE + "\n\n" + HANDOUT)], "review_conflicts": [mixed] * 2})
     out = await run(b)
     assert out["status"] == "accepted" and out["artifact"]["fixes"] == 0 and "fix" not in b.steps()
     assert out["artifact"]["guide"].startswith(SOURCE) and out["artifact"]["unverified"] == []
@@ -268,3 +281,19 @@ async def test_resume_after_the_model_went_away_reuses_finished_steps(tmp_path):
     assert out["status"] == "accepted"
     assert b.steps().count("draft") == 1                                   # the handout was not written again
     assert out["budget"]["calls"] >= 4                                     # the failed call still counts
+
+
+async def test_review_b_reads_every_paragraph_twice_and_a_conflict_either_reading_finds_is_corrected():
+    """One reading of review B caught 3–5 of 7 planted contradictions on recorded handouts, two readings together 6
+    with no more false alarms: a paragraph is corrected when either reading finds it in conflict. Display formulas
+    are left to the program checks, so the reviewer gets the prose paragraphs, each with its own verdict."""
+    wrong = HANDOUT.replace("它的發展是從語言分析一路走到語意理解，也就是不只看字面，還要掌握意思。", WRONG)
+    fixed = "它的發展是從語言分析進階到語意理解。"
+    b = Scripted({"draft": [handout(wrong + "\n\n$$x=1$$")],
+                  "review_conflicts": [lambda m: verdicts(m), conflict_on("從語意理解退回到語言分析")],
+                  "fix": [{"edits": [{"problem": "F1", "action": "replace", "old": WRONG, "new": fixed}]}]})
+    out = await run(b)
+    assert out["status"] == "accepted" and out["artifact"]["fixes"] == 1
+    first = [c for c in b.calls if c["step"] == "review_conflicts"][:2]
+    assert [c["meta"]["run"] for c in first] == [1, 2] and "$$x=1$$" not in first[0]["prompt"]
+    assert "【P1】" in first[0]["prompt"] and "符號表記" not in first[0]["prompt"]

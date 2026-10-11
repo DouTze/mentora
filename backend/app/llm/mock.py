@@ -50,8 +50,6 @@ class MockBackend(LLMBackend):
         elif step == "segment_boundaries":   # simulated: a new unit where the topic wording changes
             ts = meta.get("topics") or []
             text = json.dumps({"boundaries": ["same" if a == b else "new" for a, b in zip(ts, ts[1:])]}, ensure_ascii=False)
-        elif step == "segment_passages":   # simulated: every paragraph is its own 導讀段
-            text = json.dumps({"joins": ["split"] * (int(meta.get("paragraphs", 1)) - 1)}, ensure_ascii=False)
         elif step == "segment_topic":   # simulated: a new topic where the topic wording changes
             ts = meta.get("topics") or []
             text = json.dumps({"new_topic_at": [k for k in range(2, len(ts) + 1) if ts[k - 1] != ts[k - 2]]},
@@ -83,8 +81,10 @@ class MockBackend(LLMBackend):
             first = self._first_sentence(meta.get("guide", ""))
             text = json.dumps({"points": [{"id": i, "taught": "yes", "guide_quote": first} for i, _ in meta.get("points") or []]},
                               ensure_ascii=False)
-        elif step == "review_conflicts":   # simulated review B: finds nothing
-            text = json.dumps({"conflicts": []}, ensure_ascii=False)
+        elif step == "review_conflicts":   # simulated review B: every paragraph says what the textbook says
+            text = json.dumps({"paragraphs": [{"id": f"P{k}", "guide_says": "", "source_quote": "", "source_says": "",
+                                               "relation": "consistent"} for k in range(1, int(meta.get("paragraphs", 1)) + 1)]},
+                              ensure_ascii=False)
         elif step == "fix":   # simulated correction: each problem's suggested text added at the end
             mark = "(Simulated fix) " if self._writes_source_language(meta) else "（模擬修正）"
             text = json.dumps({"edits": [{"problem": f"F{k}", "action": "insert_after", "old": "",

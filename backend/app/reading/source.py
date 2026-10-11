@@ -23,12 +23,14 @@ import re
 
 from .schemas import Locator, SourceBlock
 
-EXTRACTION_VERSION = "blocks-v6"   # v2: heading levels and structure confidence; v3: PDF text stream cut into sentences;
+EXTRACTION_VERSION = "blocks-v8"   # v2: heading levels and structure confidence; v3: PDF text stream cut into sentences;
                                    # v4: numbered PDF headings confirmed by their siblings, runs of cell-like lines are tables;
                                    # v5: PDF footnotes kept out of the sentence they interrupt, figure-internal text dropped;
                                    # v6: a Latin "." closes a PDF paragraph, figure captions marked, a numbered section
                                    # heading after any line, a formula line never a heading, an equation number does not hide
-                                   # the sentence end before it
+                                   # the sentence end before it; v7: PDF evidence v2 (paragraph layout: indent, full
+                                   # last line); v8: an end mark (□) or a period inside a closing formula ends a
+                                   # paragraph, a lower-case line beside a formula is no heading
 # a footnote as the importer writes it (materials.pdf_page_paragraphs): "[^1]: text"
 FOOTNOTE_RE = re.compile(r"^\[\^[^\]\s]{1,6}\]:")
 MAX_BLOCK_CHARS = 700
@@ -194,6 +196,9 @@ def _line_blocks(units: list[str], start: int) -> list[dict]:
 HEADING_MAX_CHARS = 40
 HEADING_LINE_SHARE = 0.75   # a heading is clearly narrower than the page's full lines
 NO_HEADING_END_RE = re.compile(r"[。．.!?！？,，;；：:、]$")
+# a Latin line opening with a lower-case word (in brackets or not) goes on with a sentence: "for all s ∈ S," or
+# "(by (3.9))" set beside a formula, never a heading
+NO_HEADING_START_RE = re.compile(r"^[(\[]?[a-z]{2}")
 BULLET_RE = re.compile(r"^\s*[•○●■□◆◇▪▫–\-*+]\s")
 PDF_ITEM_RE = re.compile(r"^\s*(•|[-*+]\s|\d{1,3}[.)、]\s*\S|[（(]\d{1,2}[）)]|[A-Za-z][.)]\s)")
 # a figure caption ("Figure 3.1: …", "圖 2 …"): it belongs to its figure, so it never stands as a 區塊 of its own
@@ -210,8 +215,16 @@ MATH_SIGN_RE = re.compile(r"[=<>≤≥≠≈≡∈∉⊂⊆∑∏∫→←⇒⇔
 EQ_NUMBER_RE = re.compile(r"(?<!Eq\.)(?<!Eqs\.)\s+[(（]\d{1,3}(?:\.\d{1,3}){0,2}[a-z]?[)）]\s*$")
 
 
+END_MARK_RE = re.compile(r"\s*(\$+\s*\\(?:square|blacksquare|Box|qed)\s*\$+|[□■∎◻])\s*$")
+
+
+MATH_END_RE = re.compile(r"([.!?;:])\s*\$+\s*$")   # "… A(low) = {…}.$": the sentence's period set inside a formula
+
+
 def without_eq_number(text: str) -> str:
-    return EQ_NUMBER_RE.sub("", text.rstrip())
+    """The text as its sentence end reads: no equation number; an end mark (□ closing an exercise or a proof) ends it,
+    and so does a period set inside a closing formula."""
+    return MATH_END_RE.sub(r"\1", END_MARK_RE.sub(".", EQ_NUMBER_RE.sub("", text.rstrip())))
 
 
 TABLE_RUN = 4   # this many heading guesses in a row without a section number are table cells, not headings
@@ -295,6 +308,7 @@ def _layout_pass(units: list[str], siblings: frozenset[tuple[str, int]]) -> list
             elif "\n" not in p and len(paras) > 1 and (prev_closed or enum_label(s) in siblings or SECTION_HEAD_RE.match(s)) \
                     and (len(s) <= HEADING_MAX_CHARS or SECTION_HEAD_RE.match(s) and not LEADER_RE.search(s)) \
                     and _width(s) <= HEADING_LINE_SHARE * full and not NO_HEADING_END_RE.search(s) \
+                    and not NO_HEADING_START_RE.match(s) \
                     and not MATH_SIGN_RE.search(s):
                 kind = "heading"
             elif PDF_ITEM_RE.match(p) or LIST_RE.match(p):

@@ -581,10 +581,30 @@ function Composer({ material, at, unitWord, mode, fill, onPress, onOpenSession, 
     }
   };
 
+  // 導讀 asks for its range first (these pages, or all), as choosing a range and pressing 開始學習 did
+  const [range, setRange] = useState<[number, number] | null>(null);
+  const total = material.unit_count;
+  const clamp = (n: number) => Math.min(total, Math.max(1, Math.round(n) || 1));
+  const startRange = async () => {
+    if (!range) return;
+    const [a, b] = [clamp(Math.min(...range)), clamp(Math.max(...range))];
+    setRange(null);
+    setError(null);
+    onPress("guide");
+    try {
+      const s = await api.startFromMaterial(material.id, a, b);
+      onOpenSession(s.id, { quiz: false, material: material.id });
+    } catch (e) {
+      setError((e as RequestError).body?.detail ?? String(e));
+      onPress(null);
+    }
+  };
+
   const learn = async (kind: "guide" | "quiz") => {
     setError(null);
     if (mode?.kind === kind) return onMode(null);
     if (mode) return onMode({ kind, session: mode.session });
+    if (kind === "guide") return setRange((r) => (r ? null : [at, at]));
     onPress(kind);
     try {
       const s = await api.readerLearn(material.id, at);
@@ -659,6 +679,24 @@ function Composer({ material, at, unitWord, mode, fill, onPress, onOpenSession, 
           <p className="reader-error" role="alert">
             {error}
           </p>
+        )}
+        {range && (
+          <div className="reader-range" role="group" aria-label={t("reader.range.title")}>
+            <span>{t("reader.range.from")}</span>
+            <input type="number" min={1} max={total} value={range[0]} aria-label={t("reader.range.from")}
+                   onChange={(e) => setRange([Number(e.target.value), range[1]])} />
+            <span>{t("reader.range.to")}</span>
+            <input type="number" min={1} max={total} value={range[1]} aria-label={t("reader.range.to")}
+                   onChange={(e) => setRange([range[0], Number(e.target.value)])} />
+            <span>{unitWord}</span>
+            <button type="button" className="ghost" onClick={() => setRange([1, total])}>
+              {t("reader.range.all")}
+            </button>
+            <span className="spacer" />
+            <button type="button" className="primary" onClick={startRange}>
+              {t("reader.range.start")}
+            </button>
+          </div>
         )}
         <div className="reader-ask-bar">
           <span className="reader-at">{where(at)}</span>

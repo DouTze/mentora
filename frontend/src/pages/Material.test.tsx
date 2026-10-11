@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, within, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MaterialPage } from "./Material";
 import { mockFetch, session } from "../test/fixtures";
@@ -66,11 +66,15 @@ describe("MaterialPage · reader", () => {
     expect((box as HTMLTextAreaElement).value).toBe("這段在說什麼？");
   });
 
-  test("導讀 and 出題 start the reading at the current position; 出題 asks for the questions", async () => {
-    const { calls, opened } = setup({ "POST /api/materials/m1/learn": () => ({ json: session({ id: "s9" }) }) });
-    await userEvent.click(await screen.findByRole("button", { name: /導讀/ }));
-    await waitFor(() => expect(opened).toEqual([{ id: "s9", quiz: false }]));
-    expect(calls.find((c) => c.key === "POST /api/materials/m1/learn")?.body).toEqual({ at: 1 });
+  test("導讀 asks for its range (these pages or all) and starts a reading of it; 出題 starts at the current position", async () => {
+    const { calls, opened } = setup({ "POST /api/sessions": () => ({ json: session({ id: "s8" }) }) });
+    await userEvent.click(await screen.findByRole("button", { name: /^導讀$/ }));
+    const panel = await screen.findByRole("group", { name: "導讀範圍" });
+    expect((within(panel).getByLabelText("從") as HTMLInputElement).value).toBe("1");
+    await userEvent.click(within(panel).getByRole("button", { name: "全部" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "開始導讀" }));
+    await waitFor(() => expect(opened).toEqual([{ id: "s8", quiz: false }]));
+    expect(calls.find((c) => c.key === "POST /api/sessions")?.body).toMatchObject({ material_id: "m1", start: 1, end: 4 });
     cleanup();
     const second = setup({ "POST /api/materials/m1/learn": () => ({ json: session({ id: "s9" }) }) });
     await userEvent.click(await screen.findByRole("button", { name: /出題/ }));

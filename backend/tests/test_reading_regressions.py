@@ -3,7 +3,7 @@ treats as a fact (a reprint of the textbook, a missing equation, a reviewer's qu
 it leaves to the reviewers."""
 from app.reading import agent as ra
 from app.reading import gates
-from app.reading.contracts import Conflict, ConflictsReview, Edit, PointsReview, PointVerdict
+from app.reading.contracts import Edit, ParagraphCheck, ParagraphsReview, PointsReview, PointVerdict
 
 ZH = ("自然語言處理是AI 領域中最具挑戰性之一，旨在使機器能夠理解、解釋並生成人類語言。隨著語音助理、聊天機器人及智慧客服等應用的"
       "普及，NLP 技術的發展已經從簡單的語言分析進階到複雜的語意理解。")
@@ -39,20 +39,18 @@ def test_a_reviewers_claim_counts_only_with_quotations_that_are_really_there():
     """Review B must quote both the handout and the textbook; review A's "yes" must quote the handout. What does
     not check out is a note, never a reason to correct or hold."""
     guide = "NLP 的目標是讓機器理解、解釋並生成人類語言。它已經從語言分析走到語意理解。"
-    real = ConflictsReview(conflicts=[Conflict(guide_quote="它已經從語言分析走到語意理解",
-                                               source_quote="從簡單的語言分析進階到複雜的語意理解", why="（測試）",
-                                               both_true="no")])
-    fs = gates.conflict_findings(real, guide, ZH)
-    assert [(f.code, f.severity, f.status) for f in fs] == [("conflict", "major", "confirmed")]
-    invented = ConflictsReview(conflicts=[Conflict(guide_quote="NLP 只能找關鍵字", source_quote="課本沒有這句", why="",
-                                                   both_true="no")])
-    fs = gates.conflict_findings(invented, guide, ZH)
-    assert [(f.code, f.severity) for f in fs] == [("conflict_unconfirmed", "minor")]
-    assert gates.reader_notes(fs)[0]["code"] == "conflict_unconfirmed"
-    reworded = ConflictsReview(conflicts=[Conflict(guide_quote="它已經從語言分析走到語意理解",
-                                                   source_quote="從簡單的語言分析進階到複雜的語意理解",
-                                                   why="用字不同", both_true="yes")])
-    assert gates.conflict_findings(reworded, guide, ZH) == []          # both can be true: not a contradiction
+    paras = gates.review_paragraphs(guide)
+    real = ParagraphsReview(paragraphs=[ParagraphCheck(id="P1", guide_says="已從語言分析走到語意理解",
+                                                       source_quote="從簡單的語言分析進階到複雜的語意理解", relation="conflict")])
+    fs = gates.paragraph_findings([real], paras, ZH)
+    assert [f.code for f in fs] == ["conflict"] and fs[0].draft_excerpt == paras[0]
+    invented = ParagraphsReview(paragraphs=[ParagraphCheck(id="P1", guide_says="NLP 只能找關鍵字", source_quote="課本沒有這句",
+                                                           relation="conflict")])
+    assert [f.code for f in gates.paragraph_findings([invented], paras, ZH)] == ["conflict_unconfirmed"]
+    agreed = ParagraphsReview(paragraphs=[ParagraphCheck(id="P1", source_quote="從簡單的語言分析進階到複雜的語意理解",
+                                                         relation="consistent")])
+    assert gates.paragraph_findings([agreed], paras, ZH) == []          # the same claim in other words
+    assert [f.code for f in gates.paragraph_findings([agreed, real], paras, ZH)] == ["conflict"]   # either reading
     pts = [("P1", "NLP 的目標"), ("P2", "從分析到理解")]
     a = PointsReview(points=[PointVerdict(id="P1", taught="yes", guide_quote="讓機器理解、解釋並生成人類語言"),
                              PointVerdict(id="P2", taught="no")])
@@ -136,3 +134,151 @@ def test_every_bound_of_a_handout_answer_follows_the_sources_language():
     en, zh = gates.handout_schema(EN * 3)["properties"], gates.handout_schema(ZH * 3)["properties"]
     assert en["key_points"]["items"]["maxLength"] > 2 * zh["key_points"]["items"]["maxLength"]
     assert en["check"]["maxLength"] > 2 * zh["check"]["maxLength"]
+
+
+def test_the_program_tidies_what_it_sees_exactly_instead_of_spending_corrections_on_it():
+    """A leaked answer field, a slipped copy of a textbook formula and a paragraph written over again are corrected
+    by the program: a small model asked to correct them gets them wrong again and again."""
+    source = "We compute the expected reward:\n\n$$r(s,a)\\doteq\\mathbb{E}[R_{t}|S_{t-1}=s]. \\tag{3.5}$$"
+    slipped = "$$r(s,a)\\buteq\\bbE[R_t|S_{t-1}=s].\\tag{3.5}$$"
+    guide = ("The expected reward averages what follows a state.\n\n" + slipped + "\n\nHere $s$ is the state.\n\n"
+             + slipped + "\n\nHere $s$ is the state.\n\n"
+             + 'Rewards matter. key_points": ["Rewards"], "check": "Why?"}')
+    out = gates.tidy_handout(guide, source)
+    assert out.count("$$") == 2 and "\\doteq\\mathbb{E}[R_{t}|S_{t-1}=s]" in out and "\\buteq" not in out
+    assert out.count("Here $s$ is the state.") == 1 and "key_points" not in out and out.endswith("Rewards matter.")
+    own = "$$r(s,a)=\\sum_{r}r\\,p(r|s,a)$$"                 # the handout's own formula, not a copy, stays
+    assert gates.tidy_handout(own, source).startswith(own + "\n\n$$r(s,a)\\doteq")   # the textbook's written after it
+
+
+def test_an_edit_replacing_text_over_several_paragraphs_is_not_applied():
+    """A correction changes the sentences a problem is about; a passage over several paragraphs replaced is the
+    handout written anew (a small model copied most of it and put the textbook in its place)."""
+    guide = "First paragraph explains states.\n\nSecond paragraph explains actions.\n\nThird explains rewards."
+    new, applied, skipped = gates.apply_edits(guide, [Edit(problem="F1", action="replace",
+                                                           old="First paragraph explains states.\n\nSecond paragraph explains actions.",
+                                                           new="The textbook's last paragraph.")])
+    assert new == guide and not applied and "跨了好幾段" in skipped[0]
+    new, applied, _ = gates.apply_edits(guide, [Edit(problem="F1", action="replace", old="Second paragraph explains actions.",
+                                                     new="Second paragraph explains what an action is.")])
+    assert "what an action is" in new and applied
+
+
+
+def test_a_transcribed_formula_the_passage_does_not_have_is_dropped():
+    """A small model reading an image sometimes answers with the prompt's example: a formula none of whose letters
+    are in the passage is not the passage's and is never required from the handout."""
+    from app.reading.contracts import SymbolTranscription
+    tr = SymbolTranscription(formulas=[r"\mathbf{w} \leftarrow \mathbf{w} - \eta \nabla L", r"q_{\ast}(s,a)"],
+                             symbols=[{"symbol": "w", "latex": r"\mathbf{w}", "style": "bold", "script": "none"},
+                                      {"symbol": "s", "latex": "s", "style": "italic", "script": "none"}],
+                             unreadable=[])
+    a = gates.anchored(tr, r"In MDPs we estimate the value $q_{\ast}(s,a)$ of each action $a$ in each state $s$.")
+    assert a.formulas == [r"q_{\ast}(s,a)"] and [x.symbol for x in a.symbols] == ["s"]
+    b = gates.anchored(tr, r"The weight vector $\mathbf{w}$ moves by $\eta\nabla L$ each step.")
+    assert b.formulas == tr.formulas[:1]
+
+
+def test_a_formula_is_matched_by_its_equation_number_and_without_sentence_punctuation():
+    """A copy numbered (3.2) is the textbook's (3.2), however garbled; the period or comma a display formula closes
+    its sentence with is not part of the formula; an end mark (□) is not a formula to teach."""
+    source = "The dynamics:\n\n$$p(s',r|s,a)\\doteq\\Pr\\{S_t=s'\\},\\tag{3.2}$$\n\nDone. $$\\square$$"
+    garbled = "Write it.\n\n$$p(s',r|s,a)\\bapprox\\text{Pr}\\big\\backslash{S_t=s'\\tag{3.2}$$"
+    assert "\\doteq\\Pr\\{S_t=s'\\},\\tag{3.2}" in gates.tidy_handout(garbled, source)
+    assert gates.tidy_handout("$$x=1\\tag{9.9}$$", source).startswith("$$x=1\\tag{9.9}$$")   # not the passage's
+    t = ra.ReadingTaskInput.model_construct(text=source, language="src", block_ids=[])
+    inline = "The dynamics are $p(s',r|s,a)\\doteq\\Pr\\{S_t=s'\\}\\tag{3.2}$ for every state."
+    assert [f.code for f in gates.handout_program(t, inline)] == []
+
+
+
+def test_a_textbook_formula_the_handout_writes_in_part_is_written_in_full_by_the_program():
+    """A small model writes a long formula in part (its right-hand side); asked to write it in full it adds copies and
+    explanations each time. The program writes the textbook's formula after the paragraph that talks about it."""
+    source = "The return is finite:\n\n$$G_{t}=\\sum_{k=0}^{\\infty}\\gamma^{k}=\\frac{1}{1-\\gamma}. \\tag{3.10}$$"
+    guide = "Rewards are discounted.\n\nThe sum $\\sum_{k=0}^\\infty \\gamma^k = \\frac{1}{1-\\gamma}$ is finite."
+    out = gates.tidy_handout(guide, source)
+    assert out.split("\n\n")[2] == "$$G_{t}=\\sum_{k=0}^{\\infty}\\gamma^{k}=\\frac{1}{1-\\gamma}. \\tag{3.10}$$"
+    written = "Rewards are discounted: $G_t=\\sum_{k=0}^{\\infty}\\gamma^k=\\frac{1}{1-\\gamma}$."   # in full, unnumbered
+    assert gates.tidy_handout(written, source) == written
+
+
+def test_a_field_label_opening_a_paragraph_and_tripled_dollars_are_tidied():
+    """Other fields written as plain labels ("Key points:", "Check:") open a paragraph that is not the handout's; a
+    formula set in $$$ … $$$ does not render."""
+    guide = ("The robot has two states.\n\nThe state set is $$$\\mathcal{S}=\\{a,b\\}$$$ here.\n\n"
+             "Key points: the robot balances risk.\n\nCheck: Why recharge?")
+    out = gates.tidy_handout(guide, "The robot has two states.")
+    assert out == "The robot has two states.\n\nThe state set is $$\\mathcal{S}=\\{a,b\\}$$ here."
+    kept = "You can check: the sum is one."                   # a word inside a sentence is no label
+    assert gates.tidy_handout(kept, "x") == kept
+
+
+def test_a_formula_named_by_its_number_elsewhere_is_shown_with_the_passage():
+    """An exercise "prove the second equality in (3.10)" without (3.10) in view made a small model invent the formula:
+    the display formula set elsewhere in the reading comes with the passage, for reference only (it is not one the
+    handout has to write)."""
+    from app.reading import agent as ra
+    eq = "$$G_{t}=\\sum_{k=0}^{\\infty}\\gamma^{k}=\\frac{1}{1-\\gamma}. \\tag{3.10}$$"
+    other = "If the reward is a constant +1, then the return is\n\n" + eq
+    exercise = "Exercise 3.10 Prove the second equality in (3.10). $$\\square$$"
+    assert ra.cited_formulas(exercise, [other, "No formulas here (3.10)."]) == [eq]
+    assert ra.cited_formulas(other, [exercise]) == []                     # its own formula is no citation
+    t = ra.ReadingTaskInput.model_construct(text=exercise, cited=[eq], has_figure=False, heading=None, material_title="m",
+                                            range_label="r", index=0, total=1, label="l", unit_id="u", prev_points=[],
+                                            qa_context=[])
+    assert eq in ra.task_fields(t)["quote_text"]
+    assert gates.required_formulas(t, None) == []
+
+
+def test_a_greek_or_logic_sign_the_passage_never_uses_is_corrected():
+    """γ written as \\forall (or as β) in the handout's math is a symbol the passage never uses: a program finding
+    naming the passage's own; a sign the passage before it or a cited formula uses is the textbook's."""
+    from app.reading import agent as ra
+    src = "Exercise 3.9 Suppose $\\gamma=0.9$ and the reward sequence is $R_{1}=2$ followed by 7s."
+    t = ra.ReadingTaskInput.model_construct(text=src, cited=[], topic=None, prev_points=[], language="src")
+    bad = "The discount factor is $\\forall=0.9$, so $G_1 = R_1 + \\forall G_2$."
+    (f,) = [x for x in gates.handout_program(t, bad) if x.code == "symbol_foreign"]
+    assert "\\forall" in f.detail and "\\gamma" in f.detail
+    assert not [x for x in gates.handout_program(t, "With $\\gamma=0.9$, $G_1 = R_1 + \\gamma G_2$.")
+                if x.code == "symbol_foreign"]
+    t2 = ra.ReadingTaskInput.model_construct(text="Exercise 3.6 What would the return be at each time?", cited=[],
+                                             topic={"prev": {"text": "the return is related to $-\\gamma^{K}$"}},
+                                             prev_points=[], language="src")
+    assert not [x for x in gates.handout_program(t2, "The return is $-\\gamma^{K}$.") if x.code == "symbol_foreign"]
+
+
+def test_a_sentence_said_twice_a_letter_style_or_an_operator_as_a_word_is_corrected():
+    """A sentence repeated nearly word for word, 𝒮 written \\mathcal when the passage sets it \\mathscr, and \\sum
+    written \\text{sum} are program findings; a sentence that only touches the same idea is not."""
+    from app.reading import agent as ra
+    src = "The four-argument function $p$ gives $p(s'|s,a)=\\sum_{r\\in\\mathscr{R}}p(s',r|s,a)$ for every state."
+    t = ra.ReadingTaskInput.model_construct(text=src, cited=[], topic=None, prev_points=[], language="src")
+    said = "The state-transition probability $p(s'|s,a)$ is the probability of moving to state $s'$ after action $a$."
+    g = (f"{said} It is computed from the four-argument function.\n\n{said.replace('moving', 'going')}\n\n"
+         "In symbols, $p(s'|s,a)=\\text{sum}_{r\\in\\mathcal{R}}p(s',r|s,a)$.")
+    codes = {f.code: f for f in gates.handout_program(t, g)}
+    assert {"repeated_text", "symbol_foreign", "math_word"} <= set(codes)
+    assert "\\mathscr" in codes["symbol_foreign"].detail and "\\sum" in codes["math_word"].detail
+    ok = (f"{said}\n\nSumming the four-argument function over the rewards gives it: "
+          "$p(s'|s,a)=\\sum_{r\\in\\mathscr{R}}p(s',r|s,a)$.")
+    assert not [f for f in gates.handout_program(t, ok) if f.code in ("repeated_text", "symbol_foreign", "math_word")]
+
+
+def test_a_formula_the_region_shows_in_part_is_the_passages_own_not_another_to_write():
+    """The vision reading of a region gave half of (3.4) ("p(s'|s,a) ≐ Pr{…} =") and the rows of an aligned display
+    one by one: required as formulas of their own, the handout could never write them and its corrections went in
+    circles. A reading the passage's formulas already contain is not required again; one the text lost still is."""
+    from app.reading import agent as ra
+    src = ("such as the state-transition probabilities\n\n"
+           "$$p(s'|s,a)\\doteq\\Pr\\{S_{t}=s'|S_{t-1}=s,A_{t-1}=a\\}=\\sum_{r\\in\\mathscr{R}}p(s',r|s,a). \\tag{3.4}$$\n\n"
+           "Returns are related:\n\n$$\\begin{aligned}G_{t}&\\doteq R_{t+1}+\\gamma R_{t+2}+\\cdots \\\\ &=R_{t+1}+\\gamma G_{t+1}"
+           "\\end{aligned} \\tag{3.9}$$\n\nwith $r_{\\text{search}}>r_{\\text{wait}}$.\n\n"
+           "$$G_{t}=\\sum_{k=0}^{\\infty}\\gamma^{k}=\\frac{1}{1-\\gamma}. \\tag{3.10}$$")
+    t = ra.ReadingTaskInput.model_construct(text=src)
+    ev = {"status": "confirmed", "transcription": {"formulas": [
+        "$p(s'|s,a)\\doteq\\Pr\\{S_t=s'|S_{t-1}=s,A_{t-1}=a\\}=$", "$G_t=R_{t+1}+\\gamma G_{t+1}$",
+        "r_{\\text{search}}>r_{\\text{wait}}", "$G_t=\\frac{1}{1-\\text{\\gamma}}$",
+        "\\mathbf{w}\\leftarrow\\mathbf{w}-\\eta\\nabla L"]}}
+    extra = [f for f in gates.required_formulas(t, ev) if f not in ra.source_formulas(src)[0]]
+    assert extra == [ra._norm_math("\\mathbf{w}\\leftarrow\\mathbf{w}-\\eta\\nabla L")]

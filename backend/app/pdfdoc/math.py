@@ -562,14 +562,20 @@ def _baseline(syms: list[Sym], ref: float) -> str:
             out += "'" * s.count("\\prime") if re.fullmatch(r"(\\prime)+", s) else f"^{{{s}}}"
         return out
 
+    def spaced(k: int) -> bool:
+        """A word of text in the formula ("for all") keeps the spaces set around it."""
+        a, b = line[k - 1], line[k]
+        return any(re.match(r"\\(text|mathrm)\{", s.tex) for s in (a, b)) and b.rect[0] - a.rect[2] >= 0.2 * ref
+
     toks = [scripted("{}", *pre)] if pre[0] or pre[1] else []
-    toks += [scripted(_tok(b), *scripts[id(b)]) for b in line]
+    toks += [("\\ " if k and spaced(k) else "") + scripted(_tok(b), *scripts[id(b)]) for k, b in enumerate(line)]
     return _join(toks)
 
 
 # -- regions --------------------------------------------------------------------------------------------------------
 TAG_RE = re.compile(r"^\((\d+(?:\.\d+)*[a-z]?)\)$")
 BRIDGE = set("0123456789=+-−()[]{}/|,.:;<>!'*·×")
+DISPLAY_WORDS = 0.25   # a display line is mostly math: words of text in it take at most this share of its glyphs
 
 
 @dataclass
@@ -682,8 +688,10 @@ def _line_parts(gs: list[Glyph]) -> tuple[list[list[int]], list[int] | None, flo
         k = e + 1
     n = sum(len(w) for w in words)
     share = sum(len(w) for w, kind in zip(words, kinds) if kind in "mb") / n if n and runs else 0.0
-    # a line with words of text in it ("If τ+n<T, then: …" in an algorithm) is text with formulas, not a display
-    if any(kind == "t" and len(w) >= 2 for w, kind in zip(words, kinds)):
+    # a line with words of text in it ("If τ+n<T, then: …" in an algorithm) is text with formulas, not a display; a
+    # display opens with math and may carry a few connecting words after it ("= 1, for all s ∈ S")
+    wordy = sum(len(w) for w, kind in zip(words, kinds) if kind == "t" and len(w) >= 2)
+    if wordy > DISPLAY_WORDS * n or wordy and kinds[0] == "t":
         share = min(share, 0.5)
     return runs, tag, share, all(kind == "b" for kind in kinds)
 

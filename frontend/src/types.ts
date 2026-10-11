@@ -113,7 +113,7 @@ export interface Segmentation {
   notes: string[];
   status?: "pending" | "done";
   /** 區塊 left out as needing no guide (contents, a summary repeating the text, matter about the material / course / exam) */
-  skipped?: { role: "toc" | "summary" | "meta"; label: string; topic?: string; text: string }[];
+  skipped?: { role: "toc" | "summary" | "meta" | "exercise"; label: string; topic?: string; text: string }[];
 }
 
 export interface ReadingView {
