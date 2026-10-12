@@ -959,8 +959,33 @@ def build_learning_graph(deps: WorkflowDeps, checkpointer):
         that used to be verified ahead of the reader is gone); the next unit is the prefetch's."""
         return []
 
+    async def segment_now(sid: str) -> dict:
+        """導讀巡覽 (app.reading.tour): the session's segmentation outside any command — the prepare node itself, so a
+        cancelled run resumes from the windows it already saved. Returns {"error": …} (None when done)."""
+        return await prepare({"session_id": sid, "pending_event_id": None})
+
+    async def guide_unit(sid: str, idx: int, attempt: int = 1) -> dict:
+        """導讀巡覽: unit `idx`'s guide outside any command and in any order — a reusable guide adopted, else the
+        guide node's 主題 path. Accepted 區塊 are cached, so a cancelled run resumes where it stopped. Returns
+        {"error": …, "guide_attempt": …} as the guide node does."""
+        r = row(sid)
+        if str(idx) in r["state"]["reading"]["guides"]:
+            return {"error": None}
+        q = r["content_snapshot"]["quotes"][idx]
+        if attempt == 1 and (found := reusable_guide(sid, q)):
+            return adopt_guide(sid, idx, q, found)
+        if not tg.chunks_of(q):
+            return {"error": {"code": "internal", "detail": "這一段沒有可導讀的區塊", "retryable": False}}
+        state: WorkflowState = {"session_id": sid, "pending_event_id": None, "guide_attempt": {q["unit_id"]: attempt}}
+        try:
+            return await guide_topic(state, idx, q)
+        except TaskError as e:
+            return {"error": model_error(e)}
+
     compiled.prefetch_next = prefetch_next   # used by the runner between commands
     compiled.warm_sources = warm_sources
+    compiled.segment_now = segment_now       # used by the reader's 導讀巡覽
+    compiled.guide_unit = guide_unit
     return compiled
 
 

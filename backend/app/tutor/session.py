@@ -142,7 +142,9 @@ class TutorService:
                         "verdict": (r["summary"] or {}).get("verdict"),
                         "progress": _progress(r),
                         # the companion's whole-material study (導師全文學習): the reader uses it, the lists do not
-                        "study": bool((r.get("workflow_meta") or {}).get("study"))})
+                        "study": bool((r.get("workflow_meta") or {}).get("study")),
+                        # a window of the reader's 導讀 mode (app.reading.tour): opened there, not in 學習
+                        "tour": bool((r.get("workflow_meta") or {}).get("tour"))})
         return out
 
     # -- one turn -----------------------------------------------------------
@@ -272,6 +274,8 @@ def _progress(row: dict) -> dict:
     """Where a session stands, for the home page: reading quote k of n, or past the reading and into the questions."""
     state, total = row["state"] or {}, len(row["content_snapshot"].get("quotes") or [])
     reading = state.get("reading") or {}
+    if (row.get("workflow_meta") or {}).get("tour"):   # a 導讀 window is never read through: its guides written so far
+        return {"stage": "reading", "read": len(reading.get("guides") or {}), "total": total}
     if state.get("phase") == "reading" and total:
         return {"stage": "reading", "read": min(int(reading.get("index") or 0), total), "total": total}
     return {"stage": "quiz", "read": total, "total": total}

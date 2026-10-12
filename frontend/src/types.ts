@@ -155,7 +155,8 @@ export interface CommandView {
 }
 
 export interface WorkflowView {
-  waiting: "student" | "retry" | "answer" | "completed" | null;
+  /** tour: a window of the reader's 導讀 mode (its guides are written there, not by commands) */
+  waiting: "student" | "retry" | "answer" | "completed" | "tour" | null;
   stage: string | null;
   active_command: CommandView | null;
   error: ApiError | null;
@@ -213,6 +214,8 @@ export interface SessionListItem {
   progress: { stage: "reading" | "quiz"; read: number; total: number };
   /** the companion's whole-material study (導師全文學習): used by the reader, left out of the lists */
   study?: boolean;
+  /** a window of the reader's 導讀 mode: opened there; `progress.read` counts its guides written so far */
+  tour?: boolean;
 }
 
 export interface ModelConfig {
@@ -411,6 +414,53 @@ export interface StudyView {
   error: string | null;
   /** first and last page (line) of every reading part */
   parts: { index: number; from: number; to: number; heading: string | null }[];
+}
+
+/** The reader's 導讀 mode (app.reading.tour): windows of pages around where the reader is, segmented and guided on
+ *  demand; the windows that meet form the run on screen. */
+export interface TourView {
+  material_id: string;
+  /** the book's 導讀 is being prepared now (false once the mode is left) */
+  active: boolean;
+  focus: { session_id: string; index: number | null; at: number | null } | null;
+  /** a window being set up (its text read) */
+  creating: { start: number; end: number } | null;
+  windows: TourWindow[];
+  /** the run reaches the start / the end of the book: nothing more to open that way */
+  first: boolean;
+  last: boolean;
+}
+
+export type TourState = "queued" | "working" | "done" | "failed";
+
+export interface TourWindow {
+  session_id: string;
+  start: number;
+  end: number;
+  label: string | null;
+  /** segmenting: its 主題 are not known yet (`state` tells whether that is running, waiting or failed) */
+  status: "segmenting" | "ready";
+  state: TourState;
+  error: ApiError | null;
+  topics: TourTopic[];
+  /** passages left out as needing no guide (contents, exercises …) */
+  skipped: { role: string; label: string; text: string }[];
+}
+
+export interface TourTopic {
+  index: number;
+  unit_id: string | null;
+  label: string;
+  heading: string | null;
+  /** first and last page (line) the 主題 covers */
+  from: number;
+  to: number;
+  excerpt: string | null;
+  /** how many 區塊 its guide is written in */
+  blocks: number;
+  guide: Guide | null;
+  state: TourState;
+  error: ApiError | null;
 }
 
 /** A question typed in the reader, answered from the units on that page (and their guide when one exists). */

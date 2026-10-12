@@ -14,9 +14,11 @@ import { SettingsModal, type SettingsTab } from "./components/SettingsModal";
 import { TitleBar } from "./components/TitleBar";
 import { customTitlebar } from "./desktop";
 import { useT } from "./i18n";
+import { usePrefs } from "./prefs";
 
 export function App() {
   const [route, navigate] = useRoute();
+  const { guideSpan } = usePrefs();
   const [collapsed, setCollapsed] = useStored("mentor.sidebarCollapsed", false);
   const [conn, recheck, reportCheck] = useConnection();
   const [companion, setCompanion] = useState<CompanionId>("owl");
@@ -96,10 +98,23 @@ export function App() {
   const [quizFor, setQuizFor] = useState<string | null>(null);
   // a reading of a book opens in that book's reader, switched to its 導讀 (or 出題); one without a book (the demo)
   // has the learning page
-  const openSession = async (id: string, opts?: { quiz?: boolean; material?: string }) => {
+  // a 導讀 of a book always opens the reader's 導讀 mode: a window of it at that window; a reading from before the
+  // mode, still being read, at its first page (its window found or made there, as pressing 導讀 on that page does).
+  // 出題, and a reading already past its guides, open that reading.
+  const openSession = async (id: string, opts?: { quiz?: boolean; material?: string; tour?: boolean }) => {
+    if (opts?.tour && opts.material) return navigate({ page: "material", id: opts.material, view: { kind: "tour", session: id } });
+    const s = await api.session(id).catch(() => null);
+    const material = opts?.material ?? s?.source?.material_id ?? null;
+    if (material && s && !opts?.quiz) {
+      if (s.workflow?.waiting === "tour") return navigate({ page: "material", id: material, view: { kind: "tour", session: id } });
+      const start = s.source?.start;
+      if (start && s.state.phase === "reading" && !s.reading?.done) {
+        const v = await api.tourOpen(material, start, guideSpan).catch(() => null);
+        if (v?.focus) return navigate({ page: "material", id: material, view: { kind: "tour", session: v.focus.session_id, at: start } });
+      }
+    }
     localStorage.setItem("mentor.sessionId", id);
     setSessionId(id);
-    const material = opts?.material ?? (await api.session(id).then((s) => s.source?.material_id ?? null, () => null));
     if (material) return navigate({ page: "material", id: material, view: { kind: opts?.quiz ? "quiz" : "guide", session: id } });
     setQuizFor(opts?.quiz ? id : null);
     navigate({ page: "learn" });
@@ -114,11 +129,9 @@ export function App() {
         route={route}
         companion={companion}
         conn={conn}
-        sessionId={sessionId}
         bookmarks={bookmarks}
         readingAt={readingAt}
         onOpenPage={openPage}
-        onOpenSession={(id, material) => openSession(id, { material })}
         onRenameBookmark={(id, n, label) => api.renameBookmark(id, n, label).then((m) => setBookMarks(id, m)).catch(() => {})}
         onRemoveBookmark={(id, n) => api.removeBookmark(id, n).then((m) => setBookMarks(id, m)).catch(() => {})}
         collapsed={collapsed}

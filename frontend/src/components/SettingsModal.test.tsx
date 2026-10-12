@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SettingsModal } from "./SettingsModal";
 import { PrefsProvider } from "../prefs";
@@ -35,6 +35,25 @@ describe("SettingsModal", () => {
     await userEvent.click(screen.getByRole("option", { name: "Chinese" }));
     expect(screen.getByRole("combobox", { name: "Guide language" })).toHaveTextContent("Chinese");
     expect(JSON.parse(localStorage.getItem("mentor.guideLang")!)).toBe("zh");
+  });
+
+  test("導讀: the pages taken either side of the page being read (2 by default) are a window drawn on a row of pages, set by dragging, clicking or the arrow keys", async () => {
+    localStorage.setItem("mentor.locale", JSON.stringify("zh-Hant"));
+    open("guide");
+    const row = screen.getByRole("slider", { name: "導讀範圍" });
+    expect(row.getAttribute("aria-valuetext")).toBe("前後各 2 頁（共 5 頁）");
+    expect(row.querySelectorAll(".span-page.in")).toHaveLength(5);
+    expect(screen.queryByRole("combobox", { name: "導讀範圍" })).toBeNull();
+    // a page three away from the middle, on either side, takes the window there
+    fireEvent.pointerDown(row.querySelector('[data-offset="-3"]')!, { pointerId: 1 });
+    fireEvent.pointerUp(row, { pointerId: 1 });
+    expect(row.getAttribute("aria-valuenow")).toBe("3");
+    expect(JSON.parse(localStorage.getItem("mentor.guideSpan")!)).toBe(3);
+    row.focus();
+    await userEvent.keyboard("{Home}");
+    expect(row.getAttribute("aria-valuetext")).toBe("只有目前頁面");
+    await userEvent.keyboard("{ArrowRight}");
+    expect(row.querySelectorAll(".span-page.in")).toHaveLength(3);
   });
 
   test("偏好: switching language re-renders in English and theme pins <html data-theme>", async () => {

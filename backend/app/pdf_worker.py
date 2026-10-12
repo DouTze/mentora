@@ -8,7 +8,7 @@ was:
     pages     page sizes, page images, page layers (text runs, links, images, comments), document info, stored
               images and attachments for the reader (a small pool, one MuPDF per worker; app.pdfdoc does the reading)
     studies   setting up a whole-material study: the normal `start_from_material(1..N)` of the learning flow, whose
-              text and layout extraction of a long book takes minutes
+              text and layout extraction of a long book takes minutes; and the windows of the reader's 導讀巡覽
     extract   reading an imported PDF's text, page by page (app.material_extract), one book at a time
 
 The functions below are module-level so the pool can pickle them; each worker imports only what its job needs."""
@@ -132,3 +132,29 @@ def create_study(db_path: str, model_config: dict, material_id: str, unit_count:
     wf = WorkflowService(svc, Repository(db), BackendPool(), None)
     row = wf.start_from_material(material_id, 1, unit_count, strategy_id, extra_meta={"study": True}, notify=False)
     return row["id"]
+
+
+def create_window(db_path: str, model_config: dict, material_id: str, start: int, end: int, strategy_id: str) -> dict:
+    """One window of the reader's 導讀巡覽 (app.reading.tour): the learning flow's session over units start..end (its
+    text and PDF layout evidence extracted here), marked as a tour window. Its start command is closed at once: the
+    tour segments the window and writes its guides itself, the runner never runs it. {"id": …}, or {"error": why}
+    (a SessionError does not cross the process boundary)."""
+    from .db import Database
+    from .llm.registry import Registry
+    from .llm.runtime import BackendPool
+    from .materials import MaterialStore
+    from .models import ModelConfig
+    from .persistence.repository import Repository
+    from .tutor.session import TutorService
+    from .workflows.service import WorkflowService
+    db = Database(db_path)
+    registry = Registry(ModelConfig.model_validate(model_config))
+    svc = TutorService(db, registry, MaterialStore(db))
+    repo = Repository(db)
+    wf = WorkflowService(svc, repo, BackendPool(), None)
+    try:
+        row = wf.start_from_material(material_id, start, end, strategy_id, extra_meta={"tour": True}, notify=False)
+    except Exception as e:  # noqa: BLE001 — an empty or unreadable range: shown on the window
+        return {"error": getattr(e, "detail", None) or f"{type(e).__name__}: {e}", "code": getattr(e, "code", None)}
+    repo.finish_command(row["id"], f"start-{row['id']}", status="completed", workflow_status={"waiting": "tour"})
+    return {"id": row["id"]}

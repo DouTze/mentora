@@ -17,4 +17,6 @@ export const enPlurals: Partial<Record<Key, { variable: string; one?: string; ot
   "reading.unverified.summary": { variable: "n", one: "We couldn’t verify {n} point in this reading guide automatically. Compare it with the source text." },
   "reading.finish.confirmText": { variable: "count", one: "Skip the remaining {count} section and practice what you’ve read so far?" },
   "reading.previous.show": { variable: "count", one: "Review the previous {count} section" },
+  "guide.span.n": { variable: "n", one: "{n} page each side ({total} pages)" },
+  "tour.skipped": { variable: "n", one: "Skipped {n} section that doesn’t need guided reading" },
 };

@@ -1,5 +1,5 @@
 import type { CompanionSettings } from "./companions";
-import type { ActiveBackend, ApiError, Bookmark, Bookmarks, PdfInfo, PdfPageLayer, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReaderQuestion, ReadingQA, SessionListItem, SessionView, ShelfBook, ShelfScope, ShelfView, Strategy, StudyView, TutorMessage, Turn } from "./types";
+import type { ActiveBackend, ApiError, Bookmark, Bookmarks, PdfInfo, PdfPageLayer, RemoteEndpoint, CommandView, Category, Content, Guide, Library, Material, MaterialDetail, ModelConfig, ReaderQuestion, ReadingQA, SessionListItem, SessionView, ShelfBook, ShelfScope, ShelfView, Strategy, StudyView, TourView, TutorMessage, Turn } from "./types";
 
 export class RequestError extends Error {
   constructor(public status: number, public body: ApiError & { session?: SessionView | null }) {
@@ -119,6 +119,19 @@ export const api = {
   studyAction: (id: string, action: "focus" | "leave" | "pause" | "resume" | "cancel") =>
     call<StudyView>(`/materials/${id}/study/${action}`, { method: "POST" }),
   studyLeaveUrl: (id: string) => `${API_BASE}/materials/${id}/study/leave`,
+  /** the 導讀 mode: open at page (line) `at` with `span` pages either side; the 主題 on screen; the window before /
+   *  after the run; a failed step again; leaving the mode */
+  tour: (id: string) => call<TourView>(`/materials/${id}/tour`),
+  tourOpen: (id: string, at: number, span: number) =>
+    call<TourView>(`/materials/${id}/tour/open`, { method: "POST", body: JSON.stringify({ at, span }) }),
+  tourFocus: (id: string, session_id: string, index: number | null, at?: number | null) =>
+    call<TourView>(`/materials/${id}/tour/focus`, { method: "POST", body: JSON.stringify({ session_id, index, at: at ?? null }) }),
+  tourExtend: (id: string, session_id: string, direction: "before" | "after", span: number) =>
+    call<TourView>(`/materials/${id}/tour/extend`, { method: "POST", body: JSON.stringify({ session_id, direction, span }) }),
+  tourRetry: (id: string, session_id: string, index: number | null) =>
+    call<TourView>(`/materials/${id}/tour/retry`, { method: "POST", body: JSON.stringify({ session_id, index }) }),
+  tourPause: (id: string) => call<TourView>(`/materials/${id}/tour/pause`, { method: "POST" }),
+  tourPauseUrl: (id: string) => `${API_BASE}/materials/${id}/tour/pause`,
   readerQuestions: (id: string) => call<ReaderQuestion[]>(`/materials/${id}/questions`),
   readerAsk: (id: string, at: number, question: string) =>
     call<ReaderQuestion>(`/materials/${id}/ask`, { method: "POST", body: JSON.stringify({ at, question }) }),

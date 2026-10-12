@@ -72,6 +72,7 @@ class StudyService:
         self._kicks: set[asyncio.Task] = set()
         self._beat = 0.0
         self._watch: asyncio.Task | None = None
+        self.tour = None   # app.reading.tour.GuideTour: its windows answer for pages no study covers
         with db.conn() as c:
             c.executescript(SCHEMA)
         # nobody is reading yet: every study waits (the runner recovers pending commands at start-up otherwise)
@@ -398,7 +399,7 @@ class StudyService:
         m = self.materials.get(mid)
         self.materials.require_ready(m)
         n = max(1, min(int(n), m["unit_count"]))
-        found = self.part_at(mid, n)
+        found = self.part_at(mid, n) or (self.tour.part_at(mid, n) if self.tour else None)
         if found:
             _, quotes, _ = found
             on = self.quotes_at(quotes, n)

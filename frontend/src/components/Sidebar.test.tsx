@@ -125,7 +125,7 @@ describe("Sidebar", () => {
       });
       await waitFor(() => expect(calls.find((c) => c.key === "PATCH /api/materials/m2")?.body).toEqual({ category_id: "c1" }));
       expect(document.documentElement.classList.contains("grabbing")).toBe(false);
-      expect(document.querySelector(".drag-ghost")).toBeNull();
+      expect(!!document.querySelector(".drag-ghost")).toBe(false);
     } finally {
       document.elementFromPoint = original;
     }
@@ -145,24 +145,14 @@ describe("Sidebar", () => {
 });
 
 describe("Sidebar · a book opened in place", () => {
-  test("clicking a bookmarked book opens it: its bookmarks with their chapters and its guides, the current one marked", async () => {
-    mockFetch({
-      "GET /api/sessions": () => ({
-        json: [
-          { id: "s1", status: "active", created_at: "a", updated_at: "", content_title: "", content_version: "", strategy_id: "", backend: "", simulated: false, verdict: null,
-            source: { material_id: "m2", material_title: "Newton laws", unit: "page", start: 1, end: 2, label: "第 1–2 頁" }, progress: { stage: "reading", read: 1, total: 4 } },
-        ],
-      }),
-    });
+  test("clicking a bookmarked book opens it: its bookmarks with their chapters, the page being read marked; no 導讀 listed", async () => {
+    const calls = mockFetch({});
     const pages: [string, number][] = [];
-    const sessions: string[] = [];
     const { visited } = setup({
-      sessionId: "s1",
       bookmarks: { m2: [{ unit_no: 2, chapter: "1.1 慣性", created_at: "" }] },
       route: { page: "material", id: "m2" },
       readingAt: { id: "m2", n: 2 },
       onOpenPage: (id, n) => pages.push([id, n]),
-      onOpenSession: (id) => sessions.push(id),
     });
     await userEvent.click(screen.getByText("Newton laws"));
     expect(visited).toEqual([{ page: "material", id: "m2" }]);
@@ -170,28 +160,29 @@ describe("Sidebar · a book opened in place", () => {
     expect(mark.getAttribute("aria-current")).toBe("location");   // the page being read
     await userEvent.click(mark);
     expect(pages).toEqual([["m2", 2]]);
-    const guide = await screen.findByRole("button", { name: /第 1–2 頁/ });
-    expect(guide.classList.contains("here")).toBe(false);   // the current reading, but not on screen: not bold
-    expect(guide.querySelector(".sb-icon.now")).toBeTruthy();   // … only marked as being learnt
-    await userEvent.click(guide);
-    expect(sessions).toEqual(["s1"]);
-    cleanup();
-    setup({ sessionId: "s1", route: { page: "learn" }, bookmarks: { m2: [{ unit_no: 2, chapter: "1.1 慣性", created_at: "" }] } });
-    expect((await screen.findByRole("button", { name: /第 1–2 頁/ })).classList.contains("here")).toBe(true);   // on screen: bold
+    // 導讀 is entered from the reader: the book lists no guided readings, and none are asked for
+    expect(screen.queryByRole("group", { name: "導讀" })).toBeNull();
+    expect(calls.some((c) => c.key === "GET /api/sessions")).toBe(false);
     // a group folds by its title and stays folded
     await userEvent.click(screen.getByRole("button", { name: /^書籤/ }));
     expect(screen.queryByText("1.1 慣性")).toBeNull();
-    expect(screen.getByRole("button", { name: /第 1–2 頁/ })).toBeTruthy();
     expect(JSON.parse(localStorage.getItem("mentor.foldedBookSections")!)).toEqual(["m2:marks"]);
     await userEvent.click(screen.getByRole("button", { name: /^書籤/ }));
-    // clicking the book again folds it
+    // on the book's own pages, clicking the book folds it
     await userEvent.click(screen.getByText("Newton laws"));
     expect(screen.queryByText("1.1 慣性")).toBeNull();
+    // from another page, the click opens the book and leaves it open here
+    cleanup();
+    localStorage.setItem("mentor.openBooks", JSON.stringify(["m2"]));
+    setup({ route: { page: "learn" }, bookmarks: { m2: [{ unit_no: 2, chapter: "1.1 慣性", created_at: "" }] } });
+    expect(await screen.findByText("1.1 慣性")).toBeTruthy();
+    await userEvent.click(screen.getByText("Newton laws"));
+    expect(screen.getByText("1.1 慣性")).toBeTruthy();
   });
 });
 
 describe("Sidebar · naming", () => {
-  test("a bookmark and a guided reading are named in place; Escape keeps the old name, an empty one the default", async () => {
+  test("a bookmark is named in place; Escape keeps the old name", async () => {
     const calls = mockFetch({
       "GET /api/sessions": () => ({
         json: [{ id: "s1", status: "active", created_at: "a", updated_at: "", content_title: "", content_version: "", strategy_id: "", backend: "", simulated: false, verdict: null,
@@ -213,15 +204,6 @@ describe("Sidebar · naming", () => {
     await userEvent.click(screen.getByRole("button", { name: "為書籤命名" }));
     await userEvent.type(screen.getByRole("textbox", { name: "為書籤命名" }), "不要{Escape}");
     expect(renamed.length).toBe(1);
-    // a guided reading: named, shown in place of its range; emptied, back to the range
-    await userEvent.click(await screen.findByRole("button", { name: "為導讀命名" }));
-    await userEvent.type(screen.getByRole("textbox", { name: "為導讀命名" }), "第一次讀{Enter}");
-    expect(await screen.findByText("第一次讀")).toBeTruthy();
-    expect(calls.find((c) => c.key === "PUT /api/labels/session/s1")?.body).toEqual({ label: "第一次讀" });
-    await userEvent.click(screen.getByRole("button", { name: "為導讀命名" }));
-    await userEvent.clear(screen.getByRole("textbox", { name: "為導讀命名" }));
-    await userEvent.keyboard("{Enter}");
-    expect(await screen.findByText("第 1–2 頁")).toBeTruthy();
   });
 });
 
@@ -232,12 +214,12 @@ describe("Sidebar · folded", () => {
       <Sidebar library={{ categories: [], materials: [] }} route={{ page: "home" }} companion="owl" conn={{ status: "idle", active: null, detail: "" }}
         collapsed onToggle={() => {}} onNavigate={() => {}} onLibraryChange={async () => {}} onOpenSettings={() => {}} />,
     );
-    expect(document.querySelector(".sidebar.peek")).toBeNull();
+    expect(!!document.querySelector(".sidebar.peek")).toBe(false);
     await userEvent.hover(document.querySelector(".sidebar.rail")!);
-    await waitFor(() => expect(document.querySelector(".sidebar.peek")).not.toBeNull());
+    await waitFor(() => expect(!!document.querySelector(".sidebar.peek")).toBe(true));
     expect(screen.getByText("Mentor")).toBeTruthy();
     fireEvent.mouseLeave(document.querySelector(".sidebar.peek")!);
-    await waitFor(() => expect(document.querySelector(".sidebar.peek.leaving")).not.toBeNull());   // slides away first
-    await waitFor(() => expect(document.querySelector(".sidebar.peek")).toBeNull(), { timeout: 2000 });
+    await waitFor(() => expect(!!document.querySelector(".sidebar.peek.leaving")).toBe(true));   // slides away first
+    await waitFor(() => expect(!!document.querySelector(".sidebar.peek")).toBe(false), { timeout: 2000 });
   });
 });

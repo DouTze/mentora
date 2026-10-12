@@ -6,7 +6,13 @@ import { mockFetch, session } from "../test/fixtures";
 import { I18nContext, translate } from "../i18n";
 
 const material = { id: "m1", category_id: null, title: "光合作用", filename: "光合作用.md", kind: "md", unit: "line", unit_count: 4, created_at: "", translate_zh: false, units: ["# 光合作用", "", "植物利用陽光製造葡萄糖。", "葉綠體是進行光合作用的地方。"] };
-const study = { status: "ready", session_id: "study1", planner: "model", progress: 1, error: null, parts: [{ index: 0, from: 1, to: 4, heading: "光合作用" }] };
+const topicA = { index: 0, unit_id: "u1", label: "第 1–3 行", heading: "光合作用", from: 1, to: 3, excerpt: "植物利用陽光…", blocks: 1, state: "done", error: null,
+  guide: { guide: "", key_points: [], check: "葉綠體在哪裡？", topic_summary: "本主題探討植物如何製造養分。", blocks: [{ index: 0, source: "植物利用陽光製造葡萄糖。", status: "accepted", guide: "原料是水與二氧化碳。" }] } };
+const topicB = { index: 1, unit_id: "u4", label: "第 4 行", heading: "葉綠體", from: 4, to: 4, excerpt: "葉綠體是…", blocks: 1, state: "queued", error: null, guide: null };
+const tourView = (topics: unknown[] = [topicA, topicB]) => ({
+  material_id: "m1", active: true, focus: { session_id: "w1", index: null, at: 1 }, creating: null, first: true, last: true,
+  windows: [{ session_id: "w1", start: 1, end: 4, label: "第 1–4 行", status: "ready", state: "done", error: null, topics, skipped: [] }],
+});
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
@@ -14,15 +20,13 @@ afterEach(cleanup);
 function setup(routes: Parameters<typeof mockFetch>[0] = {}) {
   const calls = mockFetch({
     "GET /api/materials/m1": () => ({ json: material }),
-    "GET /api/materials/m1/study": () => ({ json: study }),
-    "POST /api/materials/m1/study/focus": () => ({ json: study }),
-    "POST /api/materials/m1/study/leave": () => ({ json: study }),
     "GET /api/materials/m1/questions": () => ({ json: [] }),
     ...routes,
   });
   const opened: { id: string; quiz?: boolean }[] = [];
-  render(<MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={(id, o) => opened.push({ id, quiz: o?.quiz })} />);
-  return { calls, opened };
+  const went: unknown[] = [];
+  render(<MaterialPage id="m1" library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={(r) => went.push(r)} onOpenSession={(id, o) => opened.push({ id, quiz: o?.quiz })} />);
+  return { calls, opened, went };
 }
 
 describe("MaterialPage · reader", () => {
@@ -32,7 +36,14 @@ describe("MaterialPage · reader", () => {
     expect(screen.getByText("植物利用陽光製造葡萄糖。 葉綠體是進行光合作用的地方。".split(" ")[0], { exact: false })).toBeTruthy();
     expect(screen.queryByTestId("unit")).toBeNull();
     expect(screen.queryByRole("button", { name: "開始學習" })).toBeNull();
-    expect(await screen.findByText("全書段落已整理好")).toBeTruthy();
+  });
+
+  test("opening a book no longer segments the whole of it: nothing is asked of the companion's study", async () => {
+    const { calls } = setup();
+    await screen.findByRole("textbox", { name: "向導師提問" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.some((c) => c.key.includes("/study"))).toBe(false);
+    expect(screen.queryByText(/全書段落/)).toBeNull();
   });
 
   test("a question is sent with the line being read and its answer shown above the box", async () => {
@@ -78,58 +89,34 @@ describe("MaterialPage · reader", () => {
     expect((box as HTMLTextAreaElement).value).toBe("這段在說什麼？");
   });
 
-  test("導讀 asks for its range (these pages or all) and starts a reading of it; 出題 starts at the current position", async () => {
-    const { calls, opened } = setup({ "POST /api/sessions": () => ({ json: session({ id: "s8" }) }) });
+  test("導讀 opens the 導讀 mode at the line being read, with the pages around it (設定 › 導讀; 2 by default) and no range to choose; 出題 starts at the current position", async () => {
+    const { calls, went } = setup({ "POST /api/materials/m1/tour/open": () => ({ json: tourView() }) });
     await userEvent.click(await screen.findByRole("button", { name: /^導讀$/ }));
-    const panel = await screen.findByRole("group", { name: "導讀範圍" });
-    expect((within(panel).getByLabelText("從") as HTMLInputElement).value).toBe("1");
-    await userEvent.click(within(panel).getByRole("button", { name: "全部" }));
-    await userEvent.click(within(panel).getByRole("button", { name: "開始導讀" }));
-    await waitFor(() => expect(opened).toEqual([{ id: "s8", quiz: false }]));
-    expect(calls.find((c) => c.key === "POST /api/sessions")?.body).toMatchObject({ material_id: "m1", start: 1, end: 4 });
+    await waitFor(() => expect(went).toEqual([{ page: "material", id: "m1", view: { kind: "tour", session: "w1", at: 1 } }]));
+    expect(calls.find((c) => c.key === "POST /api/materials/m1/tour/open")?.body).toEqual({ at: 1, span: 2 });
+    expect(screen.queryByRole("group", { name: "導讀範圍" })).toBeNull();
     cleanup();
     const second = setup({ "POST /api/materials/m1/learn": () => ({ json: session({ id: "s9" }) }) });
     await userEvent.click(await screen.findByRole("button", { name: /出題/ }));
     await waitFor(() => expect(second.opened).toEqual([{ id: "s9", quiz: true }]));
   });
 
-  test("the study's progress is shown while the companion reads", async () => {
-    const reading = { ...study, status: "reading", progress: 0.42, parts: [] };
-    setup({ "GET /api/materials/m1/study": () => ({ json: reading }), "POST /api/materials/m1/study/focus": () => ({ json: reading }) });
-    expect(await screen.findByText("導師正在整理全書段落 · 42%")).toBeTruthy();
+  test("導讀 pressed again while the mode is prepared stops preparing it", async () => {
+    let answer = () => {};
+    const { calls, went } = setup({ "POST /api/materials/m1/tour/open": () => new Promise((r) => (answer = () => r({ json: tourView() }))), "POST /api/materials/m1/tour/pause": () => ({ json: tourView() }) });
+    const guide = await screen.findByRole("button", { name: /^導讀$/ });
+    await userEvent.click(guide);
+    await waitFor(() => expect(guide.className).toContain("filling"));
+    await userEvent.click(guide);
+    expect(guide.className).not.toContain("filling");
+    answer();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(went).toEqual([]);
+    expect(calls.some((c) => c.key === "POST /api/materials/m1/tour/pause")).toBe(true);
   });
 });
 
-describe("MaterialPage · study progress and zoom", () => {
-  test("hovering the study shows the pass and the batch the companion is on", async () => {
-    const reading = { ...study, status: "reading", progress: 0.12, parts: [], step: { phase: "outline", current: 3, total: 12, approx: false } };
-    setup({ "GET /api/materials/m1/study": () => ({ json: reading }), "POST /api/materials/m1/study/focus": () => ({ json: reading }) });
-    await userEvent.hover(await screen.findByText("導師正在整理全書段落 · 12%"));
-    const card = await screen.findByRole("tooltip");
-    expect(card).toHaveTextContent("逐段摘要");
-    expect(card).toHaveTextContent("第 3 段，共 12 段");
-  });
-
-  test("the companion's reading is paused from the card, and resumed", async () => {
-    const reading = { ...study, status: "reading", progress: 0.3, parts: [], step: { phase: "outline", current: 2, total: 9, approx: false } };
-    const { calls } = setup({
-      "GET /api/materials/m1/study": () => ({ json: reading }),
-      "POST /api/materials/m1/study/focus": () => ({ json: reading }),
-      "POST /api/materials/m1/study/pause": () => ({ json: { ...reading, paused: true, by_user: true } }),
-    });
-    await userEvent.hover(await screen.findByText("導師正在整理全書段落 · 30%"));
-    await userEvent.click(await screen.findByRole("button", { name: "暫停" }));
-    expect((await screen.findAllByText("已暫停全書分段 · 30%")).length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "繼續" })).toBeTruthy();
-    expect(calls.some((c) => c.key === "POST /api/materials/m1/study/pause")).toBe(true);
-  });
-
-  test("opening the book tells the server the companion may read it", async () => {
-    const { calls } = setup();
-    await screen.findByText("全書段落已整理好");
-    expect(calls.some((c) => c.key === "POST /api/materials/m1/study/focus")).toBe(true);
-  });
-
+describe("MaterialPage · zoom", () => {
   test("ctrl + wheel (a trackpad pinch) is taken by the reader, not the window", async () => {
     setup();
     await screen.findByRole("button", { name: "將這頁加入書籤" });
@@ -190,9 +177,6 @@ describe("MaterialPage · English", () => {
   test("labels the box and actions in English", async () => {
     mockFetch({
       "GET /api/materials/m1": () => ({ json: material }),
-      "GET /api/materials/m1/study": () => ({ json: study }),
-      "POST /api/materials/m1/study/focus": () => ({ json: study }),
-      "POST /api/materials/m1/study/leave": () => ({ json: study }),
       "GET /api/materials/m1/questions": () => ({ json: [] }),
     });
     render(
@@ -224,43 +208,76 @@ describe("MaterialPage · 閱讀模式", () => {
     state: { concept_order: [], concept_index: 0, phase: "reading", concepts: {} },
   });
 
-  test("導讀 switches the pages for the guides in place; the TOC lists its parts; pressed again it switches back", async () => {
-    let load = () => {};
-    const loaded = new Promise<void>((r) => (load = r));
-    mockFetch({
+  test("a 導讀 from before the 導讀 mode, still being read, opens the 導讀 mode at its first page instead", async () => {
+    const calls = mockFetch({
       "GET /api/materials/m1": () => ({ json: material }),
-      "GET /api/materials/m1/study": () => ({ json: study }),
-      "POST /api/materials/m1/study/focus": () => ({ json: study }),
-      "POST /api/materials/m1/study/leave": () => ({ json: study }),
       "GET /api/materials/m1/questions": () => ({ json: [] }),
-      "GET /api/sessions/s9": () => loaded.then(() => ({ json: guided })),
-      "GET /api/labels/part": () => ({ json: { "m1:u4": "葉綠體在哪裡" } }),
+      "GET /api/sessions/s9": () => ({ json: guided }),
+      "POST /api/materials/m1/tour/open": () => ({ json: tourView() }),
     });
     const went: unknown[] = [];
     render(<MaterialPage id="m1" view={{ kind: "guide", session: "s9" }} library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={(r) => went.push(r)} onOpenSession={() => {}} />);
-    // until the reading is in, the pages stay and the button shows it is working, keeping its label
+    await waitFor(() => expect(went).toEqual([{ page: "material", id: "m1", view: { kind: "tour", session: "w1", at: 1 } }]));
+    expect(calls.find((c) => c.key === "POST /api/materials/m1/tour/open")?.body).toEqual({ at: 1, span: 2 });
+    // the old reading panel, with its own box and 下一段, never shows
+    expect(screen.queryByRole("button", { name: /下一段/ })).toBeNull();
+  });
+});
+
+describe("MaterialPage · 導讀模式", () => {
+  test("the mode takes the screen once the 主題 of the page is written; the others follow in the column; the TOC lists them; pressed again it fades out and stops the work", async () => {
+    let write = () => {};
+    const written = new Promise<void>((r) => (write = r));
+    const calls = mockFetch({
+      "GET /api/materials/m1": () => ({ json: material }),
+      "GET /api/materials/m1/questions": () => ({ json: [] }),
+      "POST /api/materials/m1/tour/focus": () => written.then(() => ({ json: tourView() })),
+      "GET /api/materials/m1/tour": () => written.then(() => ({ json: tourView() })),
+      "POST /api/materials/m1/tour/pause": () => ({ json: { ...tourView(), active: false } }),
+      "GET /api/labels/part": () => ({ json: {} }),
+    });
+    const went: unknown[] = [];
+    const page = (view: { kind: "tour"; session: string } | null) => (
+      <MaterialPage id="m1" view={view} library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={(r) => went.push(r)} onOpenSession={() => {}} />
+    );
+    const { rerender } = render(page({ kind: "tour", session: "w1" }));
     const working = await screen.findByRole("button", { name: /導讀/, busy: true });
     expect(working.className).toContain("filling");
-    expect(Number(working.style.getPropertyValue("--fill"))).toBeLessThan(1);
-    expect(working.textContent).toBe("導讀");
-    expect(document.querySelector(".reader-body.off")).toBeNull();
-    load();
-    // prepared: the fill runs to the end, and the mode takes the screen no sooner than half a second after the press
-    await waitFor(() => expect(working.style.getPropertyValue("--fill")).toBe("1"));
-    expect(document.querySelector(".reader-body.off")).toBeNull();
-    await waitFor(() => expect(document.querySelector(".reader-body.off")).toBeTruthy());
-    expect(await screen.findByText("原料是水與二氧化碳。")).toBeTruthy();
-    await waitFor(() => expect(screen.getByRole("button", { name: /導讀/, pressed: true }).className).toContain("on"));
-    expect(screen.getByRole("button", { name: /導讀/, pressed: true }).className).not.toContain("filling");
-    // the bar and the box stay; the pages are kept underneath, out of sight, and the range is not named again
-    expect(screen.getByRole("textbox", { name: "向導師提問" })).toBeTruthy();
-    expect(document.querySelector(".reader-body.off")).toBeTruthy();
-    expect(screen.queryByText(/第 2 段，共 2 段/)).toBeNull();
-    const guide = screen.getByRole("button", { name: /導讀/, pressed: true });
+    expect(!!document.querySelector(".tour-layer.loading")).toBe(true);
+    write();
+    await waitFor(() => expect(!!document.querySelector(".tour-layer:not(.loading)")).toBe(true), { timeout: 3000 });
+    expect(screen.getByText("原料是水與二氧化碳。")).toBeTruthy();
+    expect(screen.getByText("排隊中，稍後撰寫導讀")).toBeTruthy();
+    // no question box or buttons of its own: the box below asks about the 主題 on screen
+    expect(screen.queryByRole("button", { name: /下一段/ })).toBeNull();
+    expect(!!document.querySelector(".tour-layer textarea, .tour-layer input")).toBe(false);
+    await waitFor(() => expect(!!document.querySelector(".reader-body.off")).toBe(true));
     await userEvent.click(screen.getByRole("button", { name: "導讀段落" }));
-    const items = screen.getAllByRole("menuitem");
-    expect(items.map((x) => x.textContent)).toEqual(["1植物如何製造養分", "2葉綠體在哪裡"]);
-    await userEvent.click(guide);
+    expect(screen.getAllByRole("menuitem").map((x) => x.textContent)).toEqual(["1植物如何製造養分", "2葉綠體"]);
+    await userEvent.click(screen.getByRole("button", { name: /導讀/, pressed: true }));
     expect(went).toEqual([{ page: "material", id: "m1" }]);
+    rerender(page(null));
+    // the pages come back at once, the mode fades out over them, and the work stops
+    expect(!!document.querySelector(".reader-body.off")).toBe(false);
+    expect(!!document.querySelector(".tour-layer.leaving")).toBe(true);
+    await waitFor(() => expect(!!document.querySelector(".tour-layer")).toBe(false));
+    expect(calls.some((c) => c.key === "POST /api/materials/m1/tour/pause")).toBe(true);
+  });
+
+  test("a 主題 that could not be written says so and is tried again on request", async () => {
+    const failed = { ...topicB, state: "failed", error: { code: "model_unavailable", detail: "Ollama 連線失敗" } };
+    const calls = mockFetch({
+      "GET /api/materials/m1": () => ({ json: material }),
+      "GET /api/materials/m1/questions": () => ({ json: [] }),
+      "POST /api/materials/m1/tour/focus": () => ({ json: tourView([topicA, failed]) }),
+      "GET /api/materials/m1/tour": () => ({ json: tourView([topicA, failed]) }),
+      "POST /api/materials/m1/tour/retry": () => ({ json: tourView([topicA, { ...topicB, state: "working" }]) }),
+      "POST /api/materials/m1/tour/pause": () => ({ json: tourView() }),
+    });
+    render(<MaterialPage id="m1" view={{ kind: "tour", session: "w1" }} library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={() => {}} onOpenSession={() => {}} />);
+    expect(await screen.findByText("這段導讀沒有完成：Ollama 連線失敗")).toBeTruthy();
+    await userEvent.click(await screen.findByRole("button", { name: "重試" }, { timeout: 3000 }));
+    expect(await screen.findByText("正在撰寫導讀…")).toBeTruthy();
+    expect(calls.find((c) => c.key === "POST /api/materials/m1/tour/retry")?.body).toEqual({ session_id: "w1", index: 1 });
   });
 });

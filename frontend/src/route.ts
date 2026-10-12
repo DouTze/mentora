@@ -8,17 +8,22 @@ export type Route =
   | { page: "learn" }
   | { page: "history" };
 
-export type ReaderView = { kind: "guide" | "quiz"; session: string };
+/** guide / quiz: one reading (出題, and 導讀 records from before the 導讀 mode); tour: the 導讀 mode, opened at that
+ *  window of pages (app.reading.tour) */
+export type ReaderView = { kind: "guide" | "quiz" | "tour"; session: string; /** tour: the page (line) whose 主題 is shown first */ at?: number };
 
 export function parseRoute(hash: string): Route {
-  const [, a, b, c, d] = hash.replace(/^#/, "").split("/");
-  if (a === "m" && b) return (c === "guide" || c === "quiz") && d ? { page: "material", id: b, view: { kind: c, session: d } } : { page: "material", id: b };
+  const [, a, b, c, d, e] = hash.replace(/^#/, "").split("/");
+  if (a === "m" && b) {
+    if (c === "tour" && d) return { page: "material", id: b, view: Number(e) > 0 ? { kind: c, session: d, at: Number(e) } : { kind: c, session: d } };
+    return (c === "guide" || c === "quiz") && d ? { page: "material", id: b, view: { kind: c, session: d } } : { page: "material", id: b };
+  }
   if (a === "learn" || a === "history") return { page: a };
   return { page: "home" };
 }
 
 export function toHash(r: Route): string {
-  return r.page === "material" ? `#/m/${r.id}${r.view ? `/${r.view.kind}/${r.view.session}` : ""}` : r.page === "home" ? "#/" : `#/${r.page}`;
+  return r.page === "material" ? `#/m/${r.id}${r.view ? `/${r.view.kind}/${r.view.session}${r.view.at ? `/${r.view.at}` : ""}` : ""}` : r.page === "home" ? "#/" : `#/${r.page}`;
 }
 
 export function useRoute(): [Route, (r: Route) => void] {

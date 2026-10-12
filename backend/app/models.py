@@ -76,6 +76,32 @@ class ReaderLearn(BaseModel):
     strategy_id: str = "rules-v1"
 
 
+class TourOpen(BaseModel):
+    """導讀 pressed in the reader at page (line) `at`; `span`: the pages taken on either side (設定 › 導讀)."""
+
+    at: int = Field(ge=1)
+    span: int = Field(default=2, ge=0, le=10)
+
+
+class TourFocus(BaseModel):
+    """The 主題 on screen in the 導讀 mode (`index` in window `session_id`), or a window picked in the sidebar."""
+
+    session_id: str
+    index: int | None = Field(default=None, ge=0)
+    at: int | None = Field(default=None, ge=1)
+
+
+class TourExtend(BaseModel):
+    session_id: str
+    direction: Literal["before", "after"]
+    span: int = Field(default=2, ge=0, le=10)
+
+
+class TourRetry(BaseModel):
+    session_id: str
+    index: int | None = Field(default=None, ge=0)
+
+
 class CategoryRequest(BaseModel):
     name: str = Field(min_length=1, max_length=60)
 
