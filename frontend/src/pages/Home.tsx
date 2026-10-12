@@ -229,7 +229,7 @@ export function HomePage({ library, onLibraryChange, onNavigate, onOpenSession, 
 
   // one row per book: the most recently touched unfinished reading of each material
   const active = sessions
-    .filter((s) => s.status === "active")
+    .filter((s) => s.status === "active" && !s.tour)   // a window of the reader's 導讀 mode is not a reading to resume
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
     .filter((s, i, all) => all.findIndex((o) => bookKey(o) === bookKey(s)) === i)
     .slice(0, 3);

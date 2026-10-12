@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { api, RequestError } from "../api";
 import { COMPANIONS, seedCompanions, type CompanionId, type CompanionSettings } from "../companions";
 import { LOCALES, useT, type Key } from "../i18n";
-import { usePrefs, type GuideLang, type Theme } from "../prefs";
+import { GUIDE_SPANS, usePrefs, type GuideLang, type Theme } from "../prefs";
 import type { ActiveBackend, ModelConfig, RemoteEndpoint, ShelfScope } from "../types";
 import { BackendBadge } from "./BackendBadge";
 import type { CheckResult } from "./CompanionDock";
@@ -101,11 +101,11 @@ function PrefsPane() {
   );
 }
 
-/** The language guides are written in, for every book. Each reader hands it to its book before a reading starts;
- * a reading keeps the language it started with. */
+/** The language guides are written in, for every book (each reader hands it to its book before a reading starts; a
+ * reading keeps the language it started with), and how many pages around the page being read 導讀 prepares. */
 function GuidePane() {
   const t = useT();
-  const { guideLang, setGuideLang } = usePrefs();
+  const { guideLang, setGuideLang, guideSpan, setGuideSpan } = usePrefs();
   const langs: GuideLang[] = ["zh", "en"];
   return (
     <>
@@ -117,7 +117,77 @@ function GuidePane() {
         </div>
         <Select<GuideLang> className="pref-control" label={t("guide.language")} value={guideLang} onChange={setGuideLang} options={langs.map((id) => ({ value: id, label: t(`guide.language.${id}`) }))} />
       </div>
+      <div className="pref-row">
+        <div>
+          <div className="pref-label">{t("guide.span")}</div>
+          <div className="muted">{t("guide.spanHint")}</div>
+        </div>
+        <SpanPicker value={guideSpan} onChange={setGuideSpan} />
+      </div>
     </>
+  );
+}
+
+/** 導讀範圍 drawn as the window it takes: a row of pages with the page being read in the middle, the pages taken on
+ * either side filled in. Dragging (or clicking) across the row, or the arrow keys, widens or narrows the window. */
+function SpanPicker({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const t = useT();
+  const max = GUIDE_SPANS[GUIDE_SPANS.length - 1];
+  const row = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+  const cells = Array.from({ length: 2 * max + 1 }, (_, i) => i - max);   // offsets from the page being read
+  const text = value === 0 ? t("guide.span.none") : t("guide.span.n", { n: value, total: 2 * value + 1 });
+  /** the span a pointer at clientX asks for: how far its page is from the middle */
+  const spanAt = (x: number, target: EventTarget | null) => {
+    const el = row.current;
+    const r = el?.getBoundingClientRect();
+    if (el && r && r.width > 0) {
+      const i = Math.min(cells.length - 1, Math.max(0, Math.floor(((x - r.left) / r.width) * cells.length)));
+      return Math.abs(cells[i]);
+    }
+    const at = (target as HTMLElement | null)?.closest?.("[data-offset]")?.getAttribute("data-offset");
+    return at == null ? null : Math.abs(Number(at));
+  };
+  const pick = (x: number, target: EventTarget | null) => {
+    const n = spanAt(x, target);
+    if (n !== null && n !== value) onChange(n);
+  };
+  return (
+    <div className="span-pick">
+      <div
+        ref={row}
+        className="span-pages"
+        role="slider"
+        tabIndex={0}
+        aria-label={t("guide.span")}
+        aria-valuemin={0}
+        aria-valuemax={max}
+        aria-valuenow={value}
+        aria-valuetext={text}
+        onPointerDown={(e) => {
+          dragging.current = true;
+          e.currentTarget.setPointerCapture?.(e.pointerId);
+          pick(e.clientX, e.target);
+        }}
+        onPointerMove={(e) => dragging.current && pick(e.clientX, e.target)}
+        onPointerUp={() => (dragging.current = false)}
+        onPointerCancel={() => (dragging.current = false)}
+        onKeyDown={(e) => {
+          const next = e.key === "ArrowRight" || e.key === "ArrowUp" ? value + 1 : e.key === "ArrowLeft" || e.key === "ArrowDown" ? value - 1 : e.key === "Home" ? 0 : e.key === "End" ? max : null;
+          if (next === null) return;
+          e.preventDefault();
+          onChange(Math.max(0, Math.min(max, next)));
+        }}
+      >
+        {cells.map((d) => (
+          <span key={d} data-offset={d} className={`span-page ${d === 0 ? "here" : ""} ${Math.abs(d) <= value ? "in" : ""}`} aria-hidden="true" />
+        ))}
+      </div>
+      <div className="span-caption" aria-hidden="true">
+        <span>{text}</span>
+        <span className="span-here">{t("guide.span.here")}</span>
+      </div>
+    </div>
   );
 }
 

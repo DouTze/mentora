@@ -24,9 +24,11 @@ from .materials import MaterialError, MaterialStore
 from .llm.runtime import BackendPool
 from .llm import remote
 from .models import (AnswerRequest, AskRequest, BookmarkRequest, LabelRequest, CategoryOrder, CategoryRequest, CompanionSettings, EventRequest, MaterialUpdate, ModelConfig,
-                     ReaderAsk, ReaderLearn, RemoteEndpointRequest, ShelfImport, ShelfQuery, ShelfScope, StartSessionRequest)
+                     ReaderAsk, ReaderLearn, RemoteEndpointRequest, ShelfImport, ShelfQuery, ShelfScope, StartSessionRequest,
+                     TourExtend, TourFocus, TourOpen, TourRetry)
 from .persistence.repository import Repository
 from .reading.study import StudyService
+from .reading.tour import GuideTour, TourError
 from .shelf.service import ShelfService
 from .tutor.session import SessionError, TutorService
 from .llm.tasks import TaskError
@@ -59,6 +61,8 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     workflow = WorkflowService(svc, repo, pool, runner)
     svc.workflow = workflow
     study = StudyService(db, registry, pool, materials, repo, workflow)
+    tour = GuideTour(db, registry, materials, repo, workflow)
+    study.tour = tour     # a question asked from a page a 導讀 window covers is answered from its 主題 and guides
     shelf = shelf or ShelfService(db, registry, pool, materials, config.SHELF_DIR)
     workflow.close_orphans({m["id"] for m in materials.list()})   # readings of materials deleted before that closed them
     describer = LibraryDescriber(registry, pool, materials)
@@ -93,6 +97,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
             for t in (warm, shelf.task):
                 if t and not t.done():
                     t.cancel()
+            await tour.stop()
             await runner.stop()
             pdf_worker.shutdown()
 
@@ -101,6 +106,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
     app.state.db, app.state.registry, app.state.svc = db, registry, svc
     app.state.repo, app.state.runner, app.state.workflow = repo, runner, workflow
     app.state.shelf, app.state.study, app.state.describer = shelf, study, describer
+    app.state.tour = tour
     app.state.extractor = extractor
 
     @app.exception_handler(SessionError)
@@ -193,6 +199,7 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
         readings are closed and kept as learning records."""
         materials.get(mid, with_units=False)
         await study.drop(mid)
+        await tour.drop(mid)
         closed = await workflow.close_material(mid)
         materials.delete(mid)
         bookmarks.forget(mid)
@@ -342,6 +349,35 @@ def create_app(db: Database | None = None, registry: Registry | None = None, she
             await study.leave(mid)
             return study.view(mid)
         return await getattr(study, action)(mid)
+
+    # -- the reader's 導讀 mode: windows of pages around where the reader is, segmented and guided on demand ------
+    @app.exception_handler(TourError)
+    async def _tour_error(_, e: TourError):
+        return JSONResponse(status_code=e.status, content={"code": e.code, "detail": e.detail})
+
+    @app.get("/api/materials/{mid}/tour")
+    def tour_view(mid: str):
+        return tour.view(mid)
+
+    @app.post("/api/materials/{mid}/tour/open")
+    async def tour_open(mid: str, req: TourOpen):
+        return await tour.open(mid, req.at, req.span)
+
+    @app.post("/api/materials/{mid}/tour/focus")
+    async def tour_focus(mid: str, req: TourFocus):
+        return await tour.focus(mid, req.session_id, req.index, req.at)
+
+    @app.post("/api/materials/{mid}/tour/extend")
+    async def tour_extend(mid: str, req: TourExtend):
+        return await tour.extend(mid, req.session_id, req.direction, req.span)
+
+    @app.post("/api/materials/{mid}/tour/retry")
+    async def tour_retry(mid: str, req: TourRetry):
+        return await tour.retry(mid, req.session_id, req.index)
+
+    @app.post("/api/materials/{mid}/tour/pause")
+    async def tour_pause(mid: str):
+        return await tour.pause(mid)
 
     @app.get("/api/materials/{mid}/questions")
     def reader_questions(mid: str):

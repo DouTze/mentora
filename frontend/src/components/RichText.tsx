@@ -17,10 +17,22 @@ export function RichText({ text, inline = false, className }: Props) {
   return <div className={className}>{renderBlocks(text)}</div>;
 }
 
+// textgreek's \textgamma …: models write them for Greek letters (also inside \text{…}), KaTeX does not know them and
+// showed them in red. The letter itself reads in text and in math alike.
+const GREEK: [string, string, string][] = [["alpha", "α", "Α"], ["beta", "β", "Β"], ["gamma", "γ", "Γ"], ["delta", "δ", "Δ"],
+  ["epsilon", "ε", "Ε"], ["zeta", "ζ", "Ζ"], ["eta", "η", "Η"], ["theta", "θ", "Θ"], ["iota", "ι", "Ι"], ["kappa", "κ", "Κ"],
+  ["lambda", "λ", "Λ"], ["mu", "μ", "Μ"], ["nu", "ν", "Ν"], ["xi", "ξ", "Ξ"], ["omicron", "ο", "Ο"], ["pi", "π", "Π"],
+  ["rho", "ρ", "Ρ"], ["sigma", "σ", "Σ"], ["tau", "τ", "Τ"], ["upsilon", "υ", "Υ"], ["phi", "φ", "Φ"], ["chi", "χ", "Χ"],
+  ["psi", "ψ", "Ψ"], ["omega", "ω", "Ω"]];
+const MACROS: Record<string, string> = Object.fromEntries(
+  GREEK.flatMap(([g, lo, up]) => [[`\\text${g}`, lo], [`\\text${g[0].toUpperCase()}${g.slice(1)}`, up]]),
+);
+const KATEX = { throwOnError: false, strict: "ignore", output: "htmlAndMathml", macros: MACROS } as const;
+
 function math(src: string, display: boolean): ReactNode {
   let html: string;
   try {
-    html = katex.renderToString(src, { displayMode: display, throwOnError: false, strict: "ignore", output: "htmlAndMathml" });
+    html = katex.renderToString(src, { ...KATEX, macros: { ...MACROS }, displayMode: display });
   } catch {
     return <code>{src}</code>;
   }
@@ -32,7 +44,7 @@ function math(src: string, display: boolean): ReactNode {
 function mathBlockInLine(src: string): ReactNode {
   let html: string;
   try {
-    html = katex.renderToString(src, { displayMode: true, throwOnError: false, strict: "ignore", output: "htmlAndMathml" });
+    html = katex.renderToString(src, { ...KATEX, macros: { ...MACROS }, displayMode: true });
   } catch {
     return <code>{src}</code>;
   }
