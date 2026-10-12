@@ -1,16 +1,16 @@
-// Notion-style settings dialog: a left rail of sections (偏好, 書櫃範圍, 伴讀) and the section's page on the right.
+// Notion-style settings dialog: a left rail of sections (偏好, 導讀, 書櫃範圍, 伴讀) and the section's page on the right.
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api, RequestError } from "../api";
 import { COMPANIONS, seedCompanions, type CompanionId, type CompanionSettings } from "../companions";
 import { LOCALES, useT, type Key } from "../i18n";
-import { usePrefs, type Theme } from "../prefs";
+import { usePrefs, type GuideLang, type Theme } from "../prefs";
 import type { ActiveBackend, ModelConfig, RemoteEndpoint, ShelfScope } from "../types";
 import { BackendBadge } from "./BackendBadge";
 import type { CheckResult } from "./CompanionDock";
 import { Icon } from "./Icons";
 import { ComboInput, Select } from "./Select";
 
-export type SettingsTab = "prefs" | "shelf" | "companion";
+export type SettingsTab = "prefs" | "guide" | "shelf" | "companion";
 
 interface Props {
   initialTab?: SettingsTab;
@@ -41,6 +41,7 @@ export function SettingsModal({ initialTab = "prefs", onClose, onBackendChanged,
 
   const tabs: { id: SettingsTab; label: Key; icon: ReactNode }[] = [
     { id: "prefs", label: "settings.tab.prefs", icon: <Icon.sliders /> },
+    { id: "guide", label: "settings.tab.guide", icon: <Icon.book /> },
     { id: "shelf", label: "settings.tab.shelf", icon: <Icon.shelf /> },
     { id: "companion", label: "settings.tab.companion", icon: <Icon.companion /> },
   ];
@@ -61,7 +62,7 @@ export function SettingsModal({ initialTab = "prefs", onClose, onBackendChanged,
           <button className="icon-btn settings-close" onClick={onClose} aria-label={t("settings.close")} title={t("settings.close")}>
             <Icon.close />
           </button>
-          {tab === "prefs" ? <PrefsPane /> : tab === "shelf" ? <ShelfScopePane /> : <CompanionPane onBackendChanged={onBackendChanged} onChecked={onChecked} />}
+          {tab === "prefs" ? <PrefsPane /> : tab === "guide" ? <GuidePane /> : tab === "shelf" ? <ShelfScopePane /> : <CompanionPane onBackendChanged={onBackendChanged} onChecked={onChecked} />}
         </section>
       </div>
     </div>
@@ -95,6 +96,26 @@ function PrefsPane() {
             </button>
           ))}
         </div>
+      </div>
+    </>
+  );
+}
+
+/** The language guides are written in, for every book. Each reader hands it to its book before a reading starts;
+ * a reading keeps the language it started with. */
+function GuidePane() {
+  const t = useT();
+  const { guideLang, setGuideLang } = usePrefs();
+  const langs: GuideLang[] = ["zh", "en"];
+  return (
+    <>
+      <h2 className="settings-h">{t("guide.heading")}</h2>
+      <div className="pref-row">
+        <div>
+          <div className="pref-label">{t("guide.language")}</div>
+          <div className="muted">{t("guide.languageHint")}</div>
+        </div>
+        <Select<GuideLang> className="pref-control" label={t("guide.language")} value={guideLang} onChange={setGuideLang} options={langs.map((id) => ({ value: id, label: t(`guide.language.${id}`) }))} />
       </div>
     </>
   );

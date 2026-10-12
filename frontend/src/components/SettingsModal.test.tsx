@@ -9,7 +9,7 @@ import type { ModelConfig } from "../types";
 const cfg: ModelConfig = { backend: "ollama", model: "qwen3-vl:4b", host: "http://127.0.0.1:11434", model_path: "", device: "GPU", temperature: 0.2, max_tokens: 512, context_tokens: 8192 };
 const active = { backend: "ollama", model: "qwen3-vl:4b", simulated: false };
 
-function open(tab: "prefs" | "companion" = "prefs") {
+function open(tab: "prefs" | "guide" | "companion" = "prefs") {
   let closed = 0;
   render(
     <PrefsProvider>
@@ -26,6 +26,17 @@ afterEach(() => {
 });
 
 describe("SettingsModal", () => {
+  test("導讀: the guide language follows the interface language until chosen, then stays", async () => {
+    localStorage.setItem("mentor.locale", JSON.stringify("en"));
+    open("guide");
+    const menu = screen.getByRole("combobox", { name: "Guide language" });
+    expect(menu).toHaveTextContent("English");
+    await userEvent.click(menu);
+    await userEvent.click(screen.getByRole("option", { name: "Chinese" }));
+    expect(screen.getByRole("combobox", { name: "Guide language" })).toHaveTextContent("Chinese");
+    expect(JSON.parse(localStorage.getItem("mentor.guideLang")!)).toBe("zh");
+  });
+
   test("偏好: switching language re-renders in English and theme pins <html data-theme>", async () => {
     localStorage.setItem("mentor.locale", JSON.stringify("zh-Hant"));
     open();
