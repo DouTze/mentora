@@ -9,6 +9,7 @@ import { ReadingPanel } from "../components/ReadingPanel";
 import { RichText } from "../components/RichText";
 import { Working } from "../components/Working";
 import { useT } from "../i18n";
+import { usePrefs } from "../prefs";
 import { CommandRefused, isGraph, useCommands } from "../workflow";
 import { prepared } from "../readerMode";
 
@@ -33,6 +34,7 @@ interface Props {
 
 export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz, onAutoQuizDone, embedded = false, view, onSession, onError }: Props) {
   const t = useT();
+  const { guideLang } = usePrefs();
   const [session, setSession] = useState<SessionView | null>(null);
   const [answer, setAnswer] = useState("");
   const [last, setLast] = useState<TutorMessage | null>(null);
@@ -86,6 +88,8 @@ export function LearnPage({ sessionId, onSessionChange, onOpenMaterial, autoQuiz
     setError(null);
     try {
       const src = session?.source;
+      // a new reading is written in the language of 設定 › 導讀, which the book takes first
+      if (src) await api.updateMaterial(src.material_id, { translate_zh: guideLang === "zh" });
       const s = src ? await api.startFromMaterial(src.material_id, src.start, src.end) : await api.startSession("correlation-causation", "rules-v1");
       setAnswer("");
       setLast(null);

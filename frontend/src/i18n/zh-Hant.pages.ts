@@ -133,8 +133,6 @@ export const pages = {
   "material.unitCount": "{count} {unit}",
   "material.name": "教材名稱",
   "material.category": "分類",
-  "material.translateZh": "導讀翻譯成中文",
-  "material.translateZh.note": "關閉時用原文導讀、提問與出題；新開始的學習才會套用",
   "material.delete.confirmText": "刪除後無法復原，學習紀錄會保留。",
   "material.delete.confirm": "確定刪除",
   "material.delete": "刪除教材",

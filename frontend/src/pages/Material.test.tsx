@@ -49,6 +49,18 @@ describe("MaterialPage · reader", () => {
     expect((box as HTMLTextAreaElement).value).toBe("");
   });
 
+  test("the book takes the guide language of 設定 › 導讀 (中文 by default here), so new readings are written in it", async () => {
+    const { calls } = setup({ "PATCH /api/materials/m1": (b) => ({ json: { ...material, ...(b as object) } }) });
+    await waitFor(() => expect(calls.find((c) => c.key === "PATCH /api/materials/m1")?.body).toEqual({ translate_zh: true }));
+  });
+
+  test("the reader's ⋯ no longer carries the guide language", async () => {
+    setup();
+    await userEvent.click(await screen.findByRole("button", { name: "教材選項" }));
+    expect(screen.getByRole("dialog", { name: "教材選項" })).toBeTruthy();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
   test("an Enter that picks the IME's word (keyCode 229, as WebKit sends it) does not send the question", async () => {
     const { calls } = setup();
     const box = await screen.findByRole("textbox", { name: "向導師提問" });
