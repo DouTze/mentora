@@ -339,10 +339,10 @@ function TextReader({ material, at, scale, onAt }: { material: MaterialDetail; a
 
 // -- the question box ---------------------------------------------------------------------------
 /** 導讀 and 出題 are switches: on, the reader shows that mode; pressed again, the pages come back. 導讀 opens the 導讀
- * mode at the page being read; 出題 the questions of the part being read (a reading started or taken up again). A
- * switch into a mode fills its button from the left, like a charging battery, as far as the mode is prepared; 導讀
- * pressed while it fills stops preparing it. */
-function Composer({ material, at, unitWord, mode, fill, onPress, onGuide, onCancelGuide, onOpenSession, onMode }: {
+ * mode at the page being read at once, the mode saying what it is preparing; 出題 the questions of the part being
+ * read (a reading started or taken up again), its button filling from the left, like a charging battery, as far as
+ * they are prepared. Either pressed again meanwhile stops it. */
+function Composer({ material, at, unitWord, mode, fill, onPress, onGuide, onCloseTour, onCancelQuiz, onOpenSession, onMode }: {
   material: MaterialDetail;
   at: number;
   unitWord: string;
@@ -354,7 +354,10 @@ function Composer({ material, at, unitWord, mode, fill, onPress, onGuide, onCanc
   onPress: (kind: ModeKind | null) => void;
   /** 導讀: the 導讀 mode opened at this page; resolves to why it could not be, or null */
   onGuide: () => Promise<string | null>;
-  onCancelGuide: () => void;
+  /** 導讀 pressed in the 導讀 mode (also while it is still being found): back to the pages */
+  onCloseTour: () => void;
+  /** 出題 pressed while its questions are prepared: nothing switches */
+  onCancelQuiz: () => void;
   onOpenSession: Props["onOpenSession"];
   onMode: (v: ReaderView | null) => void;
 }) {
@@ -366,6 +369,7 @@ function Composer({ material, at, unitWord, mode, fill, onPress, onGuide, onCanc
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const thread = useRef<HTMLDivElement>(null);
+  const quizSeq = useRef(0);   // a 出題 press: a reading found after it was cancelled is not opened
 
   useEffect(() => {
     setQa([]);
@@ -413,20 +417,29 @@ function Composer({ material, at, unitWord, mode, fill, onPress, onGuide, onCanc
 
   const learn = async (kind: ModeKind) => {
     setError(null);
+    const quizzing = fill?.kind === "quiz";
+    if (quizzing) {
+      quizSeq.current++;
+      onCancelQuiz();
+    }
     if (kind === "guide") {
-      if (fill?.kind === "guide") return onCancelGuide();
-      if (mode?.kind === "tour" || mode?.kind === "guide") return onMode(null);
+      if (mode?.kind === "tour") return onCloseTour();
+      if (mode?.kind === "guide") return onMode(null);
       const why = await onGuide();
       if (why) setError(why);
       return;
     }
+    if (quizzing) return;
     if (mode?.kind === "quiz") return onMode(null);
     if (mode?.kind === "guide") return onMode({ kind, session: mode.session });
+    const seq = ++quizSeq.current;
     onPress(kind);
     try {
       const s = await api.readerLearn(material.id, at);
+      if (seq !== quizSeq.current) return;
       onOpenSession(s.id, { quiz: true, material: material.id });
     } catch (e) {
+      if (seq !== quizSeq.current) return;
       setError((e as RequestError).body?.detail ?? String(e));
       onPress(null);
     }
@@ -506,11 +519,11 @@ function Composer({ material, at, unitWord, mode, fill, onPress, onGuide, onCanc
             </button>
           )}
           <span className="spacer" />
-          <button type="button" className={`reader-action ${guideOn && !fill ? "on" : ""} ${fill?.kind === "guide" ? "filling" : ""}`} style={fill?.kind === "guide" ? ({ "--fill": fill.p, "--fill-ms": `${fill.ms}ms` } as React.CSSProperties) : undefined} aria-pressed={guideOn} aria-busy={fill?.kind === "guide" || undefined} onClick={() => learn("guide")} disabled={(!!fill && fill.kind !== "guide") || blocked} title={fill?.kind === "guide" ? t("tour.cancel") : guideOn ? t("reader.mode.off") : t("reader.guide.hint", { unit: unitWord })}>
+          <button type="button" className={`reader-action act-guide ${guideOn && !fill ? "on" : ""} ${fill?.kind === "guide" ? "filling" : ""}`} style={fill?.kind === "guide" ? ({ "--fill": fill.p, "--fill-ms": `${fill.ms}ms` } as React.CSSProperties) : undefined} aria-pressed={guideOn} aria-busy={fill?.kind === "guide" || undefined} onClick={() => learn("guide")} disabled={fill?.kind === "guide" || blocked} title={guideOn ? t("reader.mode.off") : t("reader.guide.hint", { unit: unitWord })}>
             <Icon.book />
             {t("reader.guide")}
           </button>
-          <button type="button" className={`reader-action ${mode?.kind === "quiz" && !fill ? "on" : ""} ${fill?.kind === "quiz" ? "filling" : ""}`} style={fill?.kind === "quiz" ? ({ "--fill": fill.p, "--fill-ms": `${fill.ms}ms` } as React.CSSProperties) : undefined} aria-pressed={mode?.kind === "quiz"} aria-busy={fill?.kind === "quiz" || undefined} onClick={() => learn("quiz")} disabled={!!fill || blocked} title={mode?.kind === "quiz" ? t("reader.mode.off") : t("reader.quiz.hint", { unit: unitWord })}>
+          <button type="button" className={`reader-action act-quiz ${mode?.kind === "quiz" && !fill ? "on" : ""} ${fill?.kind === "quiz" ? "filling" : ""}`} style={fill?.kind === "quiz" ? ({ "--fill": fill.p, "--fill-ms": `${fill.ms}ms` } as React.CSSProperties) : undefined} aria-pressed={mode?.kind === "quiz"} aria-busy={fill?.kind === "quiz" || undefined} onClick={() => learn("quiz")} disabled={fill?.kind === "guide" || blocked} title={fill?.kind === "quiz" ? t("reader.quiz.cancel") : mode?.kind === "quiz" ? t("reader.mode.off") : t("reader.quiz.hint", { unit: unitWord })}>
             <Icon.quiz />
             {t("reader.quiz")}
           </button>
@@ -997,15 +1010,17 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
   const viewKey = keyOf(view);
   const shownKey = keyOf(onScreen);
   const asked = view && viewKey !== shownKey ? view : null;
-  // 導讀 mode: the page it was opened at (its 主題 is shown first), how far that 主題 is, the run on screen (for the
-  // table of contents), the page of the 主題 on screen (for the question box), and the layer fading out after it
-  const [tourPrep, setTourPrep] = useState({ p: FINDING, ready: false });
+  // 導讀 mode: on screen as soon as it is asked for (its window still being found shows as session ""), the run on
+  // screen (for the table of contents), the page of the 主題 on screen (for the question box), and the layer fading
+  // out after it
   const [tourView, setTourView] = useState<TourView | null>(null);
   const [tourAt, setTourAt] = useState<number | null>(null);
   const [leaving, setLeaving] = useState<ReaderView | null>(null);
   const openSeq = useRef(0);
   useEffect(() => {
     if (!view) {
+      // a 導讀 mode still being found is not in the route yet: it stays
+      if (onScreen?.kind === "tour" && !onScreen.session) return setSwitching(null);
       if (onScreen?.kind === "tour") {
         setLeaving(onScreen);   // fades out over the pages; its work stops now
         api.tourPause(id).catch(() => {});
@@ -1014,11 +1029,14 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
       setSwitching(null);
       return;
     }
-    if (view.kind === "tour") setLeaving(null);
-    if (viewKey !== shownKey) {
-      if (view.kind === "tour" && !switching) setTourPrep({ p: FINDING, ready: false });
-      setSwitching((w) => (w?.kind === buttonOf(view) ? w : { kind: buttonOf(view), since: Date.now() }));
-    } else if (onScreen && (view.session !== onScreen.session || view.at !== onScreen.at)) setOnScreen(view);   // another window of the 導讀 mode
+    if (view.kind === "tour") {
+      // the 導讀 mode takes the screen at once; a window picked while it is on screen scrolls there
+      setLeaving(null);
+      setSwitching(null);
+      if (onScreen?.kind !== "tour" || view.session !== onScreen.session || view.at !== onScreen.at) setOnScreen(view);
+      return;
+    }
+    if (viewKey !== shownKey) setSwitching((w) => (w?.kind === buttonOf(view) ? w : { kind: buttonOf(view), since: Date.now() }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewKey, view?.session, view?.at]);
   useEffect(() => {
@@ -1035,7 +1053,7 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
     return () => clearTimeout(timer);
   }, [onScreen?.kind]);
   const askedSession = asked && asked.kind !== "tour" ? (sessions[viewKey] ?? null) : null;
-  const ready = !!asked && (failed === viewKey || (asked.kind === "tour" ? tourPrep.ready : !!askedSession && prepared(asked.kind, askedSession)));
+  const ready = !!asked && asked.kind !== "tour" && (failed === viewKey || (!!askedSession && prepared(asked.kind, askedSession)));
   // the last stretch of the fill runs out the switch's minimum time, then the mode takes the screen
   const finishMs = useMemo(
     () => (ready && switching ? Math.max(MIN_SWITCH_MS - (Date.now() - switching.since), FILL_SETTLE_MS) : 0),
@@ -1043,7 +1061,7 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
     [ready, viewKey],
   );
   const fill = switching
-    ? { kind: switching.kind, p: ready ? 1 : !asked ? FINDING : asked.kind === "tour" ? tourPrep.p : progressOf(asked.kind, askedSession), ms: ready ? finishMs : FILL_STEP_MS }
+    ? { kind: switching.kind, p: ready ? 1 : !asked || asked.kind === "tour" ? FINDING : progressOf(asked.kind, askedSession), ms: ready ? finishMs : FILL_STEP_MS }
     : null;
   useEffect(() => {
     if (!ready || !asked || !switching) return;
@@ -1203,6 +1221,8 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
     setMaterial(null);
     setError(null);
     setMenu(false);
+    openSeq.current++;   // a 導讀 mode still being found was for the book before
+    setOnScreen((v) => (v?.kind === "tour" && !v.session ? null : v));
     setAt(storedAt(id));
     api
       .material(id)
@@ -1299,30 +1319,39 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
     }
   };
 
-  // 導讀 pressed: the window around this page is found or made, then the mode is laid out out of sight until the
-  // 主題 of this page is written (the button filling meanwhile); pressed again while it fills, nothing is prepared
+  // 導讀 pressed: the 導讀 mode takes the screen at once, saying what it prepares, while the window around this page is
+  // found or made; then the route names it
   const openTour = async (): Promise<string | null> => {
     const seq = ++openSeq.current;
-    setTourPrep({ p: FINDING, ready: false });
-    setSwitching({ kind: "guide", since: Date.now() });
+    const from = at;
+    setSwitching(null);
+    setLeaving(null);
+    setOnScreen({ kind: "tour", session: "", at: from });
     try {
-      const v = await api.tourOpen(material.id, at, guideSpan);
+      const v = await api.tourOpen(material.id, from, guideSpan);
       if (seq !== openSeq.current) return null;
       const sid = v.focus?.session_id;
       if (!sid) throw new Error("no window");
-      onNavigate({ page: "material", id: material.id, view: { kind: "tour", session: sid, at } });
+      onNavigate({ page: "material", id: material.id, view: { kind: "tour", session: sid, at: from } });
       return null;
     } catch (e) {
       if (seq !== openSeq.current) return null;
-      setSwitching(null);
+      closeTour();
       return (e as RequestError).body?.detail ?? String(e);
     }
   };
-  const cancelTour = () => {
+  // back to the pages: through the route once the mode is named there, at once while its window is still found
+  const closeTour = () => {
     openSeq.current++;
-    setSwitching(null);
+    if (view) return onNavigate({ page: "material", id: material.id });
+    if (onScreen?.kind === "tour") setLeaving(onScreen);
+    setOnScreen(null);
     api.tourPause(material.id).catch(() => {});
-    if (view?.kind === "tour" && onScreen?.kind !== "tour") onNavigate({ page: "material", id: material.id });
+  };
+  // 出題 pressed again while its questions are prepared: the screen stays as it is
+  const cancelQuiz = () => {
+    setSwitching(null);
+    if (view?.kind === "quiz" && keyOf(view) !== shownKey) onNavigate({ page: "material", id: material.id, view: onScreen?.kind === "tour" && !onScreen.session ? undefined : (onScreen ?? undefined) });
   };
   // the 導讀 layer: on screen, being prepared, or fading out — one layer throughout, so it keeps its place
   const tour = onScreen?.kind === "tour" ? onScreen : asked?.kind === "tour" ? asked : leaving;
@@ -1396,10 +1425,9 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
         <GuideTour
           key="tour"
           material={material}
-          session={tour.session}
+          session={tour.session || null}
           at={tour.at ?? null}
-          className={tour === leaving ? "leaving" : tour === onScreen ? "" : "loading"}
-          onProgress={(p, ready) => setTourPrep((x) => (x.p === p && x.ready === ready ? x : { p, ready }))}
+          className={tour === leaving ? "leaving" : ""}
           onAt={setTourAt}
           onView={setTourView}
         />
@@ -1440,7 +1468,8 @@ export function MaterialPage({ id, view = null, library, onLibraryChange, onNavi
         fill={fill}
         onPress={(kind) => setSwitching(kind ? { kind, since: Date.now() } : null)}
         onGuide={openTour}
-        onCancelGuide={cancelTour}
+        onCloseTour={closeTour}
+        onCancelQuiz={cancelQuiz}
         onOpenSession={onOpenSession}
         onMode={(v) => onNavigate(v ? { page: "material", id: material.id, view: v } : { page: "material", id: material.id })}
       />

@@ -10,6 +10,7 @@ export const enPlurals: Partial<Record<Key, { variable: string; one?: string; ot
   "shelf.parts": { variable: "count", one: "{count} chapter" },
   "shelf.bar.intoCount": { variable: "count", one: "Add {count} book to" },
   "home.more.books": { variable: "count", one: "Scroll down to see {count} book picked for you" },
+  "history.count": { variable: "count", one: "{count} session" },
   "history.reading.title": { variable: "total", one: "Guided reading · {total} section" },
   "reading.meta.segModel": { variable: "total", one: "The model organized the text into {total} section by topic" },
   "reading.meta.segParagraph": { variable: "total", one: "The text was organized into {total} section by paragraph" },
