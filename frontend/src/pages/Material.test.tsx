@@ -101,18 +101,35 @@ describe("MaterialPage · reader", () => {
     await waitFor(() => expect(second.opened).toEqual([{ id: "s9", quiz: true }]));
   });
 
-  test("導讀 pressed again while the mode is prepared stops preparing it", async () => {
+  test("導讀 takes the screen at once, saying what it prepares; pressed again before its window is found, the pages come back and nothing opens", async () => {
     let answer = () => {};
     const { calls, went } = setup({ "POST /api/materials/m1/tour/open": () => new Promise((r) => (answer = () => r({ json: tourView() }))), "POST /api/materials/m1/tour/pause": () => ({ json: tourView() }) });
     const guide = await screen.findByRole("button", { name: /^導讀$/ });
     await userEvent.click(guide);
-    await waitFor(() => expect(guide.className).toContain("filling"));
-    await userEvent.click(guide);
+    expect(!!document.querySelector(".tour-layer:not(.loading):not(.leaving)")).toBe(true);
+    expect(screen.getByText("正在讀取這幾頁…")).toBeTruthy();
+    expect(guide.className).toContain("on");
     expect(guide.className).not.toContain("filling");
+    await userEvent.click(guide);
+    expect(!!document.querySelector(".tour-layer.leaving")).toBe(true);
     answer();
     await new Promise((r) => setTimeout(r, 30));
     expect(went).toEqual([]);
     expect(calls.some((c) => c.key === "POST /api/materials/m1/tour/pause")).toBe(true);
+  });
+
+  test("出題 pressed again while its questions are prepared stops: the button is never stuck and no reading opens", async () => {
+    let answer = () => {};
+    const { opened } = setup({ "POST /api/materials/m1/learn": () => new Promise((r) => (answer = () => r({ json: session({ id: "s9" }) }))) });
+    const quiz = await screen.findByRole("button", { name: /出題/ });
+    await userEvent.click(quiz);
+    await waitFor(() => expect(quiz.className).toContain("filling"));
+    expect((quiz as HTMLButtonElement).disabled).toBe(false);
+    await userEvent.click(quiz);
+    expect(quiz.className).not.toContain("filling");
+    answer();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(opened).toEqual([]);
   });
 });
 
@@ -225,7 +242,7 @@ describe("MaterialPage · 閱讀模式", () => {
 });
 
 describe("MaterialPage · 導讀模式", () => {
-  test("the mode takes the screen once the 主題 of the page is written; the others follow in the column; the TOC lists them; pressed again it fades out and stops the work", async () => {
+  test("the mode takes the screen at once and says it is preparing; the 主題 follow in the column; the TOC lists them; pressed again it fades out and stops the work", async () => {
     let write = () => {};
     const written = new Promise<void>((r) => (write = r));
     const calls = mockFetch({
@@ -241,12 +258,11 @@ describe("MaterialPage · 導讀模式", () => {
       <MaterialPage id="m1" view={view} library={{ categories: [], materials: [] }} onLibraryChange={async () => {}} onNavigate={(r) => went.push(r)} onOpenSession={() => {}} />
     );
     const { rerender } = render(page({ kind: "tour", session: "w1" }));
-    const working = await screen.findByRole("button", { name: /導讀/, busy: true });
-    expect(working.className).toContain("filling");
-    expect(!!document.querySelector(".tour-layer.loading")).toBe(true);
+    expect(await screen.findByText("正在讀取這幾頁…")).toBeTruthy();
+    expect(!!document.querySelector(".tour-layer:not(.loading):not(.leaving)")).toBe(true);
+    expect(screen.getByRole("button", { name: /導讀/, pressed: true }).className).not.toContain("filling");
     write();
-    await waitFor(() => expect(!!document.querySelector(".tour-layer:not(.loading)")).toBe(true), { timeout: 3000 });
-    expect(screen.getByText("原料是水與二氧化碳。")).toBeTruthy();
+    expect(await screen.findByText("原料是水與二氧化碳。", {}, { timeout: 3000 })).toBeTruthy();
     expect(screen.getByText("排隊中，稍後撰寫導讀")).toBeTruthy();
     // no question box or buttons of its own: the box below asks about the 主題 on screen
     expect(screen.queryByRole("button", { name: /下一段/ })).toBeNull();

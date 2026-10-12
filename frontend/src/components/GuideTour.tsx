@@ -19,14 +19,13 @@ export const topicAnchor = (sid: string, index: number) => `tour-${sid}-${index}
 
 interface Props {
   material: MaterialDetail;
-  /** the window the mode was opened at (the route): brought into view, and the work turns towards it */
-  session: string;
+  /** the window the mode was opened at (the route): brought into view, and the work turns towards it; null while
+   *  the window around `at` is still being found (the mode is on screen at once, saying so) */
+  session: string | null;
   /** the page (line) 導讀 was pressed at: its 主題 is brought into view first; null for a window picked in the sidebar */
   at: number | null;
-  /** class of the layer: "loading" (laid out out of sight before the switch) or "leaving" */
+  /** class of the layer: "leaving" while it fades out */
   className?: string;
-  /** how far the 主題 to show first is prepared (0–1), and whether the mode can take the screen */
-  onProgress?: (p: number, ready: boolean) => void;
   /** the page (line) of the 主題 on screen, for the question box */
   onAt?: (n: number) => void;
   /** the run on screen, for the table of contents */
@@ -44,8 +43,6 @@ function targetTopic(w: TourWindow, at: number | null): TourTopic | null {
   if (at === null) return w.topics[0];
   return w.topics.find((t) => t.from <= at && at <= t.to) ?? [...w.topics].reverse().find((t) => t.to < at) ?? w.topics[0];
 }
-
-const creep = (ms: number, tau: number) => 1 - Math.exp(-ms / tau);
 
 /** A 主題's opening words as plain text: the formula markup cut short at either end of the excerpt is left out. */
 function plain(text: string): string {
@@ -65,7 +62,7 @@ function langOf(g: Guide | null): string | undefined {
   return /[\u3400-\u9fff]/.test(text) ? "zh-Hant" : "en";
 }
 
-export function GuideTour({ material, session, at, className = "", onProgress, onAt, onView }: Props) {
+export function GuideTour({ material, session, at, className = "", onAt, onView }: Props) {
   const t = useT();
   const { guideSpan } = usePrefs();
   const mid = material.id;
@@ -75,14 +72,14 @@ export function GuideTour({ material, session, at, className = "", onProgress, o
   const root = useRef<HTMLDivElement>(null);
   const anchor = useRef<{ key: string; top: number } | null>(null);
   // where to bring into view: set when the mode opens or a window is picked, done once its 主題 are laid out
-  const target = useRef<{ session: string; at: number | null; done: boolean; seg: boolean }>({ session, at, done: false, seg: false });
+  const target = useRef<{ session: string | null; at: number | null; done: boolean; seg: boolean }>({ session, at, done: false, seg: false });
   const touched = useRef(false);   // the reader has scrolled since: a late layout no longer moves the column
   const onScreen = useRef<{ sid: string; index: number } | null>(null);
 
   const viewRef = useRef(view);
   viewRef.current = view;
-  const report = useRef({ onProgress, onAt, onView });
-  report.current = { onProgress, onAt, onView };
+  const report = useRef({ onAt, onView });
+  report.current = { onAt, onView };
 
   /** Keep the 主題 at the reading line where it is while the column above it changes (guides arriving, a window
    *  added before): remember it now, put it back after the render. */
@@ -110,6 +107,7 @@ export function GuideTour({ material, session, at, className = "", onProgress, o
   useEffect(() => {
     target.current = { session, at, done: false, seg: false };
     touched.current = false;
+    if (!session) return;
     let live = true;
     api
       .tourFocus(mid, session, null, at)
@@ -122,7 +120,9 @@ export function GuideTour({ material, session, at, className = "", onProgress, o
   }, [mid, session, at]);
 
   // the server's progress; leaving the mode (or the book) stops the work there
+  const found = !!session;
   useEffect(() => {
+    if (!found) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     const tick = () => {
@@ -152,35 +152,7 @@ export function GuideTour({ material, session, at, className = "", onProgress, o
       window.removeEventListener("pagehide", leave);
       api.tourPause(mid).catch(() => {});
     };
-  }, [mid, apply]);
-
-  // how far the 主題 to show first is, for the button's fill; the mode takes the screen once it is written (or failed)
-  const phase = useRef<{ key: string; since: number }>({ key: "", since: Date.now() });
-  useEffect(() => {
-    const measure = () => {
-      const v = viewRef.current;
-      const w = v?.windows.find((x) => x.session_id === target.current.session);
-      let key: string;
-      let p: number;
-      let ready = false;
-      const tp = w ? targetTopic(w, target.current.at) : null;
-      if (error && !v) [key, p, ready] = ["error", 1, true];
-      else if (!v) [key, p] = ["load", 0.15];
-      else if (!w) [key, p, ready] = ["gone", 1, true];
-      else if (w.status === "segmenting") [key, p, ready] = w.state === "failed" ? ["seg-failed", 1, true] : [`seg-${w.state}`, w.state === "working" ? 0.3 : 0.24, false];
-      else if (!tp) [key, p, ready] = ["empty", 1, true];
-      else if (tp.state === "done" || tp.state === "failed") [key, p, ready] = ["done", 1, true];
-      else [key, p] = [`guide-${tp.state}`, tp.state === "working" ? 0.6 : 0.55];
-      if (phase.current.key !== key) phase.current = { key, since: Date.now() };
-      const ms = Date.now() - phase.current.since;
-      if (key === "seg-working") p += 0.22 * creep(ms, 25_000);
-      if (key === "guide-working") p += 0.34 * creep(ms, 40_000);
-      report.current.onProgress?.(ready ? 1 : Math.min(p, 0.97), ready);
-    };
-    measure();
-    const timer = setInterval(measure, 1000);
-    return () => clearInterval(timer);
-  }, [view, error]);
+  }, [mid, apply, found]);
 
   // after a render: the column put back under the reader, or brought to the 主題 to show first
   useLayoutEffect(() => {
@@ -288,15 +260,21 @@ export function GuideTour({ material, session, at, className = "", onProgress, o
       onKeyDown={() => (touched.current = true)}
     >
       <div className="tour-col">
-        {view && view.windows.length > 0 && (
+        {session && view && view.windows.length > 0 && (
           <Edge side="before" end={view.first} busy={extending === "before"} />
         )}
         {error && <div className="tour-error" role="alert">{error}</div>}
-        {!view && !error && <div className="tour-sheet tour-wait"><Shimmer /></div>}
-        {view?.windows.map((w) => (
+        {(!session || (!view && !error)) && (
+          <article className="tour-sheet tour-pending is-working tour-wait">
+            {at !== null && <p className="tour-where">{pageOf(Math.max(1, at - guideSpan), Math.min(material.units.length || at, at + guideSpan))}</p>}
+            <p className="tour-status">{t("tour.opening")}</p>
+            <Shimmer />
+          </article>
+        )}
+        {session && view?.windows.map((w) => (
           <section key={w.session_id} className="tour-window" aria-label={pageOf(w.start, w.end)}>
             {w.status === "segmenting" ? (
-              <article className={`tour-sheet tour-pending ${w.state}`} data-key={`${w.session_id}:seg`}>
+              <article className={`tour-sheet tour-pending is-${w.state}`} data-key={`${w.session_id}:seg`}>
                 <p className="tour-where">{pageOf(w.start, w.end)}</p>
                 {w.state === "failed" ? (
                   <Failed text={w.error?.detail ?? t("tour.failed")} onRetry={() => retry(w.session_id, null)} />
@@ -326,14 +304,14 @@ export function GuideTour({ material, session, at, className = "", onProgress, o
             )}
           </section>
         ))}
-        {view?.creating && (
+        {session && view?.creating && (
           <article className="tour-sheet tour-pending working">
             <p className="tour-where">{pageOf(view.creating.start, view.creating.end)}</p>
             <p className="tour-status">{t("tour.opening")}</p>
             <Shimmer />
           </article>
         )}
-        {view && view.windows.length > 0 && <Edge side="after" end={view.last} busy={extending === "after"} />}
+        {session && view && view.windows.length > 0 && <Edge side="after" end={view.last} busy={extending === "after"} />}
       </div>
     </div>
   );
@@ -379,7 +357,7 @@ function Topic({ sid, topic, where, onRetry }: { sid: string; topic: TourTopic; 
   return (
     <article
       id={topicAnchor(sid, topic.index)}
-      className={`tour-sheet tour-topic ${g ? "written" : `tour-pending ${topic.state}`}`}
+      className={`tour-sheet tour-topic ${g ? "written" : `tour-pending is-${topic.state}`}`}
       lang={langOf(g)}
       data-key={`${sid}:${topic.index}`}
       data-topic={topic.index}
